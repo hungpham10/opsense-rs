@@ -1,0 +1,32 @@
+[package]
+name = "opsense-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints.rust]
+warnings = "deny"
+
+[features]
+default = []
+arrow = ["dep:arrow"]
+arrow-deps = ["arrow"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+config_crate = { package = "config", version = "0.15", default-features = false, features = ["toml"] }
+tokio = { workspace = true }
+async-trait = "0.1"
+opsense-libs = { path = "../opsense-libs" }
+opsense-model = { path = "../opsense-model" }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tracing = "0.1"
+
+# Store backends (only what remains after the "station is the only cache"
+# refactor: bounded in-memory LRU via opsense-libs; no duckdb/lmdb/arrow lake).
+futures = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+arrow = { workspace = true, optional = true }

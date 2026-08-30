@@ -1,0 +1,15 @@
+[package]
+name = "opsense-macros"
+version.workspace = true
+edition = "2024"
+rust-version = "1.85"
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.106"
+serde_derive_internals = "0.29"
+quote = { version = "1.0", default-features = false }
+syn = { version = "2.0", default-features = false, features = ["full", "extra-traits", "visit-mut", "visit", "proc-macro"] }

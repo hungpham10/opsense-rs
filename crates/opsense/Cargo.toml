@@ -1,0 +1,40 @@
+[package]
+name = "opsense"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Centralize site reliability engineer's daily activities"
+
+[lints.rust]
+warnings = "deny"
+
+[[bin]]
+name = "opsense"
+path = "src/main.rs"
+
+[dependencies]
+dotenvy = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+axum = "0.8"
+axum-prometheus = "0.10"
+tower = "0.5.3"
+tower-http = { version = "0.7.0", features = ["trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+sentry = { version = "0.49.1", features = ["tower-http"] }
+opentelemetry = { version = "0.32.0", features = ["metrics"] }
+opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio", "metrics"] }
+tracing-opentelemetry = "0.33.0"
+opsense-core = { path = "../opsense-core" }
+opsense-components = { path = "../opsense-components" }
+opsense-libs = { path = "../opsense-libs" }
+opsense-mcp = { path = "../opsense-mcp" }
+opsense-rhai = { path = "../opsense-rhai" }
+opsense-repl = { path = "../opsense-repl" }
+opsense-runner = { path = "../opsense-runner" }
+tonic = { workspace = true }
+opsense-session = { path = "../opsense-session" }

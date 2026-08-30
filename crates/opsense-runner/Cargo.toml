@@ -1,0 +1,24 @@
+[package]
+name = "opsense-runner"
+description = "Standalone execution worker: gRPC KernelRunner service over local kernel IPC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
+opsense-proto = { path = "../opsense-proto" }
+opsense-session = { path = "../opsense-session" }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tonic = { workspace = true }
+tracing = "0.1"
+
+[dev-dependencies]
+arrow = { workspace = true }

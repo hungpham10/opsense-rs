@@ -1,0 +1,24 @@
+# Opsense capacity-engine configuration.
+# See docs/PLAN.MD for the field reference.
+
+[engine]
+poll_interval_seconds = 60
+cache_block_seconds = 300
+cache_max_blocks = 288
+
+# Capacity per metric (unit depends on the metric: cores, GB, req/s, ...).
+[capacity]
+cpu_usage = 32.0
+mem_usage = 64.0
+
+[sources.vector]
+url = "http://vector:8686"
+# jq_filter is run through opsense_libs::jq::JsonQuery, which supports field
+# access (`.field`), array iteration (`[]`) and field selection
+# (`select(a, b, ...)`). It does NOT support `|` pipes or `{...}` object
+# literals, so the upstream MUST already emit observation-shaped objects, e.g.
+#   [{"ts": 1, "metric_id": "cpu_usage", "kind": "metric", "signal": "raw",
+#     "value": 12.5, "labels": {"instance": "a"}}]
+# This filter simply iterates an array under `.data`.
+jq_filter = ".data[]"
+metrics = ["cpu_usage", "mem_usage"]

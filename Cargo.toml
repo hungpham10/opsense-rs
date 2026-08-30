@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+	"crates/opsense",
+	"crates/opsense-libs",
+	"crates/opsense-core",
+	"crates/opsense-components",
+	"crates/opsense-mcp",
+	"crates/opsense-model",
+	"crates/opsense-rhai",
+	"crates/opsense-macros",
+	"crates/opsense-session",
+	"crates/opsense-repl",
+	"crates/opsense-proto",
+	"crates/opsense-kernel-echo",
+	"crates/opsense-runner",
+	"crates/opsense-kernel-python",
+	"crates/opsense-kernel-julia"
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/hungpham10/opsense-rs"
+homepage = "https://github.com/hungpham10/opsense-rs"
+authors = ["Hung <hung.pham10@icloud.com>"]
+
+[workspace.dependencies]
+axum = "0.8"
+dotenvy = "0.15.7"
+clap = { version = "4.5.57", features = ["derive"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+tokio = { version = "1.49.0", features = ["full"] }
+arrow = { version = "56", features = ["ipc", "json", "csv"] }
+parquet = { version = "56", features = ["arrow", "async"] }
+arrow-schema = "56"
+arrow-array = "56"
+reedline = "0.39"
+comfy-table = "7"
+plotters = { version = "0.3", features = ["terminal"] }
+uuid = { version = "1.12", features = ["v4", "v7", "serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+bytes = "1"
+prost = "0.14"
+tonic = "0.14"
+tokio-util = { version = "0.7", features = ["codec"] }
+async-trait = "0.1"
+futures-util = { version = "0.3", features = ["sink"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+redis = { version = "1.0", features = ["tokio-comp"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "mysql"] }
+lmdb-rkv = "0.14"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

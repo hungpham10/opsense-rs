@@ -1,0 +1,27 @@
+[package]
+name = "opsense-rhai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints.rust]
+warnings = "deny"
+
+[dependencies]
+async-trait = "0.1"
+opsense-core = { path = "../opsense-core" }
+opsense-components = { path = "../opsense-components" }
+opsense-libs = { path = "../opsense-libs" }
+opsense-macros = { path = "../opsense-macros" }
+opsense-model = { path = "../opsense-model" }
+rhai = { version = "1", features = ["sync", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { workspace = true }
+tracing = "0.1"
+typetag = "0.2"
+
+[dev-dependencies]
+async-trait = "0.1"
+tokio = { workspace = true }

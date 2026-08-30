@@ -1,0 +1,23 @@
+[package]
+name = "opsense-kernel-julia"
+description = "Julia analysis kernel sidecar: framed stdio protocol over a real Julia process (hand-rolled protobuf codec, zero required packages)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "opsense-kernel-julia"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
+anyhow = { workspace = true }
+arrow = { workspace = true }
+bytes = { workspace = true }
+opsense-proto = { path = "../opsense-proto" }
+tokio = { workspace = true }

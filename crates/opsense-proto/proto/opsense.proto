@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package opsense.kernel.v1;
+
+// Single source of truth for the kernel wire protocol. The same messages are
+// used on every boundary:
+//
+//   serve <-> runner : gRPC service `KernelRunner` (bottom of this file).
+//   host  <-> kernel : framed protocol over the kernel process stdio —
+//                      CONTROL frames carry protobuf-encoded `Envelope`s from
+//                      this file, ARROW frames carry one Arrow IPC stream
+//                      segment (schema + one RecordBatch) per frame.
+//
+// Frame layout (both directions): [tag u8][len u32 BE][payload]
+//   tag 0x01 CONTROL, tag 0x02 ARROW.
+
+// ---------- handshake / health ----------
+
+message Hello {
+  uint32 protocol_version = 1;
+  string client = 2;
+}
+
+message Welcome {
+  uint32 protocol_version = 1;
+  string kernel_name = 2;
+  string kernel_version = 3;
+}
+
+message PackageInfo {
+  string name = 1;
+  bool available = 2;
+  string version = 3;
+}
+
+message HealthRequest {}
+
+message HealthStatus {
+  bool ok = 1;
+  string kernel_name = 2;
+  string kernel_version = 3;
+  repeated PackageInfo packages = 4;
+  string detail = 5;
+}
+
+// ---------- session lifecycle ----------
+
+message SessionParams {
+  string session_id = 1;
+  // Extra environment for local kernels (ignored by the runner unless the
+  // kernel definition allows it).
+  map<string, string> env = 2;
+  bool allow_fs = 3;
+  bool allow_net = 4;
+  uint64 max_memory_mb = 5;
+  // Packages to probe and report in HealthStatus.
+  repeated string packages = 6;
+}
+
+message SessionHandle {
+  string session_id = 1;
+}
+
+message CloseRequest {
+  string session_id = 1;
+}
+
+message InterruptRequest {
+  string session_id = 1;
+  string request_id = 2;
+}
+
+message Ack {
+  bool ok = 1;
+  string error = 2;
+}
+
+// ---------- execution ----------
+
+message CodeRequest {
+  string request_id = 1;
+  string session_id = 2;
+  string code = 3;
+  // Dataset names pre-loaded into the namespace via SendDataset before this
+  // request runs.
+  repeated string input_names = 4;
+  uint64 timeout_ms = 5;
+}
+
+message DataFrame {
+  // Complete Arrow IPC stream (schema + batches).
+  bytes arrow_ipc = 1;
+  int64 rows = 2;
+  int64 cols = 3;
+  repeated string columns = 4;
+}
+
+message Artifact {
+  string name = 1;
+  string mime = 2;
+  bytes data = 3;
+}
+
+// Captured `result` value crossing back to the host.
+message Value {
+  oneof kind {
+    bool nothing = 1;   // nothing = true
+    string text = 2;
+    double number = 3;
+    bool flag = 4;
+    DataFrame dataframe = 5;
+    Artifact artifact = 6;
+    string json = 7;    // generic JSON blob for lists/dicts
+    bytes raw = 8;
+  }
+}
+
+message ErrorEvent {
+  // Stable taxonomy: "python_exception" | "timeout" | "cancelled" | ...
+  string kind = 1;
+  // Root cause preserved verbatim.
+  string message = 2;
+}
+
+message ExecEvent {
+  string request_id = 1;
+  oneof event {
+    string stdout_line = 2;
+    string stderr_line = 3;
+    Artifact artifact = 4;
+    DataFrame dataframe = 5;
+    ErrorEvent error = 6;
+    bool done = 7;
+    Value result_value = 8;
+  }
+}
+
+// ---------- dataset transfer ----------
+
+// Local path: host streams N ARROW frames, then sends CONTROL(DatasetHeader)
+// as the transfer terminator; the kernel answers with CONTROL(DatasetAck).
+// `dataset_ref` ties them together and becomes the variable name inside the
+// kernel. Data-before-header lets a sequential kernel consume the frames
+// without knowing the chunk count up front.
+message DatasetHeader {
+  string session_id = 1;
+  string dataset_ref = 2;
+  int64 rows = 3;
+  int64 cols = 4;
+  repeated string columns = 5;
+}
+
+message DatasetAck {
+  string dataset_ref = 1;
+  int64 rows = 2;
+  bool ok = 3;
+  string error = 4;
+}
+
+// gRPC-only wrapper for serve <-> runner streaming; the runner re-frames
+// these into DatasetHeader + ARROW frames toward the kernel.
+message DatasetChunk {
+  string session_id = 1;
+  string dataset_ref = 2;
+  uint64 seq = 3;
+  bool last = 4;
+  bytes arrow_ipc = 5;
+}
+
+// ---------- framed control envelope ----------
+
+// Graceful shutdown: kernel answers Ack(ok) then exits its main loop.
+message Shutdown {}
+
+message Envelope {
+  oneof msg {
+    Hello hello = 1;
+    Welcome welcome = 2;
+    SessionParams start_session = 3;
+    SessionHandle session_handle = 4;
+    CloseRequest close_request = 5;
+    InterruptRequest interrupt_request = 6;
+    Ack ack = 7;
+    CodeRequest code_request = 8;
+    ExecEvent exec_event = 9;
+    DatasetHeader dataset_header = 10;
+    DatasetAck dataset_ack = 11;
+    HealthRequest health_request = 12;
+    HealthStatus health_status = 13;
+    Value value = 14;
+    Shutdown shutdown = 15;
+  }
+}
+
+// ---------- runner service (serve <-> runner boundary) ----------
+
+service KernelRunner {
+  rpc StartSession(SessionParams) returns (SessionHandle);
+  rpc Execute(CodeRequest) returns (stream ExecEvent);
+  rpc SendDataset(stream DatasetChunk) returns (DatasetAck);
+  rpc Interrupt(InterruptRequest) returns (Ack);
+  rpc CloseSession(CloseRequest) returns (Ack);
+  rpc Health(HealthRequest) returns (HealthStatus);
+}
