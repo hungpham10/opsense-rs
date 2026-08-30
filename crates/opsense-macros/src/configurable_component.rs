@@ -54,6 +54,9 @@ pub fn configurable_component_impl(
     let mut extra_derives = Vec::new();
     let mut excluded_derives = HashSet::new();
     let mut sea_orm_opt_in = false;
+    // Tên bool field khiến component trở thành terminal (tự phục vụ dữ liệu,
+    // không cần node downstream), vd `terminal_field = "station"`.
+    let mut terminal_field: Option<syn::Ident> = None;
 
     if !attr.is_empty() {
         let attr_args =
@@ -80,6 +83,13 @@ pub fn configurable_component_impl(
                         excluded_derives.insert(ident.to_string());
                     }
                 }
+            } else if meta.path().is_ident("terminal_field")
+                && let Meta::NameValue(ref nv) = meta
+                && let syn::Expr::Lit(expr_lit) = &nv.value
+                && let syn::Lit::Str(lit) = &expr_lit.lit
+            {
+                terminal_field =
+                    Some(syn::Ident::new(&lit.value(), lit.span()));
             } else if meta.path().is_ident("sea_orm") {
                 // Opt-in via attribute (e.g. `#[sink(sea_orm)]`) rather than a
                 // macro-crate feature flag: a `cfg!(feature = ...)` inside a
@@ -200,6 +210,10 @@ pub fn configurable_component_impl(
         ),
     };
 
+    let terminal_field_impl = terminal_field
+        .map(|field| quote! { self.#field })
+        .unwrap_or_else(|| quote! { false });
+
     let output = quote! {
         #[derive(#(#base_derives),*)]
         #[serde(deny_unknown_fields)]
@@ -219,6 +233,10 @@ pub fn configurable_component_impl(
 
             fn component_type(&self) -> crate::vector::runtime::ComponentType {
                 #type_enum
+            }
+
+            fn is_terminal(&self) -> bool {
+                #terminal_field_impl
             }
 
             fn compare(&self, other: &dyn Component) -> bool {

@@ -122,6 +122,11 @@ pub trait Identify {
     fn clone_arc(&self) -> Arc<dyn Component>;
     fn as_any(&self) -> &dyn std::any::Any;
     fn component_type(&self) -> ComponentType;
+    /// True khi component tự phục vụ dữ liệu của chính nó (vd: đăng ký
+    /// station queryable qua MCP/HTTP) và không cần node downstream.
+    fn is_terminal(&self) -> bool {
+        false
+    }
     fn compare(&self, other: &dyn Component) -> bool;
 }
 

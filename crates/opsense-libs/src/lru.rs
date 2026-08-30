@@ -501,10 +501,12 @@ where
                 },
                 _ => (from_ts, to_ts),
             };
-            eprintln!("[GAP] fallback window ({fetch_from},{fetch_to})");
+
+            //eprintln!("[GAP] fallback window ({fetch_from},{fetch_to})");
+
             match fb.fetch(key, fetch_from, fetch_to).await {
                 Ok(value) => {
-                    eprintln!("[GAP] fallback returned");
+                    //eprintln!("[GAP] fallback returned");
                     // Gộp slice vừa fetch với dữ liệu đã cache (khi có hook
                     // merge) — backfill quá khứ không được ghi đè mất các điểm
                     // mới hơn đang có.
@@ -516,8 +518,8 @@ where
                     self.persist_point(key, &merged);
                     return Some(merged);
                 }
-                Err(e) => {
-                    eprintln!("[GAP] fallback fetch ({fetch_from},{fetch_to}) failed: {e}");
+                Err(_e) => {
+                    // eprintln!("[GAP] fallback fetch ({fetch_from},{fetch_to}) failed: {e}");
                     // Backfill lỗi (origin chết, cửa sổ quá lớn…) không được
                     // phép xoá sạch kết quả query: trả phần dữ liệu đang có,
                     // query phía trên tự lọc theo cửa sổ.

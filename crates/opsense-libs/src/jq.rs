@@ -9,11 +9,39 @@ pub enum Operator {
     Access(usize),
     Iter,
     Select(Vec<String>),
+    /// Climb one level to the element's parent (path token `^`). Requires
+    /// ancestry tracking in `pick`/`execute`, enabling e.g.
+    /// `series[].values[].^.^.metric` to reach sibling fields of the array
+    /// an item was iterated from.
+    Parent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonQuery {
     operators: Vec<Operator>,
+}
+
+/// One element in flight during a query: the current value plus the chain of
+/// ancestors it was reached through (root first, immediate parent last).
+/// `Operator::Parent` pops that chain; every descent pushes the container it
+/// matched inside.
+struct Frame<V> {
+    val: V,
+    parents: Vec<V>,
+}
+
+impl<V: Clone> Frame<V> {
+    fn child(&self, val: V) -> Self {
+        let mut parents = self.parents.clone();
+        parents.push(self.val.clone());
+        Self { val, parents }
+    }
+
+    fn parent(&self) -> Option<Self> {
+        let mut parents = self.parents.clone();
+        let val = parents.pop()?;
+        Some(Self { val, parents })
+    }
 }
 
 impl JsonQuery {
@@ -28,6 +56,7 @@ impl JsonQuery {
         while let Some(c) = chars.next() {
             match c {
                 '.' => continue,
+                '^' => operators.push(Operator::Parent),
                 '[' => {
                     let mut content = String::new();
                     let mut found_close = false;
@@ -77,38 +106,46 @@ impl JsonQuery {
     }
 
     pub fn pick<'a>(&self, data: &'a Value) -> Vec<&'a Value> {
-        let mut collection = vec![data];
+        let mut collection = vec![Frame {
+            val: data,
+            parents: Vec::new(),
+        }];
 
         for op in &self.operators {
             let mut next_collection = Vec::new();
             for item in collection {
                 match op {
                     Operator::Match(field) => {
-                        if let Some(v) = item.get(field) {
-                            next_collection.push(v);
+                        if let Some(v) = item.val.get(field) {
+                            next_collection.push(item.child(v));
                         }
                     }
                     Operator::Access(index) => {
-                        if let Some(v) = item.get(*index) {
-                            next_collection.push(v);
-                        } else if let Some(v) = item.get(index.to_string()) {
-                            next_collection.push(v);
+                        if let Some(v) = item.val.get(*index) {
+                            next_collection.push(item.child(v));
+                        } else if let Some(v) = item.val.get(index.to_string()) {
+                            next_collection.push(item.child(v));
                         }
                     }
                     Operator::Iter => {
-                        if let Some(arr) = item.as_array() {
+                        if let Some(arr) = item.val.as_array() {
                             for v in arr {
-                                next_collection.push(v);
+                                next_collection.push(item.child(v));
                             }
-                        } else if let Some(obj) = item.as_object() {
+                        } else if let Some(obj) = item.val.as_object() {
                             for v in obj.values() {
-                                next_collection.push(v);
+                                next_collection.push(item.child(v));
                             }
                         } else {
                             println!(
                                 "Warning: Cannot iterate over non-array/object value: {:?}",
-                                item
+                                item.val
                             );
+                        }
+                    }
+                    Operator::Parent => {
+                        if let Some(p) = item.parent() {
+                            next_collection.push(p);
                         }
                     }
                     _ => {}
@@ -119,36 +156,39 @@ impl JsonQuery {
                 break;
             }
         }
-        collection
+        collection.into_iter().map(|f| f.val).collect()
     }
 
     pub fn execute(&self, data: &Value) -> Vec<Value> {
-        let mut collection = vec![data.clone()];
+        let mut collection = vec![Frame {
+            val: data.clone(),
+            parents: Vec::new(),
+        }];
 
         for op in &self.operators {
             let mut next_collection = Vec::new();
             for item in collection {
                 match op {
                     Operator::Match(field) => {
-                        if let Some(v) = item.get(field) {
-                            next_collection.push(v.clone());
+                        if let Some(v) = item.val.get(field) {
+                            next_collection.push(item.child(v.clone()));
                         }
                     }
                     Operator::Access(index) => {
-                        if let Some(v) = item.get(*index) {
-                            next_collection.push(v.clone());
-                        } else if let Some(v) = item.get(index.to_string()) {
-                            next_collection.push(v.clone());
+                        if let Some(v) = item.val.get(*index) {
+                            next_collection.push(item.child(v.clone()));
+                        } else if let Some(v) = item.val.get(index.to_string()) {
+                            next_collection.push(item.child(v.clone()));
                         }
                     }
                     Operator::Iter => {
-                        if let Some(arr) = item.as_array() {
+                        if let Some(arr) = item.val.as_array() {
                             for v in arr {
-                                next_collection.push(v.clone());
+                                next_collection.push(item.child(v.clone()));
                             }
-                        } else if let Some(obj) = item.as_object() {
+                        } else if let Some(obj) = item.val.as_object() {
                             for v in obj.values() {
-                                next_collection.push(v.clone());
+                                next_collection.push(item.child(v.clone()));
                             }
                         }
                     }
@@ -156,11 +196,19 @@ impl JsonQuery {
                     Operator::Select(fields) => {
                         let mut new_obj = serde_json::Map::new();
                         for field in fields {
-                            if let Some(v) = item.get(field) {
+                            if let Some(v) = item.val.get(field) {
                                 new_obj.insert(field.clone(), v.clone());
                             }
                         }
-                        next_collection.push(Value::Object(new_obj));
+                        next_collection.push(Frame {
+                            val: Value::Object(new_obj),
+                            parents: item.parents,
+                        });
+                    }
+                    Operator::Parent => {
+                        if let Some(p) = item.parent() {
+                            next_collection.push(p);
+                        }
                     }
                 }
             }
@@ -169,7 +217,7 @@ impl JsonQuery {
                 break;
             }
         }
-        collection
+        collection.into_iter().map(|f| f.val).collect()
     }
 }
 
@@ -330,6 +378,42 @@ mod tests {
         assert_eq!(result_iter[0], json!(1));
         assert_eq!(result_iter[1], json!(2));
         assert_eq!(result_iter[2], json!(3));
+    }
+
+    #[test]
+    fn test_parent_climb_to_sibling_field() {
+        let data = json!({
+            "series": [
+                {"metric": {"instance": "a:1"}, "values": [[1, "1"], [2, "2"]]},
+                {"metric": {"instance": "b:2"}, "values": [[3, "3"]]}
+            ]
+        });
+        // Từ từng phần tử của `values`, `^^` climb qua mảng values về series cha
+        let query = JsonQuery::parse("series[].values[].^.^.metric.instance").unwrap();
+        assert_eq!(
+            query.execute(&data),
+            vec![json!("a:1"), json!("a:1"), json!("b:2")]
+        );
+    }
+
+    #[test]
+    fn test_single_parent_from_array_element() {
+        // `^` một lần từ phần tử mảng con về đúng mảng chứa nó
+        let data = json!({"points": [[1, "x"], [2, "y"]]});
+        let query = JsonQuery::parse("points[].^.len").unwrap();
+        assert!(query.execute(&data).is_empty()); // mảng không có field "len"
+        let query2 = JsonQuery::parse("points[].^").unwrap();
+        let result = query2.execute(&data);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], json!([[1, "x"], [2, "y"]]));
+    }
+
+    #[test]
+    fn test_parent_at_root_is_noop() {
+        let data = json!({"a": 1});
+        let query = JsonQuery::parse("^.a").unwrap();
+        // `^` tại root không có cha để climb → collection rỗng, path chết
+        assert!(query.execute(&data).is_empty());
     }
 
     #[test]

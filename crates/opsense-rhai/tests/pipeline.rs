@@ -20,7 +20,7 @@ use opsense_core::source::{SourceError, TelemetrySource};
 use opsense_core::Context;
 use opsense_core::{Stage, Watermarks};
 use opsense_model::{Observation, Signal, TelemetryKind};
-use opsense_rhai::RhaiTransform;
+use opsense_rhai::{RhaiTransform, ScriptSource};
 
 fn moving_avg_script_path() -> String {
     // crates/opsense-rhai -> repo root -> scripts/
@@ -149,6 +149,7 @@ fn rhai_component_deserializes_from_config() {
         "output_stage": "Raw",
         "write_lru": false,
         "write_store": true,
+        "params": {"factor": 2, "label": "peak"},
     });
     let parsed: Box<dyn Component> =
         serde_json::from_value(full).expect("every documented field must parse");
@@ -202,4 +203,68 @@ async fn missing_script_source_errors_cleanly() {
     let message = outcome.unwrap_err().to_string();
     assert!(message.contains("exactly one of"), "unexpected: {message}");
     while rx_event.try_recv().is_ok() {}
+}
+
+/// Node `params` reach the script as `param_<name>` globals and the pipeline
+/// config's resolved `[attributes]` are readable via `attr(name)` / `attrs()`.
+#[tokio::test]
+async fn rhai_script_receives_params_and_attributes() {
+    let mut attributes = std::collections::BTreeMap::new();
+    attributes.insert("env".to_string(), "prod".to_string());
+
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("factor".to_string(), serde_json::json!(3));
+    params.insert("label".to_string(), serde_json::json!("peak"));
+
+    let out = opsense_rhai::call_process_with(
+        ScriptSource::Inline(
+            r#"
+            fn process(observations) {
+                let f = param_factor;
+                [
+                    #{ scaled: observations[0].value * f,
+                       tag: param_label,
+                       env: attr("env"),
+                       missing: attr("nope"),
+                       all: attrs()["env"] },
+                ];
+            }
+            "#
+            .into(),
+        ),
+        serde_json::json!([{ "value": 2.0 }]),
+        params,
+        attributes,
+    )
+    .await
+    .expect("script must receive params and attributes");
+
+    let item = out.into_iter().next().expect("one result");
+    assert_eq!(item["scaled"], serde_json::json!(6.0));
+    assert_eq!(item["tag"], serde_json::json!("peak"));
+    assert_eq!(item["env"], serde_json::json!("prod"));
+    assert_eq!(item["all"], serde_json::json!("prod"));
+    // Unknown attribute resolves to unit → JSON null.
+    assert!(item["missing"].is_null());
+
+    // An invalid param name is rejected before the script ever runs.
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("bad name".to_string(), serde_json::json!(1));
+    assert!(opsense_rhai::call_process_with(
+        ScriptSource::Inline("fn process(o) { o }".into()),
+        serde_json::json!([]),
+        params,
+        std::collections::BTreeMap::new(),
+    )
+    .await
+    .is_err());
+
+    // Without params the legacy two-arg entry point still works unchanged.
+    let out = opsense_rhai::call_process(
+        ScriptSource::Inline("fn process(o) { o }".into()),
+        serde_json::json!([{ "value": 1.0 }]),
+    )
+    .await
+    .expect("legacy call path must be unchanged");
+    assert_eq!(out[0]["value"], serde_json::json!(1.0));
 }

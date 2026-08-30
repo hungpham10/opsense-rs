@@ -1,127 +1,73 @@
-# Opsense example — pull DISK metrics from the public Prometheus demo
-#
-# Source: https://prometheus.demo.prometheus.io (live scrape of the demo
-# cluster; job="node" là node_exporter).
-#
-# Run from the REPO ROOT:
-#
-#   cargo build
-#   OPSENSE_CONFIG=examples/prometheus-demo/config.toml \
-#   GATEWAY_LISTENER=http GATEWAY_ADDR=127.0.0.1:8123 \
-#   ./target/debug/opsense serve
-#
-# Mỗi 20s cửa sổ trượt và chỉ fetch delta; chu kỳ đầu backfill
-# initial_lookback_secs. Hai node chạy SONG SONG chung clock:
-#   - disk-capacity : node_filesystem_size_bytes   (dung lượng, bytes)
-#   - disk-usage    : 1 - avail/size               (tỉ lệ sử dụng 0..1)
-#
-# Mapping response → observations là KHAI BÁO thuần (`items` + `fields`,
-# qua opsense_libs::jq) — không cần script. Engine jq chỉ hỗ trợ: truy cập
-# trường (`.field`), index số ("0", "1"), lặp mảng (`[]`) và
-# `select(a, b, ...)`; không có pipe `|` hay object literal.
-#
-# Mỗi node lọc đúng MỘT series (mountpoint="/") rồi đóng dấu `metric_id` +
-# `labels` bằng `constants` — jq map không biết label từng series, muốn nhiều
-# series thì tách thành nhiều node http_source (mỗi node một query + một bộ
-# constants), hoặc để body observation-shape sẵn (bỏ `items`/`fields`).
-
-[engine]
-poll_interval_seconds = 3600
-cache_block_seconds = 300
-cache_max_blocks = 288
-
-# Required by config validation: metric -> max capacity for later analysis.
-[capacity]
-disk_capacity = 52591026176.0   # mountpoint "/" trên demo box (~49 GB)
-disk_usage_ratio = 1.0
-up = 1.0
-
+# Test http_source với Prometheus demo — chạy riêng, không đụng config.toml
 [attributes]
 prom_url = "https://prometheus.demo.prometheus.io"
 
-[storage]
-backend = "memory"
+[capacity]
+up = 1.0
 
 [[pipeline.components]]
 type = "clock_source"
 id = "clock"
-interval_secs = 20
-
-# ---- Disk capacity (bytes, mountpoint "/") ---------------------------------
+interval_secs = 30
 
 [[pipeline.components]]
 type = "http_source"
-id = "disk-capacity"
+id = "prom-explore"
 inputs = ["clock"]
 url = "{{prom_url}}/api/v1/query_range"
 initial_lookback_secs = 900
 timeout_secs = 30
-
-# Đi xuống từng sample của matrix: data.result[].values[] → [ts, "value"].
+station = true
 items = "data.result[].values[]"
 
-[pipeline.components.fields]
-ts = { query = "0", cast_to = "i64" }
-value = { query = "1", cast_to = "f64" }
+   [pipeline.components.fields]
+   ts = { query = "0", cast_to = "i64" }
+   value = { query = "1", cast_to = "f64" }
+   # `^` climb từ item [ts, value] qua mảng `values` về series cha để lấy labels
+   labels = { query = "^.^.metric" }
+   
+   [pipeline.components.constants]
+   metric_id = "up"
+   labels = { source = "prometheus-demo" }
 
-[pipeline.components.constants]
-metric_id = "disk_capacity"
-labels = { mountpoint = "/", job = "node" }
+   [pipeline.components.params]
+   query = "up"
+   start = "{{from_ts}}"
+   end = "{{to_ts}}"
+   step = "60"
 
-[pipeline.components.params]
-query = 'node_filesystem_size_bytes{fstype!="tmpfs",mountpoint="/"}'
-start = "{{from_ts}}"
-end = "{{to_ts}}"
-step = "60"
-
-[[pipeline.components]]
-type = "timeseries_station_sink"
-id = "disk-capacity-persist"
-inputs = ["disk-capacity"]
-stage = "raw"
-bind = "127.0.0.1:9291"
-
-# ---- Disk usage (ratio 0..1, mountpoint "/") -------------------------------
-
+# Catalog metric name từ Prometheus demo.
 [[pipeline.components]]
 type = "http_source"
-id = "disk-usage"
+id = "metric-catalog"
 inputs = ["clock"]
-url = "{{prom_url}}/api/v1/query_range"
-initial_lookback_secs = 900
+url = "{{prom_url}}/api/v1/label/__name__/values"
+station_kind = "category"
+bind = "127.0.0.1:9290"
 timeout_secs = 30
+items = "data[]"
 
-items = "data.result[].values[]"
+   [pipeline.components.fields]
+   metric_id = { query = "." }
+   [pipeline.components.constants]
+   value = 0
 
-[pipeline.components.fields]
-ts = { query = "0", cast_to = "i64" }
-value = { query = "1", cast_to = "f64" }
-
-[pipeline.components.constants]
-metric_id = "disk_usage_ratio"
-labels = { mountpoint = "/", job = "node" }
-
-[pipeline.components.params]
-query = 'label_replace(1 - (node_filesystem_avail_bytes{fstype!="tmpfs",mountpoint="/"} / node_filesystem_size_bytes{fstype!="tmpfs",mountpoint="/"}), "__name__", "disk_usage_ratio", "", "")'
-start = "{{from_ts}}"
-end = "{{to_ts}}"
-step = "60"
+# Catalog instance/container: category_station_transform bóc label từ
+# observations của prom-explore (labels lấy bằng jq `^` ở trên).
+# Prometheus demo không có label `container` nên container-catalog dùng `job`.
+[[pipeline.components]]
+type = "category_station_transform"
+id = "instance-catalog"
+inputs = ["prom-explore"]
+key_field = "instance"
 
 [[pipeline.components]]
-type = "timeseries_station_sink"
-id = "disk-usage-persist"
-inputs = ["disk-usage"]
-stage = "raw"
-bind = "127.0.0.1:9292"
+type = "category_station_transform"
+id = "container-catalog"
+inputs = ["prom-explore"]
+key_field = "job"
 
-# Body observation-shape sẵn (array object chuẩn Opsense)? Bỏ trống
-# `items` + `fields` — node parse thẳng qua observations_from_body.
-#
-# Trạm timeseries nội bộ để query lại bằng tiếng Prometheus:
-#
-# [[pipeline.components]]
-# type = "station_sink"
-# id = "tsdb"
-# inputs = ["disk-usage"]
-# bind = "127.0.0.1:9190"
-# stage = "processed"
+[[pipeline.components]]
+type = "null"
+id = "null"
+inputs = ["prom-explore", "metric-catalog", "instance-catalog", "container-catalog"]

@@ -111,8 +111,8 @@ fn acquire(script: &ScriptSource) -> Result<Arc<rhai::AST>, String> {
     tracing::info!("compiling rhai script ({})", script.cache_key());
     let text = script_text(script)?;
     let ast = Arc::new(
-        engine()
-            .compile(&text)
+        ENGINE
+            .with_borrow(|eng| eng.compile(&text))
             .map_err(|e| format!("rhaiscript compile error: {e}"))?,
     );
     // A script without `process` fails at first call with a clear message;
@@ -128,7 +128,17 @@ fn acquire(script: &ScriptSource) -> Result<Arc<rhai::AST>, String> {
 
 /// Sandboxed engine: pure data ops plus read-only history lookups into
 /// stations registered by `station_sink`, bounded work.
-fn engine() -> rhai::Engine {
+///
+/// One engine per blocking thread (`thread_local`): the thread pool reuses
+/// threads across batches, so the tool registrations (`register_all`) are
+/// paid once per thread instead of per `process` call, while distinct threads
+/// never contend — there is deliberately no `Mutex` around the engine, since
+/// `call_fn` needs `&mut` and serializing script runs across pipeline nodes
+/// would serialize the whole pipeline. Per-call state (the wall-clock budget
+/// via `on_progress`, the attribute snapshot) is installed onto the thread's
+/// engine right before evaluation; each blocking thread runs one script at a
+/// time, so those installs never race.
+fn thread_engine() -> std::cell::RefCell<rhai::Engine> {
     let mut eng = rhai::Engine::new();
     eng.set_max_operations(1_000_000);
     eng.set_max_array_size(100_000);
@@ -138,25 +148,13 @@ fn engine() -> rhai::Engine {
     // these bounds still stop pathological nesting.
     eng.set_max_expr_depths(256, 256);
 
-    // Real wall-clock budget: a runaway or deadlocked `process` cannot pin the
-    // blocking worker forever. `on_progress` is polled during evaluation and
-    // aborts the script once the budget elapses — unlike the outer
-    // `tokio::time::timeout` in `call_process`, which only cancels the *wait*
-    // and never stops the thread. (A script stuck inside a sync native tool
-    // that never yields to the engine still can't be aborted — acceptable.)
-    let deadline = std::time::Instant::now() + rhai_timeout();
-    eng.on_progress(move |_| {
-        if std::time::Instant::now() <= deadline {
-            None
-        } else {
-            // Past budget: abort the script (cooperative cancellation).
-            Some(rhai::Dynamic::UNIT)
-        }
-    });
-
     // Every script-facing native function lives in one place: `tools`.
     crate::tools::register_all(&mut eng);
-    eng
+    std::cell::RefCell::new(eng)
+}
+
+thread_local! {
+    static ENGINE: std::cell::RefCell<rhai::Engine> = thread_engine();
 }
 
 /// Wall-clock budget for any single `process` call, overridable via
@@ -172,13 +170,8 @@ fn rhai_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// Run one batch through the script's `process(observations)` function off
-/// the async runtime. Input/output are JSON arrays of observations.
-///
-/// The script runs on a blocking thread (`spawn_blocking`) so its CPU-bound
-/// work never stalls async tasks. The wall-clock budget is enforced for real
-/// by the engine's `on_progress` abort (see [`engine`]); the outer
-/// `tokio::time::timeout` is a backstop.
+/// Run one batch through the script's `process(observations)` function with no
+/// node params and no config attributes (no `param_*` globals, `attr` absent).
 ///
 /// Errors are plain strings: a broken script must not abort the pipeline —
 /// the caller logs, keeps its watermark cursor and retries the window on the
@@ -187,14 +180,71 @@ pub async fn call_process(
     script: ScriptSource,
     input_json: serde_json::Value,
 ) -> Result<Vec<serde_json::Value>, String> {
+    call_process_with(script, input_json, Default::default(), Default::default()).await
+}
+
+/// [`call_process`] with the node's `params` config table and the pipeline
+/// config's resolved `[attributes]` passed through to the script.
+///
+/// `params` are seeded into the scope as `param_<name>` globals;
+/// `attributes` are exposed read-only via the native `attr(name)` /
+/// `attrs()` lookups. Both are copied per call, so a script can never mutate
+/// pipeline state.
+///
+/// The script runs on a blocking thread (`spawn_blocking`) so its CPU-bound
+/// work never stalls async tasks. The wall-clock budget is enforced for real
+/// by the engine's `on_progress` abort; the outer `tokio::time::timeout` is a
+/// backstop that only cancels the *wait*, never the thread.
+pub async fn call_process_with(
+    script: ScriptSource,
+    input_json: serde_json::Value,
+    params: std::collections::BTreeMap<String, serde_json::Value>,
+    attributes: std::collections::BTreeMap<String, String>,
+) -> Result<Vec<serde_json::Value>, String> {
     let join = tokio::task::spawn_blocking(move || {
         let ast = acquire(&script)?;
         let arg =
             rhai::serde::to_dynamic(&input_json).map_err(|e| format!("input conversion: {e}"))?;
 
-        let result = engine()
-            .call_fn(&mut rhai::Scope::new(), &ast, "process", (arg,))
-            .map_err(|e| format!("script error: {e}"))?;
+        let mut scope = rhai::Scope::new();
+        for (name, value) in &params {
+            // Only identifier-shaped names reach the scope — anything else
+            // would make the script unreachable or the call fail outright.
+            let valid =
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid {
+                return Err(format!("invalid param name `{name}` (use [A-Za-z0-9_])"));
+            }
+            let dynamic = rhai::serde::to_dynamic(value)
+                .map_err(|e| format!("param `{name}` conversion: {e}"))?;
+            scope.push_dynamic(format!("param_{name}"), dynamic);
+        }
+
+        // Install this call's wall-clock budget and attribute snapshot onto
+        // the thread's engine (safe: one script runs per blocking thread).
+        //
+        // Real wall-clock budget: a runaway or deadlocked `process` cannot pin
+        // the blocking worker forever. `on_progress` is polled during
+        // evaluation and aborts the script once the budget elapses — unlike
+        // the outer `tokio::time::timeout`, which only cancels the *wait* and
+        // never stops the thread. (A script stuck inside a sync native tool
+        // that never yields to the engine still can't be aborted —
+        // acceptable.)
+        let deadline = std::time::Instant::now() + rhai_timeout();
+
+        let result = ENGINE.with_borrow_mut(|eng| {
+            eng.on_progress(move |_| {
+                if std::time::Instant::now() <= deadline {
+                    None
+                } else {
+                    // Past budget: abort the script (cooperative cancellation).
+                    Some(rhai::Dynamic::UNIT)
+                }
+            });
+            crate::tools::register_attributes(eng, attributes);
+            eng.call_fn(&mut scope, &ast, "process", (arg,))
+                .map_err(|e| format!("script error: {e}"))
+        })?;
 
         let value: serde_json::Value =
             rhai::serde::from_dynamic(&result).map_err(|e| format!("result conversion: {e}"))?;

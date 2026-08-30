@@ -98,4 +98,19 @@ async fn disk_spike_script_alert_flow() {
     .await
     .expect("saturated case");
     assert_eq!(out[0]["labels"]["alert"], serde_json::json!("saturated"));
+
+    // Node `params` override the script's built-in threshold defaults:
+    // raising `saturated` to 0.97 makes the 0.95 point a spike instead.
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("saturated".to_string(), serde_json::json!(0.97));
+    params.insert("spike_delta".to_string(), serde_json::json!(0.05));
+    let out = opsense_rhai::call_process_with(
+        script(),
+        serde_json::Value::Array(vec![input_point(now, 0.95)]),
+        params,
+        std::collections::BTreeMap::new(),
+    )
+    .await
+    .expect("script runs with tuned params");
+    assert_eq!(out[0]["labels"]["alert"], serde_json::json!("spike"));
 }

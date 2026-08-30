@@ -966,7 +966,8 @@ impl Runtime {
             if !matches!(
                 adds[idx].component_type(),
                 ComponentType::Sink | ComponentType::Output
-            ) && !will_be_linked.contains(&adds[idx].id())
+            ) && !adds[idx].is_terminal()
+                && !will_be_linked.contains(&adds[idx].id())
             {
                 return Err(Error::new(
                     ErrorKind::InvalidData,

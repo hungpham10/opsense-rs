@@ -27,7 +27,7 @@ mod runtime;
 mod tools;
 mod transform;
 
-pub use runtime::{call_process, ScriptSource};
+pub use runtime::{call_process, call_process_with, ScriptSource};
 pub use transform::RhaiTransform;
 
 use std::sync::Arc;
@@ -50,7 +50,13 @@ impl opsense_core::script::ScriptRunner for RhaiScriptRunner {
         } else {
             ScriptSource::File(std::path::PathBuf::from(script_path))
         };
-        call_process(source, input).await
+        call_process_with(
+            source,
+            input,
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .await
     }
 }
 

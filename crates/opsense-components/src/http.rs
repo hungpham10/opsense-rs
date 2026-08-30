@@ -32,6 +32,11 @@
 //! - `constants` — static key/values merged into every observation (e.g. a fixed
 //!   `metric_id` or `labels`).
 //!
+//! Field paths may use `^` to climb from the item to its parent container —
+//! e.g. Prometheus range responses with `items = "data.result[].values[]"`:
+//! each item is a `[ts, value]` pair whose grandparent is the series object,
+//! so `labels = { query = "^.^.metric" }` picks the series labels.
+//!
 //! The built object is turned into an [`opsense_core::source::observation_from_value`],
 //! so any field the core model understands works without Rust changes.
 //!
@@ -75,7 +80,9 @@ pub struct FieldSpec {
     pub cast_to: Option<CastType>,
 }
 
-#[transform]
+/// `station = true` biến node thành terminal: nó tự phục vụ dữ liệu qua
+/// station/MCP/HTTP nên không bắt buộc phải có node downstream.
+#[transform(terminal_field = "station")]
 pub struct HttpSource {
     pub id: String,
     pub inputs: Vec<String>,

@@ -12,6 +12,7 @@
 //! The script comes from `script` (inline) or `script_path` (.rhai file,
 //! recompiled on change). Exactly one of the two must be set.
 
+use std::collections::BTreeMap;
 use std::io::Error;
 use std::path::PathBuf;
 
@@ -47,6 +48,10 @@ pub struct RhaiTransform {
     /// Also append the script output to the persistent store.
     #[serde(default)]
     pub write_store: bool,
+    /// Config parameters exposed to the script as `param_<name>` global
+    /// variables (e.g. `factor` becomes `param_factor`).
+    #[serde(default)]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_input_stage() -> Stage {
@@ -74,6 +79,7 @@ impl RhaiTransform {
             output_stage: default_output_stage(),
             write_lru: true,
             write_store: false,
+            params: BTreeMap::new(),
         }
     }
 
@@ -89,6 +95,7 @@ impl RhaiTransform {
             output_stage: default_output_stage(),
             write_lru: true,
             write_store: false,
+            params: BTreeMap::new(),
         }
     }
 
@@ -165,7 +172,13 @@ impl RhaiTransform {
         }
 
         let input_json = serde_json::to_value(&batch).map_err(|e| e.to_string())?;
-        let items = crate::call_process(source.clone(), input_json).await?;
+        let items = crate::call_process_with(
+            source.clone(),
+            input_json,
+            self.params.clone(),
+            (*ctx.attributes()).clone(),
+        )
+        .await?;
 
         let mut processed = Vec::with_capacity(items.len());
         for item in items {

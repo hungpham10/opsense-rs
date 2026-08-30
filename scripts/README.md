@@ -110,6 +110,37 @@ Rồi thao tác:
 Xem thêm ví dụ: [`scripts/moving_avg.rhai`](moving_avg.rhai) — batch mean theo
 metric, phát `<metric>_mean`.
 
+## Truyền cấu hình vào script (`params` + `[attributes]`)
+
+Node `rhai_transform` nhận cấu hình từ config.toml qua hai kênh:
+
+- `params` của node — mỗi cặp key/value thành biến toàn cục `param_<tên>`
+  (vd `params.factor = 3` → `param_factor`). Tên chỉ gồm `[A-Za-z0-9_]`.
+- `[attributes]` của config (override bằng `OPSENSE_ATTR_<TÊN_HOA>`) — đọc
+  bằng `attr("tên")` (trả `()` nếu không có) hoặc `attrs()` (cả map).
+
+```toml
+[[pipeline.components]]
+type = "rhai_transform"
+id = "disk-alert"
+inputs = ["disk-usage"]
+script_path = "scripts/disk_spike_check.rhai"
+[pipeline.components.params]
+saturated = 0.9
+```
+
+```rhai
+fn process(observations) {
+    let saturated = 0.9;
+    try { saturated = param_saturated } catch { 0.9 };  // fallback mặc định
+    let env = attr("env");
+    // ...
+}
+```
+
+Xem ví dụ đầy đủ: [`scripts/disk_spike_check.rhai`](disk_spike_check.rhai),
+[`scripts/disk_usage_grid.rhai`](disk_usage_grid.rhai).
+
 ## Cào API ngoài bằng `http_source`
 
 Node HTTP generic khai báo request dạng **template** — URL, header, query param

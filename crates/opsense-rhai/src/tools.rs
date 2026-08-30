@@ -28,6 +28,31 @@ pub fn register_all(eng: &mut rhai::Engine) {
     register_text_index_ops(eng);
 }
 
+/// Install the per-call config lookups: `attr(name)` (value or `()` when the
+/// attribute is absent) and `attrs()` (the whole map, as a Rhai `Map` so
+/// scripts can index it). Attributes come from the pipeline config's
+/// `[attributes]` table with `OPSENSE_ATTR_*` env overrides resolved — they
+/// are copied in per `process` call, so scripts see a read-only snapshot.
+pub fn register_attributes(
+    eng: &mut rhai::Engine,
+    attributes: std::collections::BTreeMap<String, String>,
+) {
+    let attrs = std::sync::Arc::new(attributes);
+    let attrs2 = attrs.clone();
+    eng.register_fn("attr", move |name: &str| -> rhai::Dynamic {
+        attrs
+            .get(name)
+            .map(|v| rhai::Dynamic::from(v.clone()))
+            .unwrap_or(rhai::Dynamic::UNIT)
+    });
+    eng.register_fn("attrs", move || -> rhai::Map {
+        attrs2
+            .iter()
+            .map(|(k, v)| (k.clone().into(), rhai::Dynamic::from(v.clone())))
+            .collect()
+    });
+}
+
 // ---------------------------------------------------------------------------
 // pattern / catalog text indexes
 // ---------------------------------------------------------------------------
