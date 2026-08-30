@@ -1,0 +1,114 @@
+//! `HttpSource` với `station_kind = "category"`: batch fetch được index vào
+//! catalog station của node (key/value), idempotent per key qua các chu kỳ
+//! re-fetch, và đọc được qua `search_entries`/`entry_count` (MCP/HTTP cùng
+//! đường registry này).
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use opsense_components::vector::runtime::{Component, Event, Runtime};
+use opsense_components::{new_station_registry, ClockSource, CollectorSink, HttpSource, StationKind, OpsenseContext};
+use opsense_core::collector::Collector;
+use opsense_core::registry;
+use opsense_core::{Watermarks, Station};
+
+const BODY: &str =
+    r#"[{"ts":1700000001,"metric_id":"api_rps","kind":"metric","signal":"rate","value":42.0}]"#;
+
+/// Mock trả BODY cho mọi request (tái dùng cách của `http_station.rs`).
+async fn spawn_mock(body: &'static str) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let body = body.to_string();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        buf.clear();
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+fn context() -> Arc<OpsenseContext> {
+    Arc::new(OpsenseContext::new(
+        Arc::new(Collector::new(vec![])),
+        Watermarks::new(),
+        Arc::new(BTreeMap::new()),
+        new_station_registry(),
+    ))
+}
+
+use std::sync::Arc;
+
+async fn run_source(id: &str, addr: std::net::SocketAddr) {
+    let ctx = context();
+    let mut fetch = HttpSource::new(id, &["clock"], &format!("http://{addr}/metrics"));
+    fetch.station_kind = StationKind::Category;
+
+    let mut drain = CollectorSink::new();
+    drain.id = format!("{id}-drain");
+    drain.inputs = vec![id.to_string()];
+
+    let mut runtime = Runtime::new();
+    runtime.set_context(ctx);
+    let components: Vec<Arc<dyn Component>> = vec![
+        Arc::new(ClockSource::new(Duration::from_millis(50))),
+        Arc::new(fetch),
+        Arc::new(drain),
+    ];
+    runtime.reload(components).expect("valid graph");
+    let _handle = runtime.start(|_event: Event| async {}).expect("start");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    runtime.stop().expect("stop");
+    runtime.wait_for_shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn category_source_indexes_catalog_idempotently() {
+    let addr = spawn_mock(BODY).await;
+
+    // Hai chu kỳ fetch cùng payload — entry không được nhân đôi.
+    run_source("cat-src", addr).await;
+    run_source("cat-src", addr).await;
+
+    let handle = registry::station("cat-src").await.expect("category station");
+    {
+        let st = handle.read().await;
+        assert!(
+            matches!(&*st, Station::Category(_)),
+            "station của node phải là category"
+        );
+        assert_eq!(
+            st.entry_count(),
+            1,
+            "re-fetch cùng key không sinh entry trùng"
+        );
+        assert_eq!(
+            st.search_entries("api", None).await,
+            vec![("api_rps".to_string(), "42".to_string())],
+        );
+    }
+
+    // Pagination qua `list_entries` (cùng đường HTTP `/catalog` dùng).
+    let (items, total) = handle.read().await.list_entries(0, 10);
+    assert_eq!(total, 1);
+    assert_eq!(items, vec![("api_rps".to_string(), "42".to_string())]);
+}

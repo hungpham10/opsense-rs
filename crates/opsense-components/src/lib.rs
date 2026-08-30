@@ -46,8 +46,8 @@ pub use http::{FieldSpec, HttpSource};
 pub use ingest::IngestSource;
 pub use processor::ProcessorTransform;
 pub use station::{
-    own_station, CategoryStationTransform, PatternStationTransform, TimeseriesStationSink,
-    TimeseriesStationTransform,
+    own_station, CategoryStationTransform, PatternStationTransform, StationKind,
+    TimeseriesStationSink, TimeseriesStationTransform,
 };
 
 /// Re-export of the `vector` runtime under `crate::vector::runtime`.

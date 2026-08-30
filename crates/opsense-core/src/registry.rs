@@ -10,16 +10,14 @@
 //! All functions are `async` because `Stations` uses `tokio::sync::RwLock`
 //! (guards must be `Send` across `.await` inside `read_window`).
 
-use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use opsense_libs::ahocorasick::AhoCorasick;
-use opsense_libs::search::Search;
 use serde_json::Value as Json;
 use tokio::sync::RwLock;
 
-use crate::station::{CategoryStation, PatternStation, Station};
+use crate::station::{PatternStation, Station};
 use crate::Stations;
 
 /// Handle to a single registered station (the tokio `RwLock` lets the guard
@@ -101,11 +99,7 @@ pub async fn ensure_search(node: &str) -> Arc<RwLock<Station>> {
     if let Some(existing) = station(node).await {
         return existing;
     }
-    let created = Arc::new(RwLock::new(Station::Category(CategoryStation {
-        search: Search::in_memory(1),
-        entries: Mutex::new(BTreeMap::new()),
-        next_idx: AtomicU64::new(1),
-    })));
+    let created = Arc::new(RwLock::new(Station::category()));
     register_station(node, created.clone()).await;
     created
 }

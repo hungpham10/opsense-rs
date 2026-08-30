@@ -88,6 +88,9 @@ pub struct PatternStation {
 pub struct CategoryStation {
     pub search: Search<u8>,
     pub entries: Mutex<BTreeMap<usize, (String, String)>>,
+    /// Side index `key → record idx` để `insert_entry` idempotent: re-index
+    /// cùng key (node re-fetch) chỉ cập nhật value, không tạo record mới.
+    pub key_index: Mutex<HashMap<String, usize>>,
     pub next_idx: AtomicU64,
 }
 
@@ -118,6 +121,27 @@ impl Station {
             cache: LruCache::new(capacity.next_multiple_of(16)),
             metrics: Mutex::new(HashMap::new()),
             stages,
+        })
+    }
+
+    /// Tạo một category station rỗng (radix + KMP search + entries map).
+    #[must_use]
+    pub fn category() -> Self {
+        Station::Category(CategoryStation {
+            search: Search::in_memory(1),
+            entries: Mutex::new(BTreeMap::new()),
+            key_index: Mutex::new(HashMap::new()),
+            next_idx: AtomicU64::new(1),
+        })
+    }
+
+    /// Tạo một pattern station rỗng (Aho-Corasick).
+    #[must_use]
+    pub fn pattern() -> Self {
+        Station::Pattern(PatternStation {
+            automaton: AhoCorasick::new(),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         })
     }
 
@@ -274,11 +298,31 @@ impl Station {
 
     // ── Category (radix + KMP) operations ──────────────────────────────────
 
-    /// Index một cặp key/value (variant `Category`). Idempotent per key.
+    /// Index một cặp key/value (variant `Category`). Idempotent per key: key
+    /// đã tồn tại chỉ được cập nhật value thay vì tạo record mới — node
+    /// re-fetch cùng cửa sổ không làm phình catalog.
     pub async fn insert_entry(&mut self, key: &[u8], value: &str) {
         let Station::Category(c) = self else {
             return;
         };
+        if key.is_empty() {
+            return;
+        }
+        let key_str = String::from_utf8_lossy(key).to_string();
+
+        // Key đã index → chỉ update value tại record cũ.
+        if let Some(&idx) = c.key_index.lock().expect("category key index lock").get(&key_str) {
+            if let Some(entry) = c
+                .entries
+                .lock()
+                .expect("category entries lock")
+                .get_mut(&idx)
+            {
+                entry.1 = value.to_string();
+            }
+            return;
+        }
+
         let idx = c.next_idx.fetch_add(1, Ordering::Relaxed) as usize;
         let _ = c
             .search
@@ -288,6 +332,10 @@ impl Station {
             idx,
             (String::from_utf8_lossy(key).to_string(), value.to_string()),
         );
+        c.key_index
+            .lock()
+            .expect("category key index lock")
+            .insert(key_str, idx);
     }
 
     /// Substring search trên key đã index → các cặp `(key, value)`.
@@ -331,6 +379,26 @@ impl Station {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// Một trang entry đã index, sắp theo key — dùng cho pagination trên
+    /// HTTP/MCP. Trả `(items, total)`; `total` là tổng số entry để client tính
+    /// số trang. Variant `Category`.
+    #[must_use]
+    pub fn list_entries(&self, offset: usize, limit: usize) -> (Vec<(String, String)>, usize) {
+        let Station::Category(c) = self else {
+            return (Vec::new(), 0);
+        };
+        let entries = c.entries.lock().expect("category entries lock");
+        let mut sorted: Vec<(String, String)> = entries.values().cloned().collect();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        let total = sorted.len();
+        let items = sorted
+            .into_iter()
+            .skip(offset)
+            .take(limit.max(1))
+            .collect();
+        (items, total)
     }
 
     /// Metadata cho HTTP `/describe` và MCP.
@@ -392,5 +460,60 @@ impl CategoryStation {
         metas: &[Option<&[u8]>],
     ) -> Result<(), opsense_libs::search::Error> {
         self.search.insert_chain(index, key, metas).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn insert_entry_is_idempotent_per_key() {
+        let mut st = Station::category();
+        st.insert_entry(b"cpu_usage", "1").await;
+        st.insert_entry(b"cpu_usage", "2").await;
+        st.insert_entry(b"cpu_usage", "2").await;
+        st.insert_entry(b"mem_usage", "3").await;
+
+        assert_eq!(st.entry_count(), 2, "re-index cùng key không tạo entry mới");
+        assert_eq!(
+            st.search_entries("cpu", None).await,
+            vec![("cpu_usage".to_string(), "2".to_string())],
+            "value phải được cập nhật trên record cũ"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_entries_paginates_sorted_by_key() {
+        let mut st = Station::category();
+        for key in ["delta", "alpha", "charlie", "bravo"] {
+            st.insert_entry(key.as_bytes(), "v").await;
+        }
+
+        let (page, total) = st.list_entries(0, 2);
+        assert_eq!(total, 4);
+        assert_eq!(
+            page,
+            vec![
+                ("alpha".to_string(), "v".to_string()),
+                ("bravo".to_string(), "v".to_string()),
+            ],
+            "trang đầu sắp theo key"
+        );
+        let (page, _) = st.list_entries(2, 2);
+        assert_eq!(
+            page,
+            vec![
+                ("charlie".to_string(), "v".to_string()),
+                ("delta".to_string(), "v".to_string()),
+            ],
+            "trang sau tiếp tục từ offset"
+        );
+        let (page, total) = st.list_entries(10, 2);
+        assert_eq!(total, 4);
+        assert!(page.is_empty(), "offset ngoài phạm vi → trang rỗng");
+
+        // Trên variant khác: rỗng.
+        assert_eq!(Station::pattern().list_entries(0, 10).1, 0);
     }
 }

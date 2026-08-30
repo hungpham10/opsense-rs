@@ -125,11 +125,27 @@ pub struct HttpSource {
     pub initial_lookback_secs: i64,
 
     // ── station capability ──
-    /// Register everything this source fetches as its own timeseries station:
+    /// Register everything this source fetches as its own station:
     /// a private block store published under this node's id, queryable from
     /// Rhai (`ts_query("<id>", "raw", …)`), the MCP tools and HTTP endpoints.
     #[serde(default)]
     pub station: bool,
+
+    /// Loại station đăng ký: `timeseries` (mặc định — lưu observations) hoặc
+    /// `category` (index cặp key/value vào catalog, query qua MCP
+    /// `catalog_list`/HTTP `/catalog`). Với `category`, key/value của mỗi
+    /// observation lấy từ `key_field`/`value_field` (fallback về
+    /// `metric_id`/`value`).
+    #[serde(default)]
+    pub station_kind: crate::station::StationKind,
+
+    /// Label chứa key khi `station_kind = "category"` (default `"metric_id"`).
+    #[serde(default = "default_key_field")]
+    pub key_field: String,
+
+    /// Label chứa value khi `station_kind = "category"` (default `"value"`).
+    #[serde(default = "default_value_field")]
+    pub value_field: String,
 
     /// Bind address of the station's query endpoint (empty = disabled).
     #[serde(default = "default_station_bind")]
@@ -173,6 +189,14 @@ fn default_station_max_hot_mb() -> usize {
     256
 }
 
+fn default_key_field() -> String {
+    "metric_id".to_string()
+}
+
+fn default_value_field() -> String {
+    "value".to_string()
+}
+
 fn default_method() -> String {
     "GET".to_string()
 }
@@ -198,6 +222,9 @@ impl HttpSource {
             timeout_secs: default_timeout(),
             initial_lookback_secs: 0,
             station: false,
+            station_kind: Default::default(),
+            key_field: default_key_field(),
+            value_field: default_value_field(),
             bind: default_station_bind(),
             block_secs: default_station_block_secs(),
             max_hot_blocks: default_station_max_hot_blocks(),
@@ -212,6 +239,7 @@ impl HttpSource {
         crate::station::StationOptions {
             id: self.id.clone(),
             inputs: self.inputs.clone(),
+            kind: self.station_kind,
 
             // Sources default to no dedicated HTTP endpoint — Rhai/MCP reads
             // go through the registry handle instead.
@@ -291,64 +319,68 @@ impl_http_source!(
 
         // Gắn read-through tier: storage (tier-2) + coverage `validate` + origin
         // `fallback` (reuse `fetch_window`). Cache miss / hổng coverage sẽ tự
-        // reload từ đĩa hoặc re-fetch đúng cửa sổ từ origin.
-        let storage: Arc<dyn TimeseriesStorage> = if !self.data_dir.is_empty() {
-            #[cfg(feature = "sqlite")]
-            {
-                match SqliteStorage::open(&self.data_dir).await {
-                    Ok(s) => Arc::new(s),
-                    Err(e) => {
-                        tracing::warn!(
-                            "http {} sqlite open failed ({e}); fall back to in-memory",
-                            self.id
-                        );
-                        Arc::new(InMemoryStorage::new())
+        // reload từ đĩa hoặc re-fetch đúng cửa sổ từ origin. Chỉ áp dụng cho
+        // station timeseries — station category không dùng cache khối.
+        if self.station_kind == crate::station::StationKind::Timeseries {
+            let storage: Arc<dyn TimeseriesStorage> = if !self.data_dir.is_empty() {
+                #[cfg(feature = "sqlite")]
+                {
+                    match SqliteStorage::open(&self.data_dir).await {
+                        Ok(s) => Arc::new(s),
+                        Err(e) => {
+                            tracing::warn!(
+                                "http {} sqlite open failed ({e}); fall back to in-memory",
+                                self.id
+                            );
+                            Arc::new(InMemoryStorage::new())
+                        }
                     }
                 }
-            }
-            #[cfg(not(feature = "sqlite"))]
-            {
-                tracing::warn!(
-                    "http {} sqlite feature disabled; using in-memory storage",
-                    self.id
-                );
+                #[cfg(not(feature = "sqlite"))]
+                {
+                    tracing::warn!(
+                        "http {} sqlite feature disabled; using in-memory storage",
+                        self.id
+                    );
+                    Arc::new(InMemoryStorage::new())
+                }
+            } else {
                 Arc::new(InMemoryStorage::new())
-            }
-        } else {
-            Arc::new(InMemoryStorage::new())
-        };
+            };
 
-        {
-            let mut st = station_store.write().await;
-            if let Station::Timeseries(ts) = &mut *st {
-                ts.cache.attach_fallback(
-                    Arc::clone(&storage),
-                    crate::station::station_series_of(),
-                    crate::station::station_encode(),
-                    crate::station::station_decode(),
-                    crate::station::station_validate(),
-                    crate::station::station_coverage_gap(),
-                    Arc::new(HttpOrigin {
-                        src: Arc::new(self.clone()),
-                        ctx: Arc::clone(&ctx_arc),
-                    }),
-                );
-                // Persist points keyed by the latest observation ts (seconds) so
-                // disk reads align with the request window.
-                ts.cache.ts_timestamp_of = Some(Arc::new(
-                    |_k: &(Stage, String), v: &BTreeMap<i64, Observation>| {
-                        v.keys().next_back().copied().unwrap_or(0) as u64
-                    },
-                ));
-                // Merge thay vì ghi đè khi origin backfill trả về một cửa sổ
-                // cũ hơn: các điểm mới hơn đã có trong cache phải sống sót.
-                ts.cache.ts_merge = Some(Arc::new(
-                    |existing: &BTreeMap<i64, Observation>, fresh: BTreeMap<i64, Observation>| {
-                        let mut merged = existing.clone();
-                        merged.extend(fresh);
-                        merged
-                    },
-                ));
+            {
+                let mut st = station_store.write().await;
+                if let Station::Timeseries(ts) = &mut *st {
+                    ts.cache.attach_fallback(
+                        Arc::clone(&storage),
+                        crate::station::station_series_of(),
+                        crate::station::station_encode(),
+                        crate::station::station_decode(),
+                        crate::station::station_validate(),
+                        crate::station::station_coverage_gap(),
+                        Arc::new(HttpOrigin {
+                            src: Arc::new(self.clone()),
+                            ctx: Arc::clone(&ctx_arc),
+                        }),
+                    );
+                    // Persist points keyed by the latest observation ts (seconds) so
+                    // disk reads align with the request window.
+                    ts.cache.ts_timestamp_of = Some(Arc::new(
+                        |_k: &(Stage, String), v: &BTreeMap<i64, Observation>| {
+                            v.keys().next_back().copied().unwrap_or(0) as u64
+                        },
+                    ));
+                    // Merge thay vì ghi đè khi origin backfill trả về một cửa sổ
+                    // cũ hơn: các điểm mới hơn đã có trong cache phải sống sót.
+                    ts.cache.ts_merge = Some(Arc::new(
+                        |existing: &BTreeMap<i64, Observation>,
+                         fresh: BTreeMap<i64, Observation>| {
+                            let mut merged = existing.clone();
+                            merged.extend(fresh);
+                            merged
+                        },
+                    ));
+                }
             }
         }
 
@@ -376,7 +408,7 @@ impl_http_source!(
                 match self.fetch_window(ctx, from_ts, to_ts).await {
                     Ok(batch) => {
                         if !batch.is_empty() {
-                            station_store.write().await.append(Stage::Processed, &batch).await;
+                            self.ingest(&station_store, &batch).await;
                         }
                         tracing::info!(
                             "http {} backfilled {} observations for ({from_ts},{to_ts}]",
@@ -416,7 +448,7 @@ impl_http_source!(
                 Ok(batch) => {
                     if !batch.is_empty() {
                         // Station của node là NƠI LƯU DUY NHẤT (cache+storage).
-                        station_store.write().await.append(Stage::Processed, &batch).await;
+                        self.ingest(&station_store, &batch).await;
                     }
                     ctx.set_node_watermark(&self.id, ts);
                 }
@@ -437,6 +469,32 @@ impl_http_source!(
 );
 
 impl HttpSource {
+    /// Ghi một batch vừa fetch vào station của node, theo `station_kind`:
+    /// `timeseries` append observations; `category` index cặp key/value
+    /// (key/value lấy từ `key_field`/`value_field`, fallback `metric_id`/`value`)
+    /// qua `insert_entry` — idempotent per key nên re-fetch cùng cửa sổ không
+    /// sinh entry trùng.
+    async fn ingest(&self, store: &tokio::sync::RwLock<Station>, batch: &[Observation]) {
+        if self.station_kind == crate::station::StationKind::Category {
+            let mut st = store.write().await;
+            for obs in batch {
+                let key = obs
+                    .labels
+                    .get(&self.key_field)
+                    .cloned()
+                    .unwrap_or_else(|| obs.metric_id.clone());
+                let value = obs
+                    .labels
+                    .get(&self.value_field)
+                    .cloned()
+                    .unwrap_or_else(|| obs.value.to_string());
+                st.insert_entry(key.as_bytes(), &value).await;
+            }
+        } else {
+            store.write().await.append(Stage::Processed, batch).await;
+        }
+    }
+
     async fn fetch_window(
         &self,
         ctx: &OpsenseContext,

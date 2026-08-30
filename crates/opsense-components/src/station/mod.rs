@@ -74,12 +74,28 @@ pub(crate) fn default_max_hot_mb() -> usize {
     256
 }
 
+/// Loại station mà một node đăng ký — quyết định cách dữ liệu được index
+/// (`ensure_station`) và router HTTP mà station expose (`spawn_server`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StationKind {
+    /// Time-series cache — route Prometheus/observations.
+    #[default]
+    Timeseries,
+    /// Catalog key/value với substring search trên key — route `/catalog`.
+    Category,
+    /// Aho-Corasick pattern store — route `/patterns`.
+    Pattern,
+}
+
 /// Everything [`ensure_station`] needs to build/attach one station.
 /// Node structs convert into this via `StationOptions::from_*`.
 #[derive(Debug, Clone)]
 pub struct StationOptions {
     pub id: String,
     pub inputs: Vec<String>,
+    /// Loại station: quyết định cấu trúc lưu trữ và router HTTP serve.
+    pub kind: StationKind,
     pub bind: String,
     pub block_secs: i64,
     pub max_hot_blocks: usize,
@@ -115,6 +131,7 @@ pub async fn own_station(id: &str, inputs: &[String], stages: &[Stage]) -> Arc<R
     ensure_station(&StationOptions {
         id: id.to_string(),
         inputs: inputs.to_vec(),
+        kind: StationKind::Timeseries,
         bind: String::new(),
         block_secs: default_block_secs(),
         max_hot_blocks: default_max_hot_blocks(),
@@ -140,17 +157,24 @@ pub async fn ensure_station(opts: &StationOptions) -> Arc<RwLock<Station>> {
     }
 
     let capacity = opts.max_hot_blocks.saturating_mul(16).max(16);
-    let station = Arc::new(RwLock::new(Station::timeseries_with(
-        capacity,
-        opts.stages.clone(),
-    )));
+    let station = Arc::new(RwLock::new(match opts.kind {
+        StationKind::Timeseries => Station::timeseries_with(capacity, opts.stages.clone()),
+        StationKind::Category => Station::category(),
+        StationKind::Pattern => Station::pattern(),
+    }));
     if registry::register_station(&opts.id, station.clone()).await {
         // We won the race — only the first registration binds the HTTP server.
-        spawn_server(opts.id.clone(), opts.bind.clone(), station.clone());
+        spawn_server(
+            opts.id.clone(),
+            opts.bind.clone(),
+            opts.kind,
+            station.clone(),
+        );
         // Attach the cold-tier storage when configured (storage + decode/encode
         // + coverage validate, no origin fallback). Source-attached stations
         // layer their own origin fallback on top via `attach_fallback`.
-        if opts.storage != StationStorage::None {
+        // Category/pattern stations không dùng cold-tier timeseries.
+        if opts.kind == StationKind::Timeseries && opts.storage != StationStorage::None {
             let storage = build_station_storage(&opts.storage).await;
             let mut st = station.write().await;
             if let Station::Timeseries(ts) = &mut *st {
@@ -269,7 +293,7 @@ pub(crate) fn station_coverage_gap(
     })
 }
 
-fn spawn_server(id: String, bind: String, station: Arc<RwLock<Station>>) {
+fn spawn_server(id: String, bind: String, kind: StationKind, station: Arc<RwLock<Station>>) {
     if bind.is_empty() {
         return;
     }
@@ -277,10 +301,19 @@ fn spawn_server(id: String, bind: String, station: Arc<RwLock<Station>>) {
         id: id.clone(),
         station,
     });
-    let app = Router::new()
-        .route("/api/v1/query_range", axum::routing::get(query_range))
-        .route("/api/v1/query", axum::routing::get(query_instant))
-        .route("/observations", axum::routing::get(observations))
+    // Router theo loại station: mỗi loại expose đúng endpoint query của mình
+    // thay vì một router timeseries chung cho mọi station.
+    let kind_routes = match kind {
+        StationKind::Timeseries => Router::new()
+            .route("/api/v1/query_range", axum::routing::get(query_range))
+            .route("/api/v1/query", axum::routing::get(query_instant))
+            .route("/observations", axum::routing::get(observations)),
+        StationKind::Category => Router::new()
+            .route("/catalog", axum::routing::get(catalog))
+            .route("/catalog/search", axum::routing::get(catalog_search)),
+        StationKind::Pattern => Router::new().route("/patterns", axum::routing::get(patterns)),
+    };
+    let app = kind_routes
         .route("/describe", axum::routing::get(describe))
         .route("/health", axum::routing::get(|| async { "OK" }))
         .with_state(state);
@@ -501,4 +534,68 @@ async fn describe(
             .await
             .unwrap_or(serde_json::Value::Null),
     )
+}
+
+/// `GET /catalog?limit=&offset=` — một trang key/value đã index, sắp theo key,
+/// kèm `total` để client phân trang. Route của station kind `category`.
+async fn catalog(
+    State(state): State<Arc<StationState>>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let offset = params
+        .get("offset")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, 1000);
+    let (items, total) = state.station.read().await.list_entries(offset, limit);
+    Json(serde_json::json!({
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": items
+            .into_iter()
+            .map(|(key, value)| serde_json::json!({"key": key, "value": value}))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// `GET /catalog/search?pattern=<substring>&limit=&offset=` — substring search
+/// trên key của catalog, kết quả phân trang.
+async fn catalog_search(
+    State(state): State<Arc<StationState>>,
+    AxumQuery(params): AxumQuery<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let pattern = params.get("pattern").cloned().unwrap_or_default();
+    if pattern.is_empty() {
+        return Json(serde_json::json!({"error": "pattern is required"}));
+    }
+    let offset = params
+        .get("offset")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(1, 1000);
+    let hits = state.station.read().await.search_entries(&pattern, None).await;
+    let total = hits.len();
+    let items = hits
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|(key, value)| serde_json::json!({"key": key, "value": value}))
+        .collect::<Vec<_>>();
+    Json(serde_json::json!({"total": total, "offset": offset, "limit": limit, "items": items}))
+}
+
+/// `GET /patterns` — danh sách pattern đã đăng ký (station kind `pattern`).
+async fn patterns(State(state): State<Arc<StationState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "patterns": state.station.read().await.patterns(),
+    }))
 }

@@ -97,6 +97,19 @@ pub struct CatalogSearchParams {
     pub pattern: String,
 }
 
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct CatalogListParams {
+    /// Node id của catalog transform / source (station kind `category`).
+    pub node: String,
+    /// Substring tùy chọn: chỉ trả key chứa pattern này.
+    pub pattern: Option<String>,
+    /// Số entry tối đa trả về (default 100, tối đa 1000).
+    pub limit: Option<usize>,
+    /// Vị trí bắt đầu trang (default 0).
+    pub offset: Option<usize>,
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct BackfillParams {
     /// Node http_source cần re-fetch (vd "vms-disk-usage").
@@ -371,6 +384,44 @@ impl OpsenseMcp {
             .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
             .collect();
         ok_text(&serde_json::json!(items))
+    }
+
+    #[tool(
+        description = "Liệt kê danh sách key/value đã index trong catalog station \
+                          (station kind `category`) với pagination: `limit`/`offset`, \
+                          trả kèm `total`. Có thể lọc qua `pattern` substring trên key. \
+                          Dùng để xem các metric/key mà catalog đang support."
+    )]
+    async fn catalog_list(
+        &self,
+        Parameters(params): Parameters<CatalogListParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let Some(idx) = text_index(&params.node).await else {
+            return err_text(format!("no text index `{}` registered", params.node));
+        };
+        let offset = params.offset.unwrap_or(0);
+        let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+        let guard = idx.read().await;
+        let (items, total) = match params.pattern.as_deref().filter(|p| !p.is_empty()) {
+            Some(pattern) => {
+                let hits = guard.search_entries(pattern, None).await;
+                let total = hits.len();
+                let page: Vec<(String, String)> =
+                    hits.into_iter().skip(offset).take(limit).collect();
+                (page, total)
+            }
+            None => guard.list_entries(offset, limit),
+        };
+        let rendered: Vec<serde_json::Value> = items
+            .into_iter()
+            .map(|(k, v)| serde_json::json!({"key": k, "value": v}))
+            .collect();
+        ok_text(&serde_json::json!({
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "items": rendered,
+        }))
     }
 
     #[tool(

@@ -6,7 +6,7 @@ use std::io::Error;
 
 use crate::station::{
     default_bind, default_block_secs, default_max_hot_blocks, default_max_hot_mb, default_stage,
-    ensure_station, stage_of, StationOptions, StationStorage,
+    ensure_station, stage_of, StationKind, StationOptions, StationStorage,
 };
 use crate::vector::runtime::{Component, Identify, Message, Outbound};
 use crate::{signal, OpsenseContext};
@@ -59,6 +59,7 @@ impl TimeseriesStationSink {
         StationOptions {
             id: self.id.clone(),
             inputs: self.inputs.clone(),
+            kind: StationKind::Timeseries,
             bind: self.bind.clone(),
             block_secs: self.block_secs,
             max_hot_blocks: self.max_hot_blocks,
