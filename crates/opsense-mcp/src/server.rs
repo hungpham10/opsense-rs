@@ -66,7 +66,8 @@ pub struct QueryParams {
     pub stage: Option<String>,
     /// Chỉ lấy metric này khi có (mặc định: tất cả).
     pub metric: Option<String>,
-    /// Cửa sổ (from_ts, to_ts] theo unix seconds; mặc định từ 0 tới hiện tại.
+    /// Cửa sổ (from_ts, to_ts] theo unix seconds; `to_ts` mặc định là hiện
+    /// tại, `from_ts` mặc định là 24 giờ trước.
     pub from_ts: Option<i64>,
     pub to_ts: Option<i64>,
 }
@@ -434,7 +435,9 @@ impl OpsenseMcp {
         };
         let metric = params.metric.clone();
         let to = params.to_ts.unwrap_or_else(signal::now_secs);
-        let from = params.from_ts.unwrap_or(0);
+        // `from = 0` (epoch) khiến read-through fallback cố backfill từ đầu
+        // thời gian và origin trả 400. Default là lookback 24h hợp lý.
+        let from = params.from_ts.unwrap_or_else(|| signal::now_secs() - 24 * 3600);
 
         // In-memory async read: the timeout is now real (it cancels the await)
         // because we are no longer pinned on a blocking thread.
