@@ -1,4 +1,3 @@
-# Test http_source với Prometheus demo — chạy riêng, không đụng config.toml
 [attributes]
 prom_url = "https://prometheus.demo.prometheus.io"
 
@@ -23,9 +22,8 @@ items = "data.result[].values[]"
    [pipeline.components.fields]
    ts = { query = "0", cast_to = "i64" }
    value = { query = "1", cast_to = "f64" }
-   # `^` climb từ item [ts, value] qua mảng `values` về series cha để lấy labels
    labels = { query = "^.^.metric" }
-   
+
    [pipeline.components.constants]
    metric_id = "up"
    labels = { source = "prometheus-demo" }
@@ -36,7 +34,6 @@ items = "data.result[].values[]"
    end = "{{to_ts}}"
    step = "60"
 
-# Catalog metric name từ Prometheus demo.
 [[pipeline.components]]
 type = "http_source"
 id = "metric-catalog"
@@ -52,9 +49,6 @@ items = "data[]"
    [pipeline.components.constants]
    value = 0
 
-# Catalog instance/container: category_station_transform bóc label từ
-# observations của prom-explore (labels lấy bằng jq `^` ở trên).
-# Prometheus demo không có label `container` nên container-catalog dùng `job`.
 [[pipeline.components]]
 type = "category_station_transform"
 id = "instance-catalog"
@@ -68,6 +62,52 @@ inputs = ["prom-explore"]
 key_field = "job"
 
 [[pipeline.components]]
+type = "http_source"
+id = "disk-usage"
+inputs = ["clock"]
+url = "{{prom_url}}/api/v1/query_range"
+   initial_lookback_secs = 259200
+   timeout_secs = 30
+   station = true
+   items = "data.result[].values[]"
+
+   [pipeline.components.params]
+   query = "100 * (1 - node_filesystem_avail_bytes / node_filesystem_size_bytes)"
+   start = "{{from_ts}}"
+   end = "{{to_ts}}"
+   step = "60"
+
+   [pipeline.components.fields]
+   ts = { query = "0", cast_to = "i64" }
+   value = { query = "1", cast_to = "f64" }
+   labels = { query = "^.^.metric" }
+   metric_id = { query = "^.^.metric.mountpoint" }
+
+[[pipeline.components]]
+type = "category_station_transform"
+id = "disk-catalog"
+inputs = ["disk-usage"]
+key_field = "mountpoint"
+
+[[pipeline.components]]
+type = "rhai_transform"
+id = "disk-grid"
+inputs = ["disk-usage"]
+script_path = "/Users/lap02921/Desktop/Workspace/opsense-rs/examples/prometheus-demo/rhai/disk_grid_report.rhai"
+input_stage = "Processed"
+
+   [pipeline.components.params]
+   cells = 10
+   recent_secs = 259200
+
+[[pipeline.components]]
+type = "pattern_station_transform"
+id = "log-pattern"
+inputs = ["prom-explore"]
+text_field = "metric_id"
+patterns = ["up", "scrape", "prometheus"]
+
+[[pipeline.components]]
 type = "null"
 id = "null"
-inputs = ["prom-explore", "metric-catalog", "instance-catalog", "container-catalog"]
+inputs = ["prom-explore", "metric-catalog", "instance-catalog", "container-catalog", "disk-usage", "disk-catalog", "disk-grid", "log-pattern"]

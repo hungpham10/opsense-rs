@@ -22,6 +22,7 @@ use tokio::sync::RwLock;
 pub struct AppState {
     pub collector: Arc<Collector>,
     pub runtime: Arc<RwLock<Runtime>>,
+
     /// Registry of stations this process manages, shared với `OpsenseContext`
     /// (nơi các transform publish) để API / MCP / Rhai đọc cùng một thể hiện.
     pub stations: Stations,

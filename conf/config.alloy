@@ -1,0 +1,62 @@
+// --- TRACING CONFIGURATION ---
+otelcol.receiver.otlp "app_receiver" {
+  grpc {
+    endpoint = "127.0.0.1:4317"
+  }
+  http {
+    endpoint = "127.0.0.1:4318"
+  }
+
+  output {
+    metrics = [otelcol.exporter.prometheus.grafana_cloud.input]
+    traces  = [otelcol.processor.filter.drop_health_metrics.input]
+  }
+}
+
+otelcol.exporter.prometheus "grafana_cloud" {
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+otelcol.exporter.otlp "grafana_cloud_tempo" {
+  client {
+    endpoint = "tempo-prod-07-prod-ap-southeast-0.grafana.net:443"
+    auth     = otelcol.auth.basic.grafana_cloud_auth.handler
+  }
+}
+
+otelcol.auth.basic "grafana_cloud_auth" {
+  username = sys.env("GRAFANA_CLOUD_TEMPO_ID")
+  password = sys.env("GRAFANA_CLOUD_TEMPO_TOKEN")
+}
+
+otelcol.processor.filter "drop_health_metrics" {
+  error_mode = "ignore"
+
+  traces {
+    span = [
+      "attributes[\"uri\"] == \"/health\"",
+      "attributes[\"uri\"] == \"/metrics\"",
+    ]
+  }
+
+  output {
+    traces = [otelcol.exporter.otlp.grafana_cloud_tempo.input]
+  }
+}
+
+// --- METRICS CONFIGURATION (SCRAPE) ---
+prometheus.scrape "rust_app_scrape" {
+  targets = [{"__address__" = "localhost:8080", "instance" = "rust-server"}]
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+  scrape_interval = "15s"
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = "https://prometheus-prod-18-prod-ap-southeast-0.grafana.net/api/prom/push"
+    basic_auth {
+      username = sys.env("GRAFANA_CLOUD_METRIC_ID")
+      password = sys.env("GRAFANA_CLOUD_METRIC_TOKEN")
+    }
+  }
+}

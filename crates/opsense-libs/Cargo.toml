@@ -10,10 +10,12 @@ warnings = "deny"
 [features]
 default = []
 bloom-search = []
+duckdb = ["dep:duckdb"]
 sqlite = ["dep:rusqlite", "dep:sqlx"]
 redis = ["dep:redis", "dep:zstd", "dep:bincode"]
 
 [dependencies]
+duckdb = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 redis = { workspace = true, optional = true }

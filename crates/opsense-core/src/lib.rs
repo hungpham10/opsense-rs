@@ -11,7 +11,6 @@
 pub mod collector;
 pub mod config;
 pub mod context;
-pub mod registry;
 pub mod script;
 pub mod source;
 pub mod station;

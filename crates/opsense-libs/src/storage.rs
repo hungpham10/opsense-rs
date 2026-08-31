@@ -17,6 +17,9 @@ mod sqlite;
 #[cfg(feature = "redis")]
 mod redis;
 
+#[cfg(feature = "duckdb")]
+mod duckdb;
+
 mod in_memory;
 
 #[cfg(feature = "sqlite")]

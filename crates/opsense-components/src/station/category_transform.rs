@@ -30,9 +30,11 @@ use tokio::sync::mpsc;
 pub struct CategoryStationTransform {
     pub id: String,
     pub inputs: Vec<String>,
+
     /// Label chứa key; default `"metric_id"`. Fallback về trường `metric_id`.
     #[serde(default = "default_key_field")]
     pub key_field: String,
+
     /// Label chứa value; default `"value"`. Fallback về trường `value`.
     #[serde(default = "default_value_field")]
     pub value_field: String,

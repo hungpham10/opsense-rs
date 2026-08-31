@@ -11,27 +11,28 @@
 //! sinh `#[derive]` với span khiến `default = "default_text_field"` không resolve
 //! được; viết rõ ràng giúp `Deserialize` derive hoạt động đáng tin cậy.
 
-use std::any::Any;
 use std::io::Error;
-use std::sync::Arc;
 
 use opsense_core::registry;
 use opsense_core::station::Station;
+use opsense_core::Context;
+
+use tokio::sync::mpsc;
+use opsense_macros::transform;
 
 use crate::signal;
-use crate::vector::runtime::{Component, ComponentType, Identify, Message, Outbound};
+use crate::vector::runtime::{Component, Identify, Message, Outbound};
 use crate::OpsenseContext;
-use opsense_core::Context;
-use tokio::sync::mpsc;
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[transform(derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq))]
 pub struct PatternStationTransform {
     pub id: String,
     pub inputs: Vec<String>,
+
     /// Label chứa text cần match; default `"log"`. Fallback về `metric_id`.
     #[serde(default = "default_text_field")]
     pub text_field: String,
+
     /// Pattern đăng ký sẵn khi node khởi động (idempotent theo giá trị).
     #[serde(default)]
     pub patterns: Vec<String>,
@@ -53,39 +54,7 @@ fn default_text_field() -> String {
     "log".to_string()
 }
 
-impl Identify for PatternStationTransform {
-    fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn get_inputs(&self) -> Option<&Vec<String>> {
-        Some(&self.inputs)
-    }
-
-    fn component_type(&self) -> ComponentType {
-        ComponentType::Transform
-    }
-
-    fn compare(&self, other: &dyn Component) -> bool {
-        if let Some(other_concrete) = other.as_any().downcast_ref::<Self>() {
-            self == other_concrete
-        } else {
-            false
-        }
-    }
-
-    fn clone_arc(&self) -> Arc<dyn Component> {
-        Arc::new(self.clone())
-    }
-}
-
-#[typetag::serde(name = "pattern_station_transform")]
-#[async_trait::async_trait]
-impl Component for PatternStationTransform {
+impl_pattern_station_transform!(
     async fn run(
         &self,
         _id: usize,
@@ -152,4 +121,4 @@ impl Component for PatternStationTransform {
         }
         Ok(())
     }
-}
+);
