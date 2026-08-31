@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use crate::storage::TimeseriesStorage;
 
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 const NULL: usize = usize::MAX;
 
 /// Boxed, owned, `'static` future used by the `fallback` read-through callback.

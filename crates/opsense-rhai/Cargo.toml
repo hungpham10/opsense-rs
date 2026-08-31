@@ -25,3 +25,4 @@ typetag = "0.2"
 [dev-dependencies]
 async-trait = "0.1"
 tokio = { workspace = true }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

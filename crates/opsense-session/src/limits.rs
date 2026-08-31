@@ -113,6 +113,7 @@ impl ResourceUsage {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -315,7 +316,7 @@ mod tests {
         let usage = ResourceUsage {
             memory_bytes: 9999 * 1024 * 1024 * 1024, // huge
             cpu_time_ms: 0,
-            result_rows: 9999_999_999, // huge
+            result_rows: 9_999_999_999, // huge
             execution_time_ms: 0,
         };
         let mut limits = ResourceLimits::default();

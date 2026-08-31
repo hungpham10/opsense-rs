@@ -803,7 +803,7 @@ impl Runtime {
             info!("engine.add_new_nodes: invoking pre_run for component {}", component.id());
             let (tx_done, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
             // Deref the reference to get the Arc, then clone the Arc (cheap refcount bump).
-            let comp: Arc<dyn Component> = Arc::clone(&*component);
+            let comp: Arc<dyn Component> = Arc::clone(*component);
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -828,14 +828,12 @@ impl Runtime {
                     info!("engine.add_new_nodes: pre_run completed ok for {}", component.id());
                 }
                 Ok(Err(e)) => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
+                    return Err(Error::other(
                         format!("pre_run failed for {}: {}", component.id(), e),
                     ));
                 }
                 Err(e) => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
+                    return Err(Error::other(
                         format!("pre_run thread dropped for {}: {}", component.id(), e),
                     ));
                 }

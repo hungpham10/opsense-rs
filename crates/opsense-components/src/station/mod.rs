@@ -227,6 +227,7 @@ async fn build_station_storage(cfg: &StationStorage) -> Arc<dyn TimeseriesStorag
 }
 
 /// Map `(stage, metric)` → opaque series name (bytes) for the timeseries store.
+#[allow(clippy::type_complexity)]
 pub(crate) fn station_series_of() -> Arc<dyn Fn(&(Stage, String)) -> Vec<u8> + Send + Sync> {
     Arc::new(|(stage, metric): &(Stage, String)| {
         format!("{}:{}", stage.as_str(), metric).into_bytes()
@@ -234,12 +235,14 @@ pub(crate) fn station_series_of() -> Arc<dyn Fn(&(Stage, String)) -> Vec<u8> + S
 }
 
 /// Encode a per-metric observation map to opaque bytes for the timeseries store.
+#[allow(clippy::type_complexity)]
 pub(crate) fn station_encode() -> Arc<dyn Fn(&BTreeMap<i64, Observation>) -> Vec<u8> + Send + Sync>
 {
     Arc::new(|v: &BTreeMap<i64, Observation>| serde_json::to_vec(v).unwrap_or_default())
 }
 
 /// Decode opaque bytes back into a per-metric observation map.
+#[allow(clippy::type_complexity)]
 pub(crate) fn station_decode(
 ) -> Arc<dyn Fn(&[u8]) -> Option<BTreeMap<i64, Observation>> + Send + Sync> {
     Arc::new(|b: &[u8]| serde_json::from_slice::<BTreeMap<i64, Observation>>(b).ok())
@@ -247,6 +250,7 @@ pub(crate) fn station_decode(
 
 /// Coverage validate: the map spans the requested window when it has a point at
 /// or before `from_ts` *and* a point at or after `to_ts` (đủ điểm ở 2 biên).
+#[allow(clippy::type_complexity)]
 pub(crate) fn station_validate(
 ) -> Arc<dyn Fn(&(Stage, String), &BTreeMap<i64, Observation>, u64, u64) -> bool + Send + Sync> {
     Arc::new(|_key, v, from_ts, to_ts| {
@@ -267,8 +271,10 @@ pub(crate) fn station_validate(
 ///   origin chỉ fetch phần thiếu;
 /// - chỉ hổng ở đuôi (tương lai, `to_ts > last`) → `None` (không thể fetch dữ
 ///   liệu tương lai, cache đã giữ mọi thứ hiện có).
+///
 /// Quan trọng: chặn query "lấy mọi thứ" (`to = u64::MAX`) khỏi trigger fetch
 /// nguyên cửa sổ vô lý → tránh treo / lãng phí.
+#[allow(clippy::type_complexity)]
 pub(crate) fn station_coverage_gap(
 ) -> Arc<dyn Fn(&(Stage, String), &BTreeMap<i64, Observation>, u64, u64) -> Option<(u64, u64)>
        + Send

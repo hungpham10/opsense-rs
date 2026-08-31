@@ -98,7 +98,7 @@ pub struct CategoryStation {
 /// `OpsenseContext.stations` (keyed bởi component id).
 pub enum Station {
     /// Time-series cache (bounded LRU over `(stage, metric)` entries).
-    Timeseries(TimeseriesStation),
+    Timeseries(Box<TimeseriesStation>),
     /// Radix + KMP substring search trên key, kèm entries key/value.
     Category(CategoryStation),
     /// Aho-Corasick multi-pattern matcher, kèm bộ đếm hit/miss.
@@ -117,11 +117,11 @@ impl Station {
     /// nào (thứ tự hiển thị trong `describe` theo thứ tự khai báo).
     #[must_use]
     pub fn timeseries_with(capacity: usize, stages: Vec<Stage>) -> Self {
-        Station::Timeseries(TimeseriesStation {
+        Station::Timeseries(Box::new(TimeseriesStation {
             cache: LruCache::new(capacity.next_multiple_of(16)),
             metrics: Mutex::new(HashMap::new()),
             stages,
-        })
+        }))
     }
 
     /// Tạo một category station rỗng (radix + KMP search + entries map).

@@ -408,6 +408,7 @@ pub fn segment_to_record_batch(bytes: &[u8]) -> Result<RecordBatch> {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array};
@@ -606,8 +607,7 @@ mod tests {
 
     #[test]
     fn kernel_output_ok_returns_false_when_error_present() {
-        let mut out = KernelOutput::default();
-        out.error = Some("boom".into());
+        let out = KernelOutput { error: Some("boom".into()), ..Default::default() };
         assert!(!out.ok());
     }
 
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn kernel_output_from_outcome_extracts_dataframe() {
-        use opsense_proto::pb::{value, Dataframe};
+        use opsense_proto::pb::{value, DataFrame};
         let batch = make_batch(3);
         let mut buf = Vec::new();
         {
@@ -674,8 +674,16 @@ mod tests {
         }
         let outcome = opsense_proto::host::ExecOutcome {
             value: Some(Value {
-                kind: Some(value::Kind::Dataframe(Dataframe {
+                kind: Some(value::Kind::Dataframe(DataFrame {
                     arrow_ipc: buf,
+                    rows: batch.num_rows() as i64,
+                    cols: batch.num_columns() as i64,
+                    columns: batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .map(|f| f.name().clone())
+                        .collect(),
                 })),
             }),
             ..Default::default()
@@ -702,11 +710,14 @@ mod tests {
 
     #[test]
     fn kernel_output_from_outcome_handles_dataframe_with_invalid_ipc() {
-        use opsense_proto::pb::{value, Dataframe};
+        use opsense_proto::pb::{value, DataFrame};
         let outcome = opsense_proto::host::ExecOutcome {
             value: Some(Value {
-                kind: Some(value::Kind::Dataframe(Dataframe {
+                kind: Some(value::Kind::Dataframe(DataFrame {
                     arrow_ipc: vec![0xFFu8; 32],
+                    rows: 0,
+                    cols: 0,
+                    columns: vec![],
                 })),
             }),
             ..Default::default()
@@ -718,18 +729,20 @@ mod tests {
 
     #[test]
     fn health_info_from_health_status_maps_fields() {
-        use opsense_proto::pb::{HealthPackage, HealthStatus};
+        use opsense_proto::pb::{HealthStatus, PackageInfo};
         let status = HealthStatus {
             ok: true,
             kernel_name: "test-kernel".into(),
             kernel_version: "1.0.0".into(),
             packages: vec![
-                HealthPackage {
+                PackageInfo {
                     name: "pandas".into(),
+                    available: true,
                     version: "2.0".into(),
                 },
-                HealthPackage {
+                PackageInfo {
                     name: "numpy".into(),
+                    available: true,
                     version: "1.24".into(),
                 },
             ],

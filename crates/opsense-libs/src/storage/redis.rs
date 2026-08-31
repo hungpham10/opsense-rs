@@ -101,10 +101,12 @@ pub struct RedisStorage {
 }
 
 impl RedisStorage {
+    #[allow(dead_code)]
     async fn lock(&self) -> tokio::sync::MutexGuard<'_, MultiplexedConnection> {
         self.conn.lock().await
     }
 
+    #[allow(dead_code)]
     pub async fn new(client: redis::Client, prefix: &str) -> Result<Self> {
         let conn = client
             .get_multiplexed_async_connection()

@@ -351,6 +351,7 @@ impl SessionState {
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
     use arrow::array::{Float64Array, Int64Array, StringArray};

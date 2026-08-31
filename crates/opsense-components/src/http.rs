@@ -332,7 +332,7 @@ impl_http_source!(
             let storage: Arc<dyn TimeseriesStorage> = if !self.data_dir.is_empty() {
                 #[cfg(feature = "sqlite")]
                 {
-                    match SqliteStorage::open(&self.data_dir).await {
+                    match opsense_libs::storage::SqliteStorage::open(&self.data_dir).await {
                         Ok(s) => Arc::new(s),
                         Err(e) => {
                             tracing::warn!(

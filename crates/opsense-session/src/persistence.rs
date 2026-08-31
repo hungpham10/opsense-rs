@@ -228,7 +228,7 @@ mod tests {
                 "@1".into(),
                 SessionValue::dataframe(make_batch(5)),
             );
-            s.set_variable("scalar".into(), SessionValue::scalar(3.14f64));
+            s.set_variable("scalar".into(), SessionValue::scalar(std::f64::consts::PI));
             s.set_variable("plot".into(), SessionValue::plot(vec![1, 2, 3], "png"));
             s.current_station = Some("st-1".into());
             s.add_history(HistoryEntry {
@@ -270,7 +270,7 @@ mod tests {
                 .unwrap()
                 .as_f64()
                 .unwrap(),
-            3.14
+            std::f64::consts::PI
         );
         assert_eq!(state.get_variable("plot").unwrap().as_bytes().unwrap(), &[1u8, 2, 3]);
         assert_eq!(state.current_station.as_deref(), Some("st-1"));
