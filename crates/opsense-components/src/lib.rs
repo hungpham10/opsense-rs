@@ -1,54 +1,64 @@
 //! Opsense components: the vector dataflow [`Component`]s that drive collection.
 //!
 //! This crate holds every Opsense-specific component registered into the
-//! `opsense_libs::vector` [`Runtime`] (the executor). It is split from
-//! `opsense-core` so the growing pile of components cannot bloat the pure
-//! domain crate. The default hourly dataflow is:
+//! `opsense_libs::vector` [`Runtime`]. It is split from `opsense-core` so the
+//! growing pile of components cannot bloat the pure domain crate.
 //!
-//! ```text
-//! Clock (Source, tick+ts) → Ingest (Transform) → Processor (Transform)
-//! ```
-//!
-//! (The durable `Persist` sink was removed — each node now owns its own
-//! station and there is no shared persistence tier.)
-//!
-//! Nodes talk via the [`signal`] schema (`tick` / `data_ready` / `processed`,
-//! each carrying a timestamp watermark), so any Source — Clock today, a
-//! Kafka/Redis/RabbitMQ consumer tomorrow — can drive the same chain. Each
-//! node advances its own cursor in [`Watermarks`] and the next node reads
-//! exactly the delta. The runtime refuses a standalone node (every node must
-//! be linked into the graph), so the chain is wired end-to-end.
+//! Nodes register their own stations into the process-wide
+//! [`opsense_core::Context`] via [`Context::registry`]. The runtime injects
+//! `Context` into every component through `Outbound.ctx`, so each `run()` can
+//! both write to its own station and read from upstream stations.
 
-mod clock;
-mod collector;
-mod http;
-mod ingest;
-mod processor;
+use std::collections::BTreeMap;
 
-pub mod catalog;
+pub mod http;
+pub mod processor;
 pub mod signal;
 pub mod station;
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use opsense_core::config::Config;
-
-pub use clock::ClockSource;
-pub use collector::CollectorSink;
-pub use opsense_core::{Context, OpsenseContext, Stations};
-/// Alias for `OpsenseContext::new_stations()` — creates an empty in-memory
-/// station registry.
-pub fn new_station_registry() -> Stations {
-    OpsenseContext::new_stations()
-}
-pub use http::{FieldSpec, HttpSource};
-pub use ingest::IngestSource;
-pub use processor::ProcessorTransform;
 pub use station::{
-    own_station, CategoryStationTransform, PatternStationTransform, StationKind,
-    TimeseriesStationSink, TimeseriesStationTransform,
+    CategoryStationTransform, PatternStationTransform, TimeseriesStationSink,
+    TimeseriesStationTransform,
 };
+
+/// Render `{{name}}` placeholders in a template using the provided vars.
+///
+/// 1-pass scan: any `{{ ... }}` segment is trimmed and looked up in `vars`.
+/// Missing variable → `Err`. No nesting, no escaping, no `{{` inside `{{`.
+/// Used by `http.rs` to interpolate URL, headers, params, and body fields.
+pub fn render(template: &str, vars: &BTreeMap<String, String>) -> Result<String, String> {
+    let bytes = template.as_bytes();
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            // Find the closing `}}`.
+            let mut j = i + 2;
+            while j + 1 < bytes.len() && !(bytes[j] == b'}' && bytes[j + 1] == b'}') {
+                j += 1;
+            }
+            if j + 1 >= bytes.len() {
+                return Err(format!("unterminated placeholder starting at byte {i}"));
+            }
+            let raw = &template[i + 2..j];
+            let key = raw.trim();
+            if key.is_empty() {
+                return Err(format!("empty placeholder at byte {i}"));
+            }
+            let value = vars
+                .get(key)
+                .ok_or_else(|| format!("missing variable `{key}`"))?;
+            out.push_str(value);
+            i = j + 2;
+        } else {
+            // Push one char safely (template is UTF-8).
+            let ch = template[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    Ok(out)
+}
 
 /// Re-export of the `vector` runtime under `crate::vector::runtime`.
 ///
@@ -60,149 +70,65 @@ pub mod vector {
     pub use opsense_libs::vector::runtime;
 }
 
-/// The default graph: `clock -> ingest -> processor`, ticking every
-/// `engine.poll_interval_seconds` (1h in production configs).
-#[must_use]
-pub fn default_pipeline(cfg: &Config) -> Vec<Arc<dyn vector::runtime::Component>> {
-    let interval = Duration::from_secs(cfg.engine.poll_interval_seconds.max(1));
-    let mut collector = CollectorSink::new();
-    collector.inputs = vec!["processor".to_string()];
-    vec![
-        Arc::new(ClockSource::new(interval)),
-        Arc::new(IngestSource::new()),
-        Arc::new(ProcessorTransform::new()),
-        Arc::new(collector),
-    ]
-}
-
-/// The component list for a runtime session: the explicit `[pipeline]`
-/// component tables when configured, otherwise [`default_pipeline`].
-///
-/// Shared by `opsense serve` and MCP `opsense_init` so both apply the same
-/// override rules and report typetag deserialization errors identically.
-pub fn pipeline_from_config(
-    cfg: &Config,
-) -> Result<Vec<Arc<dyn vector::runtime::Component>>, String> {
-    match &cfg.pipeline {
-        Some(p) if !p.components.is_empty() => p.components
-            .iter()
-            .map(|value| {
-                serde_json::from_value::<Box<dyn vector::runtime::Component>>(value.clone())
-                    .map(Arc::from)
-                    .map_err(|e| format!("component `{value}`: {e}"))
-            })
-            .collect(),
-        _ => Ok(default_pipeline(cfg)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::collections::BTreeMap;
-
-    use async_trait::async_trait;
-    use opsense_core::collector::Collector;
-    use opsense_core::registry;
-    use opsense_core::source::{SourceError, TelemetrySource};
-    use opsense_core::Cursor;
-    use opsense_core::Stage;
-    use opsense_core::Watermarks;
-    use opsense_model::{Observation, Signal, TelemetryKind};
-    use vector::runtime::{Event, Runtime};
-
-    struct MockSource {
-        id: String,
-        obs: Vec<Observation>,
+    fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
     }
 
-    fn dummy_config() -> Config {
-        Config {
-            engine: Default::default(),
-            capacity: Default::default(),
-            sources: Default::default(),
-            attributes: Default::default(),
-            storage: Default::default(),
-            session: Default::default(),
-            repl: Default::default(),
-            pipeline: None,
-        }
+    #[test]
+    fn render_basic() {
+        let v = vars(&[("a", "1")]);
+        assert_eq!(render("http://x/?a={{a}}", &v).unwrap(), "http://x/?a=1");
     }
 
-    #[async_trait]
-    impl TelemetrySource for MockSource {
-        fn id(&self) -> &str {
-            &self.id
-        }
-        async fn fetch(&self) -> Result<Vec<Observation>, SourceError> {
-            Ok(self.obs.clone())
-        }
+    #[test]
+    fn render_multiple() {
+        let v = vars(&[("a", "1"), ("b", "2")]);
+        assert_eq!(render("{{a}}-{{b}}", &v).unwrap(), "1-2");
     }
 
-    #[tokio::test]
-    async fn hourly_pipeline_runs_end_to_end() {
-        let src = MockSource {
-            id: "mock".into(),
-            obs: vec![Observation::new(
-                1_000,
-                "cpu".into(),
-                TelemetryKind::Metric,
-                Signal::Utilization,
-                12.0,
-            )],
-        };
-        let collector = Arc::new(Collector::new(vec![Box::new(src)]));
-        let ctx = Arc::new(OpsenseContext::new(
-            collector,
-            Watermarks::new(),
-            Arc::new(BTreeMap::new()),
-            OpsenseContext::new_stations(),
-        ));
+    #[test]
+    fn render_whitespace() {
+        let v = vars(&[("a", "1")]);
+        assert_eq!(render("{{ a }}", &v).unwrap(), "1");
+    }
 
-        let mut runtime = Runtime::new();
-        let watermarks = ctx.watermarks().clone();
-        runtime.set_context(ctx);
-        let cfg = Config {
-            engine: opsense_core::config::EngineConfig {
-                poll_interval_seconds: 1, // fast for the test
-                ..Default::default()
-            },
-            ..dummy_config()
-        };
-        runtime
-            .reload(default_pipeline(&cfg))
-            .expect("runtime must accept the clock -> ingest -> processor graph");
+    #[test]
+    fn render_missing() {
+        let v = vars(&[("a", "1")]);
+        let err = render("{{b}}", &v).unwrap_err();
+        assert!(err.contains("missing variable `b`"));
+    }
 
-        let _handle = runtime
-            .start(|_event: Event| async {})
-            .expect("runtime start");
+    #[test]
+    fn render_no_placeholder() {
+        let v = vars(&[("a", "1")]);
+        assert_eq!(render("plain text", &v).unwrap(), "plain text");
+    }
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    #[test]
+    fn render_empty_placeholder() {
+        let v = vars(&[]);
+        assert!(render("{{}}", &v).is_err());
+        assert!(render("{{   }}", &v).is_err());
+    }
 
-        runtime.stop().expect("runtime stop");
-        runtime.wait_for_shutdown().await.expect("runtime shutdown");
+    #[test]
+    fn render_unterminated() {
+        let v = vars(&[("a", "1")]);
+        assert!(render("{{a", &v).is_err());
+    }
 
-        // Every stage saw the mock observation and cursors advanced.
-        // Model mới: dữ liệu sống trong TRẠM RIÊNG của từng node.
-        let ingest_st = registry::station("ingest")
-            .await
-            .expect("ingest_source must own a station");
-        let proc_st = registry::station("processor")
-            .await
-            .expect("processor must own a station");
-        let raw = ingest_st
-            .read()
-            .await
-            .query(Stage::Raw, "cpu", 0, i64::MAX)
-            .await;
-        let processed = proc_st
-            .read()
-            .await
-            .query(Stage::Processed, "cpu", 0, i64::MAX)
-            .await;
-        assert!(!raw.is_empty(), "ingest station must have the batch");
-        assert!(!processed.is_empty(), "processor must have run");
-        assert!(watermarks.get(Cursor::IngestDone) > 0);
+    #[test]
+    fn render_literal_braces() {
+        // Single `{` or `}` is passed through; only `{{` opens a placeholder.
+        let v = vars(&[("a", "1")]);
+        assert_eq!(render("curly {a} end", &v).unwrap(), "curly {a} end");
     }
 }

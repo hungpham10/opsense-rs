@@ -55,7 +55,12 @@ pub struct S3Config {
 
 impl S3Config {
     fn url(&self, rest: &str) -> String {
-        format!("s3://{}/{}/{}", self.bucket, self.prefix.trim_matches('/'), rest)
+        format!(
+            "s3://{}/{}/{}",
+            self.bucket,
+            self.prefix.trim_matches('/'),
+            rest
+        )
     }
 
     fn escape(s: &str) -> String {
@@ -265,7 +270,8 @@ impl DuckS3Storage {
                 .unwrap_or(0)
         );
         conn.execute_batch("BEGIN TRANSACTION;").map_err(db_err)?;
-        let result = conn.execute_batch(&format!(
+        let result = conn
+            .execute_batch(&format!(
                 "COPY (SELECT id, series, ts, value FROM ts_points)
                    TO '{}' (FORMAT PARQUET);
                  DELETE FROM ts_points;",
@@ -581,7 +587,8 @@ impl ShortcutsStorage for DuckS3Storage {
 
     async fn clear_shortcuts(&mut self) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM rt_shortcuts", []).map_err(db_err)?;
+        conn.execute("DELETE FROM rt_shortcuts", [])
+            .map_err(db_err)?;
         Ok(())
     }
 }
@@ -614,7 +621,8 @@ impl NodeMetaStorage for DuckS3Storage {
 
     async fn clear_node_meta(&mut self) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM rt_node_meta", []).map_err(db_err)?;
+        conn.execute("DELETE FROM rt_node_meta", [])
+            .map_err(db_err)?;
         Ok(())
     }
 
@@ -701,7 +709,8 @@ fn merged_ts_sql(has_s3: bool) -> String {
     if has_s3 {
         "(SELECT id, series, ts, value, 0 AS src FROM read_parquet(?, union_by_name = true) \
          UNION ALL \
-         SELECT id, series, ts, value, 1 AS src FROM ts_points)".to_string()
+         SELECT id, series, ts, value, 1 AS src FROM ts_points)"
+            .to_string()
     } else {
         "(SELECT id, series, ts, value, 1 AS src FROM ts_points)".to_string()
     }
@@ -819,18 +828,16 @@ impl TimeseriesStorage for DuckS3Storage {
         let mut out = if has_s3 {
             let glob = self.s3.as_ref().unwrap().url("ts_points/*.parquet");
             collect_rows(
-                stmt.query_map(
-                    params![glob, series.to_vec(), limit as i64],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
-                )
+                stmt.query_map(params![glob, series.to_vec(), limit as i64], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })
                 .map_err(db_err)?,
             )?
         } else {
             collect_rows(
-                stmt.query_map(
-                    params![series.to_vec(), limit as i64],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
-                )
+                stmt.query_map(params![series.to_vec(), limit as i64], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })
                 .map_err(db_err)?,
             )?
         };
@@ -961,14 +968,18 @@ impl PatternStorage for DuckS3Storage {
     async fn remove(&self, pattern: &str) -> Result<bool> {
         let conn = self.conn.lock();
         let n = conn
-            .execute("DELETE FROM ac_patterns WHERE pattern = ?", params![pattern])
+            .execute(
+                "DELETE FROM ac_patterns WHERE pattern = ?",
+                params![pattern],
+            )
             .map_err(db_err)?;
         Ok(n > 0)
     }
 
     async fn clear(&self) -> Result<()> {
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM ac_patterns", []).map_err(db_err)?;
+        conn.execute("DELETE FROM ac_patterns", [])
+            .map_err(db_err)?;
         Ok(())
     }
 }
@@ -1196,11 +1207,17 @@ mod tests {
         assert_eq!(s.get_key_len(7).await.unwrap(), None);
         s.set_meta(7, b"call-site-info").await.unwrap();
         s.set_key_len(7, 5).await.unwrap();
-        assert_eq!(s.get_meta(7).await.unwrap().as_deref(), Some(&b"call-site-info"[..]));
+        assert_eq!(
+            s.get_meta(7).await.unwrap().as_deref(),
+            Some(&b"call-site-info"[..])
+        );
         assert_eq!(s.get_key_len(7).await.unwrap(), Some(5));
 
         s.set_node_meta(3, b"node-json").await.unwrap();
-        assert_eq!(s.get_node_meta(3).await.unwrap().as_deref(), Some(&b"node-json"[..]));
+        assert_eq!(
+            s.get_node_meta(3).await.unwrap().as_deref(),
+            Some(&b"node-json"[..])
+        );
 
         s.set_chain(9, &[1, 2, 3]).await.unwrap();
         assert_eq!(s.get_chain(9).await.unwrap(), Some(vec![1, 2, 3]));
@@ -1209,7 +1226,10 @@ mod tests {
         assert_eq!(s.get_edge_data(7).await.unwrap(), None);
         s.set_edge_data(7, b"call-edge").await.unwrap();
         s.set_edge_data(7, b"call-edge-2").await.unwrap();
-        assert_eq!(s.get_edge_data(7).await.unwrap().as_deref(), Some(&b"call-edge-2"[..]));
+        assert_eq!(
+            s.get_edge_data(7).await.unwrap().as_deref(),
+            Some(&b"call-edge-2"[..])
+        );
         let mut edges = Vec::new();
         s.for_each_edge_data(&mut |id, data| {
             edges.push((id, data.to_vec()));
@@ -1245,7 +1265,10 @@ mod tests {
         let mut s = DuckS3Storage::open(&path).await.unwrap();
         assert_eq!(s.get_node(parent).await.unwrap(), (b"hello".to_vec(), 42));
         assert_eq!(s.get_root(3).await.unwrap(), parent);
-        assert_eq!(s.get_meta(42).await.unwrap().as_deref(), Some(&b"meta-42"[..]));
+        assert_eq!(
+            s.get_meta(42).await.unwrap().as_deref(),
+            Some(&b"meta-42"[..])
+        );
         assert_eq!(s.get_key_len(42).await.unwrap(), Some(5));
         assert_eq!(s.get_children(parent).await.unwrap().len(), 1);
         // Node id mới tiếp tục cấp trên counter đã persist.

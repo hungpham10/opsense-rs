@@ -13,7 +13,7 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use opsense_proto::host::KernelConnection;
-use opsense_proto::pb::{envelope, CodeRequest, DatasetHeader, Envelope, SessionParams};
+use opsense_proto::pb::{CodeRequest, DatasetHeader, Envelope, SessionParams, envelope};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 

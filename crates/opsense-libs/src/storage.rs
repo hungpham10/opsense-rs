@@ -329,16 +329,6 @@ pub trait EdgeDataStorage: Send + Sync {
     async fn clear_edges(&mut self) -> Result<()> {
         Ok(())
     }
-
-    /// Duyệt toàn bộ edge data `(edge_id, meta)` theo thứ tự bất kỳ — dùng để
-    /// rebuild edge registry khi reopen (CallEdgeMeta chứa from/to). Mặc định:
-    /// không có edge nào.
-    async fn for_each_edge_data(
-        &self,
-        _f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Chain storage: lưu/đọc per-owner chain (marker + symbol element ids),

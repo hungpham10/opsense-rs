@@ -15,13 +15,13 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use opsense_proto::frame::{Frame, FrameCodec, FrameTag};
 use opsense_proto::pb::{
-    envelope, exec_event, value, Ack, CodeRequest, DatasetAck, Envelope, ExecEvent, HealthStatus,
-    Welcome,
+    Ack, CodeRequest, DatasetAck, Envelope, ExecEvent, HealthStatus, Welcome, envelope, exec_event,
+    value,
 };
 use tokio::io::{stdin, stdout};
 use tokio_util::codec::{FramedRead, FramedWrite};

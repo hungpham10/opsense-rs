@@ -22,7 +22,7 @@ use opsense_core::Stage;
 
 use crate::runtime::ScriptSource;
 use crate::vector::runtime::{Component, Identify, Message, Outbound};
-use opsense_components::{signal, OpsenseContext};
+use opsense_components::{OpsenseContext, signal};
 use opsense_macros::transform;
 use tokio::sync::mpsc;
 

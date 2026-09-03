@@ -10,7 +10,7 @@
 //! {"event": "processed",   "ts": 1690003600}
 //! ```
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::vector::runtime::Message;
 

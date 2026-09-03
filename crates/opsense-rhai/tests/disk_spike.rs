@@ -5,7 +5,7 @@
 use opsense_core::registry;
 use opsense_core::{Stage, Station};
 use opsense_model::{Observation, Signal, TelemetryKind};
-use opsense_rhai::{call_process, ScriptSource};
+use opsense_rhai::{ScriptSource, call_process};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

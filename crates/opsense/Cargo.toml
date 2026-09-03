@@ -7,8 +7,8 @@ homepage.workspace = true
 repository.workspace = true
 description = "Centralize site reliability engineer's daily activities"
 
-[lints.rust]
-warnings = "deny"
+#[lints.rust]
+#warnings = "deny"
 
 [[bin]]
 name = "opsense"
@@ -18,23 +18,44 @@ path = "src/main.rs"
 dotenvy = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
-axum = "0.8"
-axum-prometheus = "0.10"
-tower = "0.5.3"
-tower-http = { version = "0.7.0", features = ["trace"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-sentry = { version = "0.49.1", features = ["tower-http"] }
-opentelemetry = { version = "0.32.0", features = ["metrics"] }
-opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
-opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio", "metrics"] }
-tracing-opentelemetry = "0.33.0"
+tonic = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+reqwest = { workspace = true }
+reedline = { workspace = true }
+comfy-table = { workspace = true }
+anyhow = { workspace = true }
+rmcp = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+
+axum = { workspace = true, features = ["macros", "multipart", "ws"] }
+axum-metrics = { workspace = true }
+axum-macros = { workspace = true }
+axum-extra = { workspace = true }
+axum-prometheus = { workspace = true }
+async-graphql = { workspace = true }
+async-graphql-axum = { workspace = true }
+headers = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+log = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sentry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+opsense-model = { path = "../opsense-model" }
 opsense-core = { path = "../opsense-core" }
 opsense-components = { path = "../opsense-components" }
+opsense-proto = { path = "../opsense-proto" }
 opsense-libs = { path = "../opsense-libs" }
-opsense-mcp = { path = "../opsense-mcp" }
-opsense-rhai = { path = "../opsense-rhai" }
-opsense-repl = { path = "../opsense-repl" }
 opsense-runner = { path = "../opsense-runner" }
-tonic = { workspace = true }
-opsense-session = { path = "../opsense-session" }

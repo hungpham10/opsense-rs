@@ -11,14 +11,22 @@ authors.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+arrow = { workspace = true, features = ["ipc"] }
+async-trait = { workspace = true }
+arrow-array = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
+chrono = { workspace = true }
+ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
+opsense-libs = { path = "../opsense-libs" }
 opsense-proto = { path = "../opsense-proto" }
-opsense-session = { path = "../opsense-session" }
+rand = { workspace = true }
+subtle = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = "0.1"
+tokio-stream = { workspace = true }
 tonic = { workspace = true }
-tracing = "0.1"
+tracing = { workspace = true }
 
 [dev-dependencies]
-arrow = { workspace = true }
+arrow = { workspace = true, features = ["ipc"] }

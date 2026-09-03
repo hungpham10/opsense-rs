@@ -38,8 +38,7 @@ where
 /// Callback tính cửa sổ thực sự hổng giữa `[from_ts, to_ts]` của một value đã
 /// có trong cache — trả `Some((gap_from, gap_to))` để chỉ fetch phần thiếu,
 /// hoặc `None` khi cache đã phủ đủ (hổng chỉ nằm trong tương lai).
-type CoverageGap<K, V> =
-    Arc<dyn Fn(&K, &V, u64, u64) -> Option<(u64, u64)> + Send + Sync>;
+type CoverageGap<K, V> = Arc<dyn Fn(&K, &V, u64, u64) -> Option<(u64, u64)> + Send + Sync>;
 
 // --- CẤU TRÚC DỮ LIỆU ---
 
@@ -69,42 +68,60 @@ pub struct LruCache<K, V, const S: usize> {
     shard_mask: usize,
     pub on_removing: Option<Arc<dyn Fn(K, V) + Send + Sync>>,
     pub on_updating: Option<Arc<dyn Fn(K, V) + Send + Sync>>,
+
     /// Persistence layer (optional). Khi được gắn, mỗi entry bị **evict** (do
     /// shard đầy) hoặc **update** (ghi đè key cũ) sẽ được append vào
     /// `TimeseriesStorage` dưới dạng điểm `(timestamp, value)`.
     pub timeseries: Option<Arc<dyn TimeseriesStorage>>,
+
     /// Map key → series name (opaque bytes). Quyết định entry ghi vào series nào.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub ts_series_of: Option<Arc<dyn Fn(&K) -> Vec<u8> + Send + Sync>>,
+
     /// Serialize value → opaque bytes lưu vào timeseries.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub ts_encode: Option<Arc<dyn Fn(&V) -> Vec<u8> + Send + Sync>>,
+
     /// Timestamp source (ms). Mặc định: `SystemTime::now()`.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub ts_clock: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+
     /// Decode opaque storage bytes về lại `V` (encode dùng lại `ts_encode`).
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub decode: Option<Arc<dyn Fn(&[u8]) -> Option<V> + Send + Sync>>,
+
     /// Validate độ phủ của một value (cache hoặc đĩa) cho cửa sổ yêu cầu.
     /// Trả `true` khi dữ liệu đủ/đáng tin. `None` → mặc định coi là đủ (như
     /// hành vi cũ). Khi trả `false`, entry được coi là miss và đi tiếp xuống
     /// tầng đĩa / origin.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub validate: Option<Arc<dyn Fn(&K, &V, u64, u64) -> bool + Send + Sync>>,
+
     /// Tính cửa sổ thực sự hổng (chưa có dữ liệu) giữa `[from_ts, to_ts]` của
     /// một value đã có trong cache. Trả `Some((gap_from, gap_to))` để chỉ fetch
     /// phần thiếu, hoặc `None` khi cache đã phủ đủ (hổng chỉ nằm trong tương
     /// lai, không thể fetch). Chỉ dùng khi có `fallback`/`storage`.
-    pub coverage_gap:
-        Option<Arc<dyn Fn(&K, &V, u64, u64) -> Option<(u64, u64)> + Send + Sync>>,
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    pub coverage_gap: Option<Arc<dyn Fn(&K, &V, u64, u64) -> Option<(u64, u64)> + Send + Sync>>,
+
     /// Nguồn gốc để re-fetch khi cả cache lẫn đĩa đều miss (tầng 3 read-through).
     /// Là `Arc<dyn OriginSource>` — xem [`OriginSource`].
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fallback: Option<Arc<dyn OriginSource<K, V>>>,
+
     /// Gộp slice vừa fetch từ origin với value đang có trong cache khi fallback
     /// thành công. `None` → value fetch được ghi đè nguyên khối (hành vi cũ).
     /// Station gán hook này để backfill quá khứ không xoá mất các điểm mới hơn
     /// đã có trong cache.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub ts_merge: Option<Arc<dyn Fn(&V, V) -> V + Send + Sync>>,
+
     /// Timestamp extractor cho điểm được persist xuống đĩa: từ entry sinh ra
     /// `u64` làm `ts` của point. Khi `None`, dùng `ts_clock` (mặc định
     /// wall-clock ms). Station gán callback này trả **ts quan sát mới nhất**
     /// để các điểm trên đĩa căn lề với cửa sổ request (tính bằng giây, không
     /// phải ms).
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub ts_timestamp_of: Option<Arc<dyn Fn(&K, &V) -> u64 + Send + Sync>>,
 }
 
@@ -212,6 +229,7 @@ where
     /// - `clock` cung cấp timestamp (ms). Mặc định `SystemTime::now()`.
     ///
     /// Ghi là **best-effort**: lỗi storage không làm fail `put`/`remove` của cache.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn attach_timeseries(
         &mut self,
         ts: Arc<dyn TimeseriesStorage>,
@@ -225,6 +243,7 @@ where
 
     /// Gắn một `TimeseriesStorage` kèm custom clock (tiện cho test / định dạng
     /// timestamp không phải ms). Xem [`Self::attach_timeseries`].
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn attach_timeseries_with_clock(
         &mut self,
         ts: Arc<dyn TimeseriesStorage>,
@@ -255,11 +274,9 @@ where
     /// `#[test]` trần), ghi bị bỏ qua — persistence chỉ có ý nghĩa dưới async
     /// runtime điều khiển pipeline.
     fn persist_point(&self, key: &K, value: &V) {
-        let (Some(storage), Some(series_of), Some(encode)) = (
-            &self.timeseries,
-            &self.ts_series_of,
-            &self.ts_encode,
-        ) else {
+        let (Some(storage), Some(series_of), Some(encode)) =
+            (&self.timeseries, &self.ts_series_of, &self.ts_encode)
+        else {
             return;
         };
         let series = series_of(key);
@@ -291,6 +308,7 @@ where
     /// `validate` coverage + future `fallback` origin. Sau khi gắn,
     /// `get_with_load` tự động reload từ đĩa và re-fetch từ origin khi cache
     /// miss / hổng coverage.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn attach_fallback(
         &mut self,
         ts: Arc<dyn TimeseriesStorage>,
@@ -315,6 +333,7 @@ where
     /// Gắn storage + encode/decode + `validate` nhưng KHÔNG có origin fallback.
     /// `get_with_load` sẽ reload từ đĩa khi miss, nhưng trả `None` khi cả cache
     /// lẫn đĩa đều không phủ cửa sổ (không có `fallback` để gọi).
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn attach_storage(
         &mut self,
         ts: Arc<dyn TimeseriesStorage>,
@@ -463,10 +482,10 @@ where
                 .validate
                 .as_ref()
                 .is_none_or(|v| v(key, &val, from_ts, to_ts))
-            {
-                return Some(val);
-            }
-            // validate fail → coi như miss, đi tiếp xuống đĩa/origin.
+        {
+            return Some(val);
+        }
+        // validate fail → coi như miss, đi tiếp xuống đĩa/origin.
 
         // 2. Tầng đĩa.
         if let (Some(ts), Some(series_of), Some(decode), Some(validate)) = (
@@ -480,10 +499,11 @@ where
                 // Ưu tiên snapshot mới nhất mà validate qua.
                 for (_, bytes) in points.iter().rev() {
                     if let Some(decoded) = decode(bytes)
-                        && validate(key, &decoded, from_ts, to_ts) {
-                            self.put(key.clone(), decoded.clone());
-                            return Some(decoded);
-                        }
+                        && validate(key, &decoded, from_ts, to_ts)
+                    {
+                        self.put(key.clone(), decoded.clone());
+                        return Some(decoded);
+                    }
                 }
             }
         }
@@ -1062,13 +1082,15 @@ mod tests {
             Arc::new(|b: &[u8]| String::from_utf8(b.to_vec()).ok()),
             Arc::new(|_, _, _, _| true),
             Arc::new(|_, _, _, _| None), // coverage_gap
-            Arc::new(move |_: &String, _: u64, _: u64| -> BoxFuture<Result<String, String>> {
-                let c = Arc::clone(&calls2);
-                Box::pin(async move {
-                    c.fetch_add(1, Ordering::SeqCst);
-                    Ok("fetched".to_string())
-                })
-            }),
+            Arc::new(
+                move |_: &String, _: u64, _: u64| -> BoxFuture<Result<String, String>> {
+                    let c = Arc::clone(&calls2);
+                    Box::pin(async move {
+                        c.fetch_add(1, Ordering::SeqCst);
+                        Ok("fetched".to_string())
+                    })
+                },
+            ),
         );
         let got = cache.get_with_load(&"k".to_string(), 0, u64::MAX).await;
         assert_eq!(got, Some("fetched".to_string()));
@@ -1087,9 +1109,11 @@ mod tests {
             Arc::new(|b: &[u8]| String::from_utf8(b.to_vec()).ok()),
             Arc::new(|_, _, _, _| true),
             Arc::new(|_, _, _, _| None), // coverage_gap
-            Arc::new(|_: &String, _: u64, _: u64| -> BoxFuture<Result<String, String>> {
-                Box::pin(async move { Err("boom".to_string()) })
-            }),
+            Arc::new(
+                |_: &String, _: u64, _: u64| -> BoxFuture<Result<String, String>> {
+                    Box::pin(async move { Err("boom".to_string()) })
+                },
+            ),
         );
         let got = cache.get_with_load(&"k".to_string(), 0, u64::MAX).await;
         assert_eq!(got, None);
