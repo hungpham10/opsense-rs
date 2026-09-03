@@ -1,4 +1,8 @@
-#!/bin/bash
-exec /usr/bin/alloy run /etc/alloy/config.alloy \
-    --server.http.listen-addr=127.0.0.1:12345 \
-    --storage.path=/var/lib/alloy
+#!/bin/sh
+set -e
+
+if [ "$USE_ALLOY" = "true" ]; then
+    exec /usr/bin/alloy run /etc/alloy/config.alloy --storage.path=/tmp/alloy-data
+else
+    sleep 315576000
+fi

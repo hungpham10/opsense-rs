@@ -836,6 +836,33 @@ Cập nhật 2026-09-03.
 - ⏳ Production deploy với `OPSENSE_TAG=v*` pull từ ghcr.io
 - ⏳ Phase 2 GraphQL bridge (cần `AppState.runner` để host dùng `RunnerClient` kết nối `opsense-runner:50051`)
 
+### Test scenarios
+
+Kịch bản test E2E cho 4 image + compose stack đã soạn tại
+[`TEST-SCENARIOS.MD`](./TEST-SCENARIOS.MD) (9 kịch bản A→I, 12 bước).
+Tóm tắt:
+
+| Kịch bản | Mục đích |
+|---|---|
+| A — Build local | Earthly +all-local, 4 image artifact, fix caveat `protobuf-compiler` |
+| B — Compose smoke | 6 service healthy, /health, GraphQL, gRPC, REPL mode |
+| C — Network isolation | 3 runner reachable song song, session_id khác nhau, sweeper |
+| D — Hot reload & persistence | GraphQL reload, sys_user CRUD qua Postgres, Valkey ping |
+| E — Failure modes | Container crash → auto-restart, Tầng 1 OK khi Tầng 2 down, rollback |
+| F — Performance baseline | Boot ≤60s, gRPC p99 ≤20ms, memory footprint |
+| G — CI/CD GH Action | Tag `v*` → 4 image push ghcr.io, tag matrix |
+| H — Security smoke | Auth reject khi thiếu/sai metadata, secrets không lộ trong image |
+| I — Cleanup | Prune image + Earthly cache |
+
+**Audit 2026-09-03** phát hiện 5 prerequisite chưa xong (xem
+`TEST-SCENARIOS.MD` §11) — phải giải quyết trước khi chạy test:
+
+1. `docker-compose.yml` chưa tồn tại trên đĩa.
+2. `Earthfile +base` thiếu `protobuf-compiler`.
+3. `Makefile` chưa có (PLAN.MD ghi nhầm "đã làm").
+4. `conf/opsense.conf.toml` reference `vector:8686` không có trong compose.
+5. Config mount qua `volumes:` chưa wire trong image `opsense-serve`.
+
 ### Caveats
 
 - Earthfile `+base` chưa có `protoc` — cần bổ sung nếu build trong

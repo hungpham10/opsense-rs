@@ -11,8 +11,12 @@ cache_max_blocks = 288
 cpu_usage = 32.0
 mem_usage = 64.0
 
-[sources.vector]
-url = "http://vector:8686"
+# Vector/Alloy metrics source. Disabled by default in dev — there is no
+# Vector service in the docker-compose stack. Uncomment the block below
+# and point `url` at a real scrape endpoint to enable metric ingestion.
+#
+# [sources.vector]
+# url = "http://alloy:9080"
 # jq_filter is run through opsense_libs::jq::JsonQuery, which supports field
 # access (`.field`), array iteration (`[]`) and field selection
 # (`select(a, b, ...)`). It does NOT support `|` pipes or `{...}` object
@@ -20,5 +24,5 @@ url = "http://vector:8686"
 #   [{"ts": 1, "metric_id": "cpu_usage", "kind": "metric", "signal": "raw",
 #     "value": 12.5, "labels": {"instance": "a"}}]
 # This filter simply iterates an array under `.data`.
-jq_filter = ".data[]"
-metrics = ["cpu_usage", "mem_usage"]
+# jq_filter = ".data[]"
+# metrics = ["cpu_usage", "mem_usage"]

@@ -8,13 +8,13 @@ ARG --global IMAGE_PREFIX=lap02921/opsense
 ARG --global VERSION=latest
 
 # -----------------------------------------------------------------------
-# base — shared Rust toolchain layer (apt deps only, no source yet)
+# builder — shared Rust toolchain layer (apt deps only, no source yet)
 # -----------------------------------------------------------------------
-base:
+builder:
     FROM rust:bookworm
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            pkg-config ca-certificates && \
+            pkg-config ca-certificates protobuf-compiler && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
     WORKDIR /app
     SAVE IMAGE --cache-hint
@@ -23,7 +23,7 @@ base:
 # recipe — cargo-chef recipe.json. Built once, shared by every binary.
 # -----------------------------------------------------------------------
 recipe:
-    FROM +base
+    FROM +builder
     RUN cargo install cargo-chef --locked
     COPY . .
     RUN cargo chef prepare --recipe-path recipe.json
@@ -34,36 +34,38 @@ recipe:
 # so the image targets can pick them up without rebuilding.
 # -----------------------------------------------------------------------
 opsense:
-    FROM +base
-    COPY +recipe/recipe.json recipe.json
+    FROM +recipe
     RUN cargo chef cook --release --recipe-path recipe.json -p opsense
     COPY . .
     RUN cargo build --release -p opsense
-    SAVE ARTIFACT target/release/opsense AS local artifact/opsense
+    SAVE ARTIFACT target/release/opsense AS LOCAL opsense
 
 kernel-echo:
-    FROM +base
-    COPY +recipe/recipe.json recipe.json
+    FROM +recipe
     RUN cargo chef cook --release --recipe-path recipe.json -p opsense-kernel-echo
     COPY . .
-    RUN cargo build --release -p opsense-kernel-echo
-    SAVE ARTIFACT target/release/opsense-kernel-echo AS local artifact/kernel-echo
+    RUN cargo build --release -p opsense-kernel-echo && \
+        mkdir -p /out/kernel-echo && \
+        cp target/release/opsense-kernel-echo /out/kernel-echo/
+    SAVE ARTIFACT /out/kernel-echo AS LOCAL kernel-echo
 
 kernel-python:
-    FROM +base
-    COPY +recipe/recipe.json recipe.json
+    FROM +recipe
     RUN cargo chef cook --release --recipe-path recipe.json -p opsense-kernel-python
     COPY . .
-    RUN cargo build --release -p opsense-kernel-python
-    SAVE ARTIFACT target/release/opsense-kernel-python AS local artifact/kernel-python
+    RUN cargo build --release -p opsense-kernel-python && \
+        mkdir -p /out/kernel-python && \
+        cp target/release/opsense-kernel-python /out/kernel-python/
+    SAVE ARTIFACT /out/kernel-python AS LOCAL kernel-python
 
 kernel-julia:
-    FROM +base
-    COPY +recipe/recipe.json recipe.json
+    FROM +recipe
     RUN cargo chef cook --release --recipe-path recipe.json -p opsense-kernel-julia
     COPY . .
-    RUN cargo build --release -p opsense-kernel-julia
-    SAVE ARTIFACT target/release/opsense-kernel-julia AS local artifact/kernel-julia
+    RUN cargo build --release -p opsense-kernel-julia && \
+        mkdir -p /out/kernel-julia && \
+        cp target/release/opsense-kernel-julia /out/kernel-julia/
+    SAVE ARTIFACT /out/kernel-julia AS LOCAL kernel-julia
 
 # -----------------------------------------------------------------------
 # serve — Tầng 1 host: OpenResty reverse proxy + opsense + alloy
@@ -130,10 +132,10 @@ serve:
     # Helper scripts + entrypoint
     COPY scripts/nginx.sh      /app/nginx.sh
     COPY scripts/alloy.sh      /app/alloy.sh
-    COPY scripts/entrypoint.sh /app/entrypoint.sh
+    COPY scripts/release.sh    /app/entrypoint.sh
 
     # Backend binary
-    COPY (+opsense/artifact/opsense) /app/opsense
+    COPY (+opsense/opsense) /app/opsense
     RUN chmod +x /app/*.sh
 
     ENTRYPOINT ["/app/entrypoint.sh", "/usr/bin/supervisord", "-n"]
@@ -144,15 +146,10 @@ serve:
 # runner — Tầng 2: opsense runner subcommand + default echo kernel
 # -----------------------------------------------------------------------
 runner:
-    FROM debian:bookworm-slim
-    ARG VERSION
-    RUN apt-get update && \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates libssl3 && \
-        apt-get clean && rm -rf /var/lib/apt/lists/*
-
-    COPY (+opsense/artifact/opsense)         /app/opsense
-    COPY (+kernel-echo/artifact/kernel-echo) /app/opsense-kernel-echo
+    FROM +recipe
+    COPY . .
+    RUN cargo build --release -p opsense && \
+        cargo build --release -p opsense-kernel-echo
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-echo
@@ -167,14 +164,15 @@ runner:
 runner-python:
     FROM python:3.12-slim
     ARG VERSION
+
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates libssl3 build-essential && \
+            ca-certificates libssl3 && \
         pip install --no-cache-dir numpy pandas pyarrow protobuf && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    COPY (+opsense/artifact/opsense)             /app/opsense
-    COPY (+kernel-python/artifact/kernel-python) /app/opsense-kernel-python
+    COPY (+opsense/opsense)                       /app/opsense
+    COPY (+kernel-python/kernel-python/opsense-kernel-python) /app/opsense-kernel-python
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-python
@@ -190,8 +188,8 @@ runner-julia:
     FROM julia:1.10-bookworm
     ARG VERSION
 
-    COPY (+opsense/artifact/opsense)          /app/opsense
-    COPY (+kernel-julia/artifact/kernel-julia) /app/opsense-kernel-julia
+    COPY (+opsense/opsense)                       /app/opsense
+    COPY (+kernel-julia/kernel-julia/opsense-kernel-julia) /app/opsense-kernel-julia
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-julia

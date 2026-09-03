@@ -1,0 +1,80 @@
+name: opsense
+
+# Docker Compose v2 stack for local dev.
+#
+# Bring up the whole stack with:
+#   docker compose up -d
+#
+# Services:
+#   - postgres    : primary persistence (postgres:16-alpine)
+#   - valkey      : cache layer (valkey 7-alpine)
+#   - runner*     : 3 image variants of the analysis runner (echo/python/julia)
+#   - opsense-serve: the main HTTP/gRPC server (opsense + nginx + alloy under supervisor)
+#
+# The opsense-serve image is built by Earthly: `earthly +all-local` first, then
+# `docker compose up`. See Makefile shortcuts.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: opsense-postgres
+    environment:
+      POSTGRES_DB: opsense
+      POSTGRES_USER: opsense
+      POSTGRES_PASSWORD: opsense123
+    # Mount depth=1 schema files only — Postgres initdb runs every *.sql
+    # in this directory at first boot. Env-specific seeds (depth=2) are
+    # mounted into opsense-serve and run by scripts/release.sh.
+    volumes:
+      - ./sql/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opsense -d opsense"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [opsense-net]
+
+  valkey:
+    image: valkey:7-alpine
+    container_name: opsense-valkey
+    networks: [opsense-net]
+
+  opsense-runner:
+    image: opsense-runner:local
+    container_name: opsense-runner
+    networks: [opsense-net]
+
+  opsense-runner-python:
+    image: opsense-runner-python:local
+    container_name: opsense-runner-python
+    networks: [opsense-net]
+
+  opsense-runner-julia:
+    image: opsense-runner-julia:local
+    container_name: opsense-runner-julia
+    networks: [opsense-net]
+
+  opsense-serve:
+    image: opsense-serve:local
+    container_name: opsense-serve
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./env/secrets.dev.enc.yaml:/app/secrets/secrets.dev.enc.yaml:ro
+      - ./conf/opsense.conf.toml:/app/opsense.conf.toml:ro
+      # Mount the whole sql tree so release.sh can run schema (depth=1) then
+      # the env-specific seed (depth=2) at boot.
+      - ./sql:/app/sql:ro
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      ENCRYPTED_FILE: /app/secrets/secrets.${APP_ENV:-dev}.enc.yaml
+      SQL_BASE: /app/sql
+      RUST_LOG: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [opsense-net]
+
+networks:
+  opsense-net:
+    driver: bridge
