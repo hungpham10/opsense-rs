@@ -5,6 +5,7 @@
 //! through the stores instead — MCP `opsense_query` or a station_sink's
 //! `/observations` endpoint.
 
+pub mod admin;
 pub mod repl;
 
 use std::collections::BTreeMap;
@@ -67,6 +68,7 @@ impl Header for XTenantId {
 pub struct AppState {
     context: Arc<Context>,
     runtime: Arc<RwLock<Runtime>>,
+    pub admin_entity: Arc<opsense_model::entities::admin::Admin>,
 }
 
 impl AppState {
@@ -74,6 +76,9 @@ impl AppState {
         let runtime = Arc::new(RwLock::new(Runtime::new()));
         let secret = Arc::new(Secret::new().await?);
         let context = Arc::new(Context::new(config, secret.clone()));
+
+        let resolver = Arc::new(opsense_model::resolver::Resolver::new(secret.clone()).await?);
+        let admin_entity = Arc::new(opsense_model::entities::admin::Admin::new(&resolver));
 
         {
             let mut runtime = runtime.write().await;
@@ -94,7 +99,11 @@ impl AppState {
             })?;
         }
 
-        Ok(Self { context, runtime })
+        Ok(Self {
+            context,
+            runtime,
+            admin_entity,
+        })
     }
 
     pub async fn stop(&self) -> Result<(), Error> {

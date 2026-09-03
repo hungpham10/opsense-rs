@@ -509,7 +509,156 @@ metadata:
 
 ---
 
-## 8. Roadmap
+## 8. Tầng persistence (DB layer)
+
+> Bổ sung 2026-09-03 sau khi gỡ bỏ sea-orm. DB hiện chỉ phục vụ **admin
+> entity** (4 bảng) — không còn dính líu tới WMS/OHLC/chat/sitemap/gateway.
+
+### 8.1 Bức tranh tổng thể
+
+`Admin` (`opsense-model/src/entities/admin.rs`) dùng `sqlx::AnyPool` (1
+pool/DSN, multi-dialect) do `Resolver` cấp. Mọi query của admin đều đi qua
+4 bảng `sys_*`; mọi bảng khác trong `sql/` (mysql + postgres) đã được dọn
+sạch ngày 2026-09-03 vì không còn code nào đụng tới.
+
+```
+                 ┌──────────────┐
+                 │  Admin        │   sqlx::query(...)
+                 │  (entity)     │   - MySQL: ON DUPLICATE KEY UPDATE
+                 │               │   - Postgres/SQLite: ON CONFLICT (...) DO UPDATE
+                 └──────┬────────┘
+                        │
+                        ▼
+              ┌──────────────────┐
+              │  Resolver        │   DbKind::from_dsn(DSN)
+              │  (AnyPool)       │   - mysql  → DbKind::MySql
+              │                  │   - postgres → DbKind::Postgres
+              │                  │   - sqlite  → DbKind::Sqlite
+              └──────┬───────────┘
+                     │
+              ┌──────┴──────────────────┐
+              ▼                         ▼
+   ┌─────────────────┐       ┌────────────────────┐
+   │ MySQL 8 / Maria │       │ Postgres 16         │
+   │ (default)       │       │ (alternative)       │
+   └─────────────────┘       └────────────────────┘
+```
+
+### 8.2 4 bảng `sys_*` — schema + mục đích
+
+Tất cả schema hiện hữu ở [`sql/mysql/03-create-tables-of-sys.sql`](../sql/mysql/03-create-tables-of-sys.sql)
+và [`sql/postgres/03-create-tables-of-sys.sql`](../sql/postgres/03-create-tables-of-sys.sql).
+
+#### `sys_tenant` — ánh xạ host → tenant_id
+
+| Column | Type | Mục đích |
+|---|---|---|
+| `host` | `VARCHAR(200) PK` | domain/subdomain admin dùng để tra (`get_tenant_id`) |
+| `id` | `BIGINT UNIQUE` | tenant_id nội bộ; hash cho cache/cache shard |
+| `jwt_mode` | `VARCHAR(20)` | `null / hs256 / oidc` (chọn mode auth) |
+| `jwt_secret` | `BIGINT` | FK → `sys_token_map.id` (token lưu HS256 secret, mã hoá) |
+| `oidc_jwks_url` | `VARCHAR(500)` | URL JWKS của IdP |
+| `oidc_issuer` | `VARCHAR(255)` | expected `iss` claim |
+| `oidc_client_id` | `VARCHAR(255)` | OIDC client_id (chuỗi public) |
+| `oidc_client_secret` | `BIGINT` | FK → `sys_token_map.id` |
+| `oidc_expected_alg` | `VARCHAR(10)` | `RS256` / `ES256` / ... |
+| `session_secret` | `BIGINT` | FK → `sys_token_map.id` (dùng cho cookie session) |
+
+API dùng: `GET /tenant/{host}/id`, `GET /tenant/{host}/auth-config`.
+
+#### `sys_oidc` — cấu hình OIDC cho từng tenant
+
+Cùng shape với `sys_tenant` nhưng cho phép **nhiều** cấu hình OIDC/tenant
+(nhiều IdP cho 1 tenant — vd phân biệt internal vs customer). Hiện
+`Admin` chưa đụng tới — để dành cho phase auth (PLAN.MD phase 4).
+
+#### `sys_token_map` — token mã hoá theo service
+
+| Column | Type | Mục đích |
+|---|---|---|
+| `id` | `BIGINT PK` | tham chiếu từ `sys_user.token_id` và các FK secret ở `sys_tenant` |
+| `tenant_id` | `BIGINT` | shard theo tenant |
+| `service` | `VARCHAR(200)` | tên service: `admin_db_token`, `oidc_client_secret`, ... |
+| `token` | `VARBINARY(1024)` / `BYTEA` | plaintext token **đã mã hoá** qua `opsense_libs::sops::encrypt` (master_key từ secret backend) |
+
+Unique: `(tenant_id, service)`. API dùng: `GET /seo/tokens/{name}`,
+`POST /seo/tokens/{name}`. Cache: in-process LRU 32 entries, key
+`(tenant_id, service)` và `(tenant_id, id)` (`Admin::cache_unencrypted_tokens_by_*`).
+
+#### `sys_user` — user token issued
+
+| Column | Type | Mục đích |
+|---|---|---|
+| `id` | `BIGINT PK` | row id nội bộ |
+| `tenant_id` | `BIGINT` | shard key |
+| `user_id` | `VARCHAR(255)` | định danh user (do client cung cấp) |
+| `token_hash` | `VARCHAR(64)` | sha256 hex của plaintext token — index UNIQUE để tra nhanh |
+| `token_id` | `BIGINT` | FK → `sys_token_map.id` (lưu plaintext đã mã hoá) |
+| `expires_at` | `TIMESTAMP NULL` | TTL; null = không hết hạn |
+| `revoked_at` | `TIMESTAMP NULL` | set khi revoke; null = còn hiệu lực |
+| `last_used_at` | `TIMESTAMP NULL` | update mỗi lần verify thành công |
+| `created_at` / `updated_at` | `TIMESTAMP` | audit |
+
+Unique: `(tenant_id, user_id)`, `token_hash` toàn cục.
+
+API dùng: `POST /tokens/users` (issue), `GET /tokens/users`
+(list), `GET /tokens/users/{user_id}` (reveal), `DELETE
+/tokens/users/{user_id}` (revoke), `POST /token/introspect` (verify).
+
+### 8.3 Multi-dialect: cách chọn UPSERT syntax
+
+`Admin` gọi `Resolver::database_kind(tenant_id)` (xem
+[`resolver.rs:14-36`](../crates/opsense-model/src/resolver.rs)) để lấy
+`DbKind`. Hai syntax khác nhau cho cùng 1 ngữ nghĩa upsert:
+
+| Dialect | INSERT ... ON CONFLICT / ON DUPLICATE KEY |
+|---|---|
+| `MySql` | `... VALUES (...) ON DUPLICATE KEY UPDATE token = VALUES(token), updated_at = CURRENT_TIMESTAMP` |
+| `Postgres` / `Sqlite` | `... VALUES (...) ON CONFLICT (tenant_id, service) DO UPDATE SET token = EXCLUDED.token, updated_at = CURRENT_TIMESTAMP` |
+
+Tương tự cho `sys_user` (xem `admin.rs:336-345` cho token,
+`admin.rs:399-417` cho user). Mọi chỗ khác (SELECT, UPDATE đơn lẻ) đều
+dialect-agnostic.
+
+### 8.4 Quyết định thiết kế chính
+
+- **Bỏ sea-orm hoàn toàn**: resolver chỉ trả `sqlx::AnyPool` — không có
+  bridge nào sang sea-orm. Admin dùng raw `sqlx::query(...)`. Lý do:
+  giảm compile time, giảm 1 tầng abstraction, multi-dialect mà không
+  cần feature gating phức tạp.
+- **Datetime qua TEXT**: `sqlx::Any` không có `chrono` impl, nên
+  `expires_at` / `revoked_at` / `last_used_at` được SELECT qua
+  `CAST(... AS TEXT)` rồi parse bằng `parse_dt` (hỗ trợ cả RFC3339 lẫn
+  `YYYY-MM-DD HH:MM:SS`). Xem `admin.rs:parse_dt`.
+- **Plaintext token không bao giờ ở DB**: chỉ lưu sha256 hex (index) +
+  ciphertext trong `sys_token_map.token`. Verify = sha256(input) → tra
+  `sys_user` → lấy `token_id` → đọc `sys_token_map` → decrypt → so sánh
+  constant-time (`subtle::ConstantTimeEq`).
+- **In-process cache, không Redis cache cho admin token**: cache chỉ
+  phục vụ hot path `verify_user_token` (lookup theo `token_hash` hoặc
+  `service+tenant_id`). Redis được `Resolver` setup riêng cho các
+  pipeline use case khác.
+
+### 8.5 Phạm vi cleanup (2026-09-03)
+
+Đã xoá khỏi `sql/` (mysql + postgres):
+
+- WMS (inventory + picking + zones): `wms_*` — không còn code nào đụng.
+- OHLC (finance + brokers + gold stores + bank rates): `ohcl_*` — legacy.
+- Chat: `chat_threads` — legacy.
+- Sitemap / article / file management: `sys_sitemap`, `sys_articlemap`,
+  `sys_filemap` — API đã bỏ.
+- API gateway / table gateway: `sys_api_map`, `sys_table_map`,
+  `sys_database_map` — API đã bỏ.
+- Component management: `sys_streams`, `sys_sinks`,
+  `sys_link_streams_to_sinks` — `into_components` đã bỏ.
+
+Còn lại **chỉ 4 bảng** (`sys_tenant`, `sys_oidc`, `sys_token_map`,
+`sys_user`) — khớp 1-1 với các method của `Admin` entity.
+
+---
+
+## 9. Roadmap
 
 > Audit ngày 2026-09-03. Phase 2 REPL mode (RunnerClient + KernelRepl) đã xong;
 > Phase 2 GraphQL bridge chỉ còn wrap RunnerClient qua resolvers.
@@ -540,3 +689,138 @@ metadata:
   - ✅ Tích hợp `Commands::Runner` vào `opsense` binary (`main.rs:34-38, 63-83`)
   - ⏳ `tests/grpc_e2e.rs` rewrite (cũ vẫn work với raw `KernelRunnerClient`)
 - ⏳ Cleanup: `crates/opsense/src/serve.rs.bak` (backup Aug 30, không load)
+
+---
+
+## 10. Build & deployment (Earthfile-based)
+
+> Bổ sung 2026-09-03. Thay thế 4 Dockerfile rời rạc bằng một `Earthfile`
+> duy nhất, share cargo-chef cache giữa các binary build.
+
+### 10.1 Bức tranh tổng thể
+
+```
+                       ┌────────────── opsense-serve ──────────────┐
+                       │  OpenResty + alloy + opsense serve       │
+   browser / curl ───▶ │  axum (UDS /var/run/axum + GraphQL)     │
+                       └────────────────────┬────────────────────┘
+                                            │ gRPC + Ed25519
+                                            │ (OPSENSE_RUNNER_GRPC)
+                                            ▼
+       ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐
+       │ opsense-runner       │  │ opsense-runner-      │  │ opsense-runner-      │
+       │ (debian-slim)        │  │ python (3.12-slim)   │  │ julia (1.10-bookworm)│
+       │  + opsense-kernel-   │  │  + opsense-kernel-   │  │  + opsense-kernel-   │
+       │  echo (default)      │  │  python              │  │  julia               │
+       │  :50051              │  │  :50051              │  │  :50051              │
+       └──────────────────────┘  └──────────────────────┘  └──────────────────────┘
+```
+
+### 10.2 Earthfile target graph
+
+```
++base (rust:bookworm + pkg-config)          ← cache share
+   ↓
++recipe (cargo chef prepare → recipe.json)  ← cache share
+   ↓
+   ├── +opsense  ──────────────┐
+   ├── +kernel-echo  ──────────┤
+   ├── +kernel-python ─────────┤── parallel, cùng đọc recipe.json
+   └── +kernel-julia  ─────────┘
+       ↓
+       ├── +serve  (openresty base + lua modules + alloy + copy +opsense)
+       ├── +runner (debian-slim + copy +opsense + copy +kernel-echo)
+       ├── +runner-python (python:3.12-slim + copy +opsense + copy +kernel-python)
+       └── +runner-julia (julia:1.10-bookworm + copy +opsense + copy +kernel-julia)
+```
+
+### 10.3 4 image output
+
+| Image | Base | Binary | Port | Tag (default) |
+|---|---|---|---|---|
+| `opsense-serve` | `openresty/openresty:1.27.1.2-4-bookworm-fat` | `opsense serve` | `8080` | `local` (dev), `v*` (release) |
+| `opsense-runner` | `debian:bookworm-slim` | `opsense runner` + echo kernel | `50051` | `local` / `v*` |
+| `opsense-runner-python` | `python:3.12-slim` | `opsense runner` + python kernel | `50051` | `local` / `v*` |
+| `opsense-runner-julia` | `julia:1.10-bookworm` | `opsense runner` + julia kernel | `50051` | `local` / `v*` |
+
+Image name theo convention: `${REGISTRY}/${IMAGE_PREFIX}-<role>:${VERSION}`.
+Mặc định `REGISTRY=ghcr.io`, `IMAGE_PREFIX=lap02921/opsense`, `VERSION=latest`.
+
+### 10.4 Hai workflow tách biệt
+
+**Local dev:**
+```bash
+earthly +all-local       # build 4 image với tag `local`
+docker compose up -d      # chạy stack
+curl http://localhost:8080/health
+```
+
+**Production (qua GH Action):**
+- Push tag `v*` lên GitHub → trigger `.github/workflows/release.yml`
+- Action: login ghcr.io → `earthly --push --build-arg VERSION=${{ github.ref_name }} +all`
+- Image push lên `ghcr.io/lap02921/opsense-*:v*`
+- Production server: `OPSENSE_TAG=v* docker compose pull && up -d`
+
+### 10.5 Compose (6 services)
+
+`docker-compose.yml` chỉ reference image (không có `build:` context).
+Tag override qua biến `OPSENSE_TAG` (default `local`):
+
+```yaml
+services:
+  opsense:
+    image: opsense-serve:${OPSENSE_TAG:-local}
+  opsense-runner:
+    image: opsense-runner:${OPSENSE_TAG:-local}
+  opsense-runner-python:
+    image: opsense-runner-python:${OPSENSE_TAG:-local}
+  opsense-runner-julia:
+    image: opsense-runner-julia:${OPSENSE_TAG:-local}
+  postgres:    { image: postgres:16-alpine }
+  valkey:      { image: valkey/valkey:9.0-alpine }
+```
+
+### 10.6 File-level thay đổi (Phase 5)
+
+| File | Hành động |
+|---|---|
+| `Earthfile` | **Mới** — 1 file build 4 image, share cargo-chef cache |
+| `.earthignore` | **Mới** — tương tự .dockerignore |
+| `scripts/entrypoint.sh` | **Mới** — `mkdir /var/run/axum`, exec supervisord |
+| `scripts/nginx.sh` | **Mới** — OpenResty foreground |
+| `scripts/alloy.sh` | **Mới** — Alloy foreground |
+| `conf/supervisor/opsense.conf` | **Mới** — 3 programs (app/nginx/alloy), NO tor |
+| `conf/nginx/http.conf` | Sửa 1 dòng — comment out `load_module libproxy.so` |
+| `docker-compose.yml` | Viết lại — 6 services, image reference only |
+| `.github/workflows/release.yml` | **Mới** — trigger `v*` → `earthly --push +all` |
+| `Makefile` | Viết lại — 4 target `server / runner / kernel-{echo,python,julia}` |
+| `Dockerfile` (cũ) | **Xoá** — thay bằng Earthfile |
+
+### 10.7 Quyết định thiết kế chính
+
+- **Một Earthfile thay 4 Dockerfile**: `+recipe` build 1 lần, cả 4 binary
+  cùng đọc → giảm ~70% build time lần đầu. `SAVE IMAGE --cache-hint` ở
+  `+base` giúp Earthly reuse layer khi không đổi base.
+- **Runner tách thành service riêng**: đúng theo kiến trúc 2 tầng
+  (§3.1). Host `opsense serve` giao tiếp qua `OPSENSE_RUNNER_GRPC` env.
+- **3 runner image riêng**: mỗi image chạy đúng 1 kernel backend, user
+  tuỳ use case mà connect. Default là echo (test nhanh, không cần runtime
+  ngoài).
+- **`OPSENSE_TAG` override**: cùng `docker-compose.yml` phục vụ cả dev
+  (`local`) lẫn prod (git tag), không cần maintain 2 file.
+- **Không tor, không sops**: gỡ bỏ so với template. Supervisor cũng bỏ
+  `[program:tor]`. Project này không cần.
+- **`load_module libproxy.so` removed**: crate `proxy` (build NGINX C
+  module) không tồn tại trong workspace. Lua-resty modules (JWT/OIDC/
+  session/http/redis) đã xử lý đầy đủ.
+
+### 10.8 Caveats
+
+- `+base` image thiếu `protobuf-compiler` cho `opsense-proto` (`build.rs`).
+  Earthly build trong CI cần bổ sung `apt-get install protobuf-compiler`
+  hoặc build trong image có sẵn protoc.
+- `opsense-runner-julia` khá nặng (~1.5GB) vì kéo `julia:1.10-bookworm`.
+  Có thể dùng `julia:1.10-alpine` để giảm, nhưng cần verify deps Linux.
+- Khi Phase 2 GraphQL bridge bật, host sẽ tạo `RunnerClient` tới
+  `opsense-runner:50051` (env `OPSENSE_RUNNER_GRPC`). Compose đã
+  wire sẵn — chỉ cần thêm env khi triển khai thực tế.

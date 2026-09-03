@@ -24,7 +24,39 @@ pub type DbClient = AnyPool;
 pub struct Resolver {
     caches: Vec<MultiplexedConnection>,
     dbs: Vec<DbClient>,
+    db_kinds: Vec<DbKind>,
     s3_client: Arc<S3Client>,
+}
+
+/// Dialect tag of một DB pool — dùng để chọn cú pháp SQL (upsert,
+/// identifier quote) theo từng backend mà không cần phụ thuộc feature
+/// `any` của sqlx (vốn deprecated cho `AnyKind`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DbKind {
+    Postgres,
+    MySql,
+    Sqlite,
+    /// Không xác định được — mặc định dùng cú pháp Postgres/SQLite.
+    Unknown,
+}
+
+impl DbKind {
+    pub fn from_dsn(dsn: &str) -> Self {
+        let prefix = dsn
+            .split_once("://")
+            .map(|(scheme, _)| scheme)
+            .unwrap_or("");
+        match prefix {
+            "postgres" | "postgresql" => DbKind::Postgres,
+            "mysql" | "mariadb" => DbKind::MySql,
+            "sqlite" | "file" => DbKind::Sqlite,
+            _ => DbKind::Unknown,
+        }
+    }
+
+    pub fn is_mysql(self) -> bool {
+        matches!(self, DbKind::MySql)
+    }
 }
 
 impl fmt::Debug for Resolver {
@@ -54,6 +86,7 @@ impl Resolver {
         ));
 
         // Process each comma-separated DSN
+        let mut db_kinds: Vec<DbKind> = Vec::new();
         for dsn in db_dsn.split(",") {
             let dsn = dsn.trim();
             if dsn.is_empty() {
@@ -72,6 +105,10 @@ impl Resolver {
             let opts = opts
                 .log_statements(log::LevelFilter::Info)
                 .log_slow_statements(log::LevelFilter::Warn, Duration::from_secs(1));
+
+            // Ghi nhớ dialect để Admin/admin sqlx-emit chọn cú pháp đúng
+            // (upsert, identifier quote…) mà không phụ thuộc feature `any`.
+            db_kinds.push(DbKind::from_dsn(dsn));
 
             // Create connection pool
             match AnyPoolOptions::new()
@@ -140,6 +177,7 @@ impl Resolver {
         Ok(Self {
             caches,
             dbs,
+            db_kinds,
             s3_client,
         })
     }
@@ -155,6 +193,13 @@ impl Resolver {
         self.dbs
             .get((tenant_id % (self.dbs.len() as i64)) as usize)
             .unwrap_or_else(|| panic!("Failed to get database client for tenant_id: {}", tenant_id))
+    }
+
+    pub fn database_kind(&self, tenant_id: i64) -> DbKind {
+        self.db_kinds
+            .get((tenant_id % (self.db_kinds.len() as i64)) as usize)
+            .copied()
+            .unwrap_or(DbKind::Unknown)
     }
 
     pub fn databases(&self) -> &Vec<DbClient> {

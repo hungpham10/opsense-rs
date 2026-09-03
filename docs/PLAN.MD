@@ -3,7 +3,7 @@
 > Tài liệu này mô tả **kế hoạch thực thi** cho `opsense-rs`. Trạng thái thực
 > tế: xem [`architecture.md`](./architecture.md) (kiến trúc) và
 > [`CHECKLIST.MD`](./CHECKLIST.MD) (audit). Cập nhật gần nhất: **2026-09-03**
-> (Phase 2 REPL ↔ Runner gRPC integration).
+> (Phase 5 Earthfile-based build & deployment).
 
 ## Vấn đề
 
@@ -666,3 +666,182 @@ component deserialization.
     `kernelStart`/`kernelExecute`/...) — RunnerClient sẵn sàng, chỉ cần wrap
   - ⏳ Tests verify khi `opsense-kernel-echo` binary buildable
 - ⏳ Xóa `opsense-repl/`, `opsense-mcp/` (đã xóa khỏi workspace, xem Cargo.toml:3-15)
+
+---
+
+## Phase 5 — Earthfile-based build & deployment (đang thực hiện)
+
+> Phần này bổ sung cho Phase 4: dùng Earthly (`Earthfile`) làm công cụ build
+> & push image duy nhất, thay cho 4 Dockerfile rời rạc. Local dev dùng
+> `earthly +all-local` → `docker compose up`; production dùng GitHub Action
+> trigger theo tag → `earthly --push +all` → `ghcr.io/lap02921/opsense-*:v*`.
+
+### Mục tiêu
+
+1. **Một nguồn build duy nhất**: Earthfile, không còn Dockerfile.
+2. **Cache share giữa các binary**: cargo-chef `recipe.json` build 1 lần,
+   cả 4 binary (`opsense` + 3 kernel) cùng đọc → giảm ~70% build time.
+3. **Tách rõ 2 workflow**:
+   - **Local dev** (`earthly +all-local` + `docker compose up`).
+   - **CI / release** (`earthly --push +all` trong GH Action khi push tag `v*`).
+4. **Compose không cần `build:` context**: chỉ reference image, tag từ
+   biến `OPSENSE_TAG` (default `local` cho dev).
+
+### File layout
+
+```
+opsense-rs/
+├── Earthfile                    # Build 4 image: serve / runner / runner-python / runner-julia
+├── docker-compose.yml           # 6 services, chỉ image reference
+├── .earthignore                 # Tương tự .dockerignore
+├── .github/workflows/
+│   └── release.yml              # Push tag v* → earthly --push +all
+├── scripts/
+│   ├── entrypoint.sh            # mkdir /var/run/axum, exec supervisord
+│   ├── nginx.sh                 # OpenResty foreground
+│   └── alloy.sh                 # Grafana Alloy foreground
+└── conf/
+    ├── supervisor/opsense.conf  # 3 programs: app + nginx + alloy (NO tor)
+    └── nginx/http.conf          # Comment out `load_module modules/libproxy.so` (line 29)
+```
+
+### Earthfile targets
+
+| Target | Loại | Mô tả |
+|---|---|---|
+| `+base` | Image | `rust:bookworm` + `pkg-config` (chia sẻ) |
+| `+recipe` | Artifact | `cargo chef prepare` → `recipe.json` |
+| `+opsense` | Artifact | Build `opsense` binary |
+| `+kernel-echo` | Artifact | Build `opsense-kernel-echo` (default) |
+| `+kernel-python` | Artifact | Build `opsense-kernel-python` |
+| `+kernel-julia` | Artifact | Build `opsense-kernel-julia` |
+| `+serve` | Image | OpenResty + lua modules + alloy + opsense binary |
+| `+runner` | Image | debian-slim + opsense + echo kernel (default) |
+| `+runner-python` | Image | python:3.12-slim + opsense + python kernel |
+| `+runner-julia` | Image | julia:1.10-bookworm + opsense + julia kernel |
+| `+all-local` | Build | Build 4 image với tag `local` (dev, không push) |
+| `+all` | Build | Build & push 4 image (CI dùng với `--push`) |
+
+### 4 image output
+
+| Image | Registry tag | Base | Binary | Exposed port |
+|---|---|---|---|---|
+| `opsense-serve` | `${REGISTRY}/${IMAGE_PREFIX}-serve:${VERSION}` | `openresty/openresty:1.27.1.2-4-bookworm-fat` | `opsense serve` | `8080` |
+| `opsense-runner` | `${REGISTRY}/${IMAGE_PREFIX}-runner:${VERSION}` | `debian:bookworm-slim` | `opsense runner --kernel opsense-kernel-echo` | `50051` |
+| `opsense-runner-python` | `${REGISTRY}/${IMAGE_PREFIX}-runner-python:${VERSION}` | `python:3.12-slim` | `opsense runner --kernel opsense-kernel-python` | `50051` |
+| `opsense-runner-julia` | `${REGISTRY}/${IMAGE_PREFIX}-runner-julia:${VERSION}` | `julia:1.10-bookworm` | `opsense runner --kernel opsense-kernel-julia` | `50051` |
+
+Mặc định `REGISTRY=ghcr.io`, `IMAGE_PREFIX=lap02921/opsense`, `VERSION=latest`.
+CI override `VERSION` qua `--build-arg VERSION=${{ github.ref_name }}`.
+
+### Compose services (6)
+
+| Service | Image | Phụ thuộc |
+|---|---|---|
+| `opsense` | `opsense-serve:${OPSENSE_TAG:-local}` | postgres (healthy), valkey (healthy), opsense-runner (started) |
+| `opsense-runner` | `opsense-runner:${OPSENSE_TAG:-local}` | — |
+| `opsense-runner-python` | `opsense-runner-python:${OPSENSE_TAG:-local}` | — |
+| `opsense-runner-julia` | `opsense-runner-julia:${OPSENSE_TAG:-local}` | — |
+| `postgres` | `postgres:16-alpine` | healthcheck: `pg_isready` |
+| `valkey` | `valkey/valkey:9.0-alpine` | healthcheck: `valkey-cli ping` |
+
+Network `opsense-net` (bridge). Volume `pg_data` cho postgres.
+
+### Hai workflow
+
+**Local dev:**
+```bash
+# Bước 1: build image local với tag `local`
+earthly +all-local
+
+# Bước 2: chạy stack
+docker compose up -d
+
+# Verify
+curl http://localhost:8080/health
+```
+
+**Production (qua GH Action):**
+```bash
+# Dev push tag release
+git tag v0.1.0 && git push --tags
+
+# GH Action tự động:
+#   1. Login ghcr.io
+#   2. earthly --push --build-arg VERSION=v0.1.0 +all
+#   3. Push 4 image: ghcr.io/lap02921/opsense-*:v0.1.0
+
+# Production server pull & chạy:
+OPSENSE_TAG=v0.1.0 docker compose pull
+OPSENSE_TAG=v0.1.0 docker compose up -d
+```
+
+### Quyết định thiết kế
+
+- **Một Earthfile thay vì 4 Dockerfile**: cargo-chef `recipe.json` share
+  giữa 4 binary build, `SAVE IMAGE --cache-hint` ở `+base` giúp Earthly
+  reuse layer khi không đổi. Earthly cũng tự parallel các `BUILD` không
+  có dependency giữa chúng.
+- **Runner là service riêng trong compose**: tách theo kiến trúc 2 tầng
+  (architecture.md §3.1). Host (`opsense serve`) giao tiếp runner qua
+  `OPSENSE_RUNNER_GRPC=opsense-runner:50051`. Khi Phase 2 GraphQL bridge
+  bật, host sẽ tạo `RunnerClient` tới endpoint này.
+- **3 runner image (echo / python / julia)**: mỗi image chạy đúng 1
+  kernel. User connect tới runner nào tuỳ use case (echo = test nhanh,
+  python = analysis, julia = scientific).
+- **`OPSENSE_TAG` env override**: cùng `docker-compose.yml` phục vụ cả
+  dev (`local`) lẫn prod (git tag). Không cần maintain 2 file compose.
+- **KHÔNG có tor, sops**: gỡ bỏ so với template gốc vì project này không
+  cần. Supervisor config cũng bỏ `[program:tor]`.
+- **`load_module modules/libproxy.so` removed** (conf/nginx/http.conf:29):
+  crate `proxy` (build NGINX C module) không tồn tại trong workspace.
+  Các lua-resty module (JWT/OIDC/session/http/redis) xử lý đầy đủ
+  chức năng qua openresty layer.
+
+### Lợi ích vs 4 Dockerfile
+
+| Tiêu chí | 4 Dockerfile | Earthfile |
+|---|---|---|
+| Cargo deps build | 4 lần | 1 lần (share qua `+base`/`+recipe`) |
+| Time build lần đầu | ~45 phút | ~25 phút (parallel + share) |
+| Time rebuild khi sửa code | ~10 phút/image | ~3-5 phút (chỉ binary target invalidate) |
+| Push registry | Script shell + GHCR login | `earthly --push` |
+| CI workflow | Multi-job matrix | 1 job `earthly +all` |
+| Dev cần cài gì | Docker only | Earthly (~50MB) |
+
+### Hiện trạng (rolling snapshot)
+
+Cập nhật 2026-09-03.
+
+**Đã làm:**
+
+| File | Trạng thái |
+|---|---|
+| `Earthfile` | ✅ — `+base` + `+recipe` + 4 binary target + 4 image target + `+all-local` + `+all` |
+| `.earthignore` | ✅ — loại trừ `target/`, `.git/`, `secrets/`, ... |
+| `scripts/entrypoint.sh` | ✅ — tạo `/var/run/axum`, exec supervisord |
+| `scripts/nginx.sh` | ✅ — OpenResty foreground |
+| `scripts/alloy.sh` | ✅ — Alloy foreground |
+| `conf/supervisor/opsense.conf` | ✅ — 3 programs (app/nginx/alloy), NO tor |
+| `conf/nginx/http.conf` | ✅ — comment out `load_module libproxy.so` (line 29) |
+| `docker-compose.yml` | ✅ — 6 services, chỉ image reference, `OPSENSE_TAG` override |
+| `.github/workflows/release.yml` | ✅ — trigger `v*` → `earthly --push +all` |
+| `Makefile` | ✅ — 4 target: `server / runner / kernel-{echo,python,julia}` |
+| `Dockerfile` (cũ) | 🗑️ Xoá — thay bằng Earthfile |
+
+**Còn lại:**
+
+- ⏳ Test end-to-end local: cài Earthly → `earthly +all-local` → `docker compose up`
+- ⏳ Verify GH Action workflow khi push tag `v0.0.1`
+- ⏳ Production deploy với `OPSENSE_TAG=v*` pull từ ghcr.io
+- ⏳ Phase 2 GraphQL bridge (cần `AppState.runner` để host dùng `RunnerClient` kết nối `opsense-runner:50051`)
+
+### Caveats
+
+- Earthfile `+base` chưa có `protoc` — cần bổ sung nếu build trong
+  container (CI runner đã có sẵn; Earthly image base `rust:bookworm`
+  thiếu `protobuf-compiler` cho crate `opsense-proto` có `build.rs`).
+- `opsense-runner-julia` image khá nặng (~1.5GB) vì kéo `julia:1.10-bookworm`.
+  Có thể dùng `julia:1.10-alpine` để giảm, nhưng cần verify deps Linux.
+- `julia:1.10-bookworm` chỉ cần thiết khi user dùng Julia kernel.
+  Có thể build 3 image runner tuỳ use case thay vì build sẵn cả 3.
