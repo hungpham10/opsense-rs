@@ -1,13 +1,15 @@
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Json as JsonRequest, Path, Query, State};
 use axum::response::{IntoResponse, Json as JsonResponse};
 use axum::routing::{get, post};
 
 use chrono::{DateTime, Utc};
-use http::StatusCode;
+use http::{header, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
+use opsense_model::cache::Cache;
 use opsense_model::entities::admin::{AuthConfig, UserTokenInfo};
 
 use crate::api::AppState;
@@ -83,6 +85,7 @@ pub fn routes() -> Router<AppState> {
             "/tenant/{host}/auth-config",
             get(get_tenant_auth_config),
         )
+        .route("/files/{*path}", get(fetch_file))
         .route("/tokens/generics/{name}", get(get_token).post(put_token))
         .route(
             "/tokens/users",
@@ -330,4 +333,85 @@ async fn get_tenant_auth_config(
             ))
         }
     }
+}
+
+async fn fetch_file(
+    State(app_state): State<AppState>,
+    Path(path): Path<String>,
+    AdminHeaders { tenant_id, host }: AdminHeaders,
+) -> Result<Response<Body>, (StatusCode, JsonResponse<AdminResponse>)> {
+    let tenant_id = tenant_id.into();
+    let cache = Cache::new(app_state.connector.clone(), tenant_id);
+    let host = host.hostname();
+    let key = format!("seo_file:{}:{}", host, path);
+
+    // Fallback chỉ dùng path người dùng truyền — Admin chưa có `get_full_path`.
+    // Lưu path đã resolve vào cache để lần sau khỏi gọi lại DB.
+    let path_in_str = match cache.get(&key).await {
+        Ok(value) => value,
+        Err(_) => format!("{}/{}", host, path),
+    };
+
+    let bucket = app_state.secret.get("S3_BUCKET", "/").await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            JsonResponse(AdminResponse {
+                error: Some("S3_BUCKET not set".into()),
+                ..Default::default()
+            }),
+        )
+    })?;
+
+    let response = app_state
+        .s3
+        .get_object()
+        .bucket(&bucket)
+        .key(&path_in_str)
+        .send()
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(AdminResponse {
+                    error: Some(format!("S3 error {path_in_str}: {error}")),
+                    ..Default::default()
+                }),
+            )
+        })?;
+
+    let content_type = response
+        .content_type()
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let content_length = response.content_length().unwrap_or(0);
+
+    if let Err(error) = cache.set(&key, &path_in_str, 86400).await {
+        log::warn!("Failed to cache response for key {}: {}", key, error);
+    }
+
+    let body_bytes = response.body.collect().await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            JsonResponse(AdminResponse {
+                error: Some(format!("Stream error: {}", error)),
+                ..Default::default()
+            }),
+        )
+    })?;
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, content_length)
+        .body(axum::body::Body::from(body_bytes.into_bytes()))
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(AdminResponse {
+                    error: Some(format!("Stream error: {}", error)),
+                    ..Default::default()
+                }),
+            )
+        })
 }

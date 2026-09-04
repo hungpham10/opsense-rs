@@ -59,6 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
     opsense_libs::vector::components::used();
+    sqlx::any::install_default_drivers();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

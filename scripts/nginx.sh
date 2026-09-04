@@ -3,13 +3,17 @@
 set -e
 
 echo "============================================="
-echo "Nginx wrapper: Waiting for Tor to be ready..."
+if [ "${USE_TOR}" = "true" ]; then
+    echo "Nginx wrapper: Waiting for Tor to be ready..."
+else
+    echo "Nginx wrapper: Tor disabled — skipping Tor check."
+fi
 echo "============================================="
 
-MAX_WAIT=180
-WAIT_INTERVAL=5
+if [ "${USE_TOR}" = "true" ]; then
+    MAX_WAIT=180
+    WAIT_INTERVAL=5
 
-if [ -d /var/lib/tor/hidden_service ]; then
     for i in $(seq 1 $((MAX_WAIT / WAIT_INTERVAL))); do
         if [ -f /var/lib/tor/hidden_service/hostname ]; then
             TOR_SERVER=$(cat /var/lib/tor/hidden_service/hostname | tr -d '\n\r')
@@ -29,11 +33,17 @@ if [ -d /var/lib/tor/hidden_service ]; then
     fi
 
     export TOR_SERVER="${TOR_SERVER}"
+
+    if grep -q "%%TOR_SERVER%%" "${NGINX_DIR}/http.d/default.conf" &> /dev/null; then
+        sed -i "s/%%TOR_SERVER%%/$TOR_SERVER/g" ${NGINX_DIR}/http.d/default.conf
+    fi
+else
+    # Remove %%TOR_SERVER%% placeholder so nginx server_name doesn't have trailing space
+    if grep -q "%%TOR_SERVER%%" "${NGINX_DIR}/http.d/default.conf" &> /dev/null; then
+        sed -i "s/%%TOR_SERVER%%//g" ${NGINX_DIR}/http.d/default.conf
+    fi
 fi
 
-if grep -q "%%TOR_SERVER%%" "${NGINX_DIR}/http.d/default.conf" &> /dev/null; then
-    sed -i "s/%%TOR_SERVER%%/$TOR_SERVER/g" ${NGINX_DIR}/http.d/default.conf
-fi
 echo "Nginx starting now..."
 echo "============================================="
 

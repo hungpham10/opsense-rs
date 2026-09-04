@@ -17,12 +17,13 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use headers::Header;
 use http::{HeaderName, HeaderValue};
-
+use aws_sdk_s3::Client as S3Client;
 use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, StationKind};
 use opsense_libs::vector::runtime::{Component, Event, Runtime};
 use opsense_model::secret::Secret;
+use opsense_model::resolver::Resolver;
 
 #[derive(Debug)]
 pub struct XTenantId(i64);
@@ -66,9 +67,12 @@ impl Header for XTenantId {
 
 #[derive(Clone)]
 pub struct AppState {
+    s3: Arc<S3Client>,
+    secret: Arc<Secret>,
+    connector: Arc<Resolver>,
     context: Arc<Context>,
     runtime: Arc<RwLock<Runtime>>,
-    pub admin_entity: Arc<opsense_model::entities::admin::Admin>,
+    admin_entity: Arc<opsense_model::entities::admin::Admin>,
 }
 
 impl AppState {
@@ -76,9 +80,9 @@ impl AppState {
         let runtime = Arc::new(RwLock::new(Runtime::new()));
         let secret = Arc::new(Secret::new().await?);
         let context = Arc::new(Context::new(config, secret.clone()));
+        let connector = Arc::new(Resolver::new(secret.clone()).await?);
 
-        let resolver = Arc::new(opsense_model::resolver::Resolver::new(secret.clone()).await?);
-        let admin_entity = Arc::new(opsense_model::entities::admin::Admin::new(&resolver));
+        let admin_entity = Arc::new(opsense_model::entities::admin::Admin::new(&connector));
 
         {
             let mut runtime = runtime.write().await;
@@ -100,9 +104,12 @@ impl AppState {
         }
 
         Ok(Self {
+            s3: connector.s3(),
             context,
             runtime,
             admin_entity,
+            secret,
+            connector,
         })
     }
 

@@ -9,19 +9,15 @@
 //! | `sleep:<ms>`      | sleep (interruptible via InterruptRequest)           |
 //! | `print:<text>`    | emit one stdout event                                |
 //! | `err:<kind>:<msg>`| emit an ErrorEvent, request fails                    |
-//! | `df`              | return the last received dataset as a DataFrame      |
 //! | anything else     | text result `echo: <code>`                           |
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use opsense_proto::frame::{Frame, FrameCodec, FrameTag};
 use opsense_proto::pb::{
-    Ack, CodeRequest, DatasetAck, Envelope, ExecEvent, HealthStatus, Welcome, envelope, exec_event,
-    value,
+    Ack, CodeRequest, Envelope, ExecEvent, HealthStatus, Welcome, envelope, exec_event, value,
 };
 use tokio::io::{stdin, stdout};
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -35,10 +31,6 @@ async fn main() -> Result<()> {
     // Frames that arrived while a long op was in flight and still need
     // handling once it finishes.
     let mut inbox: Vec<Frame> = Vec::new();
-    let mut datasets: HashMap<String, Dataset> = HashMap::new();
-    let mut arrows: Vec<Bytes> = Vec::new();
-    // Most recently acked dataset ref (the `df` directive echoes it back).
-    let mut last_ref = String::new();
 
     loop {
         let frame = match inbox.is_empty() {
@@ -49,44 +41,25 @@ async fn main() -> Result<()> {
             false => inbox.remove(0),
         };
         match frame.tag {
-            FrameTag::Arrow => arrows.push(frame.payload),
             FrameTag::Control => {
                 let env = frame.envelope()?;
-                if handle(
-                    env,
-                    &mut source,
-                    &mut sink,
-                    &mut inbox,
-                    &mut datasets,
-                    &mut arrows,
-                    &mut last_ref,
-                )
-                .await?
-                {
+                if handle(env, &mut source, &mut sink, &mut inbox).await? {
                     return Ok(());
                 }
             }
+            // Stray ARROW frame with no dataset protocol in this kernel:
+            // drop it on the floor rather than deadlock on next read.
+            FrameTag::Arrow => {}
         }
     }
 }
 
-struct Dataset {
-    segments: Vec<Bytes>,
-    rows: i64,
-    cols: i64,
-    columns: Vec<String>,
-}
-
 /// Handle one control envelope. Returns `true` when the kernel should exit.
-#[allow(clippy::too_many_arguments)]
 async fn handle(
     env: Envelope,
     source: &mut FramedRead<tokio::io::Stdin, FrameCodec>,
     sink: &mut FramedWrite<tokio::io::Stdout, FrameCodec>,
     inbox: &mut Vec<Frame>,
-    datasets: &mut HashMap<String, Dataset>,
-    arrows: &mut Vec<Bytes>,
-    last_ref: &mut String,
 ) -> Result<bool> {
     match env.msg {
         Some(envelope::Msg::Hello(hello)) => {
@@ -133,6 +106,9 @@ async fn handle(
                     msg: Some(envelope::Msg::SessionHandle(
                         opsense_proto::pb::SessionHandle {
                             session_id: params.session_id,
+                            // The echo kernel does not implement challenge/role
+                            // auth; advertise no challenge to the host.
+                            challenge: vec![],
                         },
                     )),
                 },
@@ -140,41 +116,12 @@ async fn handle(
             .await?;
             Ok(false)
         }
-        Some(envelope::Msg::CloseRequest(close)) => {
-            datasets.remove(&close.session_id);
+        Some(envelope::Msg::CloseRequest(_)) => {
             ack(sink, true, "").await?;
             Ok(false)
         }
-        Some(envelope::Msg::DatasetHeader(header)) => {
-            let rows: i64 = arrows
-                .iter()
-                .map(|s| segment_rows(s))
-                .sum::<Result<u64>>()? as i64;
-            let first = arrows.first().map(|s| segment_info(s));
-            let dataset = Dataset {
-                segments: std::mem::take(arrows),
-                rows,
-                cols: first.as_ref().map_or(0, |i| i.1),
-                columns: first.map(|i| i.2).unwrap_or_default(),
-            };
-            *last_ref = header.dataset_ref.clone();
-            send(
-                sink,
-                &Envelope {
-                    msg: Some(envelope::Msg::DatasetAck(DatasetAck {
-                        dataset_ref: header.dataset_ref.clone(),
-                        rows,
-                        ok: true,
-                        error: String::new(),
-                    })),
-                },
-            )
-            .await?;
-            datasets.insert(header.dataset_ref, dataset);
-            Ok(false)
-        }
         Some(envelope::Msg::CodeRequest(req)) => {
-            exec_code(req, source, sink, inbox, datasets, last_ref).await?;
+            exec_code(req, source, sink, inbox).await?;
             Ok(false)
         }
         Some(envelope::Msg::InterruptRequest(_)) => {
@@ -201,8 +148,6 @@ async fn exec_code(
     source: &mut FramedRead<tokio::io::Stdin, FrameCodec>,
     sink: &mut FramedWrite<tokio::io::Stdout, FrameCodec>,
     inbox: &mut Vec<Frame>,
-    datasets: &HashMap<String, Dataset>,
-    last_ref: &str,
 ) -> Result<()> {
     let code = req.code.trim();
 
@@ -221,13 +166,6 @@ async fn exec_code(
     } else if let Some(rest) = code.strip_prefix("err:") {
         let (kind, message) = rest.split_once(':').unwrap_or((rest, ""));
         Ok(Some(error_event(&req, kind, message)))
-    } else if code == "df" {
-        echo_dataframe(datasets, last_ref).map(|value| {
-            Some(event(
-                &req.request_id,
-                exec_event::Event::ResultValue(value),
-            ))
-        })
     } else {
         Ok(Some(event(
             &req.request_id,
@@ -283,75 +221,6 @@ async fn sleep_interruptible(
             }
         }
     }
-}
-
-fn echo_dataframe(
-    datasets: &HashMap<String, Dataset>,
-    last_ref: &str,
-) -> Result<opsense_proto::pb::Value> {
-    use arrow::ipc::reader::StreamReader;
-    use arrow::ipc::writer::StreamWriter;
-
-    let last = datasets.get(last_ref).ok_or_else(|| {
-        anyhow::anyhow!("no dataset received yet — send one with SendDataset first")
-    })?;
-
-    let mut batches = Vec::new();
-    let mut schema = None;
-    for segment in &last.segments {
-        let reader = StreamReader::try_new(std::io::Cursor::new(segment.as_ref()), None)
-            .context("decoding arrow segment")?;
-        schema = Some(reader.schema().clone());
-        for batch in reader {
-            batches.push(batch.context("reading batch")?);
-        }
-    }
-
-    let mut out = Vec::new();
-    if let Some(schema) = &schema {
-        let mut writer = StreamWriter::try_new(&mut out, schema)?;
-        for batch in batches {
-            writer.write(&batch)?;
-        }
-        writer.finish()?;
-    }
-
-    Ok(opsense_proto::pb::Value {
-        kind: Some(value::Kind::Dataframe(opsense_proto::pb::DataFrame {
-            arrow_ipc: out,
-            rows: last.rows,
-            cols: last.cols,
-            columns: last.columns.clone(),
-        })),
-    })
-}
-
-/// `(rows, cols, column names)` of one Arrow IPC stream segment.
-fn segment_info(segment: &[u8]) -> (u64, i64, Vec<String>) {
-    let Ok(reader) = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(segment), None)
-    else {
-        return (0, 0, vec![]);
-    };
-    let cols = reader.schema().fields().len() as i64;
-    let columns = reader
-        .schema()
-        .fields()
-        .iter()
-        .map(|f| f.name().clone())
-        .collect();
-    (0, cols, columns)
-}
-
-/// Row count of one Arrow IPC stream segment; 0 when undecodable (the ack
-/// reports what actually landed).
-fn segment_rows(segment: &[u8]) -> Result<u64> {
-    let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(segment), None)
-        .context("decoding arrow segment")?;
-    let mut rows = 0u64;
-    for batch in reader {
-        rows += batch?.num_rows() as u64;
-    }
-    Ok(rows)
 }
 
 fn event(request_id: &str, ev: exec_event::Event) -> ExecEvent {

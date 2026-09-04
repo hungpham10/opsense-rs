@@ -28,10 +28,10 @@ anyhow = { workspace = true }
 rmcp = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
+sqlx = { workspace = true }
 subtle = { workspace = true }
 chrono = { workspace = true }
 base64 = { workspace = true }
-
 axum = { workspace = true, features = ["macros", "multipart", "ws"] }
 axum-metrics = { workspace = true }
 axum-macros = { workspace = true }
@@ -53,9 +53,13 @@ opentelemetry-otlp = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 
+aws-sdk-s3 = "1.122.0"
+tokio-util = "0.7"
+
 opsense-model = { path = "../opsense-model" }
 opsense-core = { path = "../opsense-core" }
 opsense-components = { path = "../opsense-components" }
 opsense-proto = { path = "../opsense-proto" }
 opsense-libs = { path = "../opsense-libs" }
 opsense-runner = { path = "../opsense-runner" }
+

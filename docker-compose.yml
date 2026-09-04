@@ -35,13 +35,8 @@ services:
     networks: [opsense-net]
 
   valkey:
-    image: valkey:7-alpine
+    image: valkey/valkey:9-alpine
     container_name: opsense-valkey
-    networks: [opsense-net]
-
-  opsense-runner:
-    image: opsense-runner:local
-    container_name: opsense-runner
     networks: [opsense-net]
 
   opsense-runner-python:
@@ -66,10 +61,34 @@ services:
       # the env-specific seed (depth=2) at boot.
       - ./sql:/app/sql:ro
     environment:
+      # App
       APP_ENV: ${APP_ENV:-dev}
       ENCRYPTED_FILE: /app/secrets/secrets.${APP_ENV:-dev}.enc.yaml
+      OPSENSE_CONFIG: /app/opsense.conf.toml
+      DB_DSN: postgres://opsense:opsense123@opsense-postgres:5432/opsense
       SQL_BASE: /app/sql
       RUST_LOG: info
+      # Database init (release.sh prepare)
+      POSTGRES_HOST: opsense-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: opsense
+      POSTGRES_PASSWORD: opsense123
+      POSTGRES_DATABASE: opsense
+      # Runner discovery
+      OPSENSE_RUNNER_GRPC: opsense-runner:50051
+      # Nginx / supervisor boot (release.sh sed)
+      NGINX_DIR: /usr/local/openresty/nginx/conf
+      NGINX_LOG: main
+      HTTP_SERVER: localhost
+      ENVIRONMENT: dev
+      USE_TOR: "false"
+      # Alloy metrics
+      USE_ALLOY: "false"
+      # Redis (valkey)
+      REDIS_HOST: opsense-valkey
+      REDIS_PORT: 6379
+      REDIS_USERNAME: ""
+      REDIS_PASSWORD: ""
     depends_on:
       postgres:
         condition: service_healthy

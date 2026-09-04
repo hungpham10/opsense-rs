@@ -30,42 +30,18 @@ recipe:
     SAVE ARTIFACT recipe.json
 
 # -----------------------------------------------------------------------
-# Binary artifacts — each crate's release binary saved as a local artifact
+# binaries — build every release binary once, save each as a LOCAL artifact
 # so the image targets can pick them up without rebuilding.
 # -----------------------------------------------------------------------
-opsense:
+binaries:
     FROM +recipe
-    RUN cargo chef cook --release --recipe-path recipe.json -p opsense
+    RUN cargo chef cook --release --recipe-path recipe.json
     COPY . .
-    RUN cargo build --release -p opsense
-    SAVE ARTIFACT target/release/opsense AS LOCAL opsense
-
-kernel-echo:
-    FROM +recipe
-    RUN cargo chef cook --release --recipe-path recipe.json -p opsense-kernel-echo
-    COPY . .
-    RUN cargo build --release -p opsense-kernel-echo && \
-        mkdir -p /out/kernel-echo && \
-        cp target/release/opsense-kernel-echo /out/kernel-echo/
-    SAVE ARTIFACT /out/kernel-echo AS LOCAL kernel-echo
-
-kernel-python:
-    FROM +recipe
-    RUN cargo chef cook --release --recipe-path recipe.json -p opsense-kernel-python
-    COPY . .
-    RUN cargo build --release -p opsense-kernel-python && \
-        mkdir -p /out/kernel-python && \
-        cp target/release/opsense-kernel-python /out/kernel-python/
-    SAVE ARTIFACT /out/kernel-python AS LOCAL kernel-python
-
-kernel-julia:
-    FROM +recipe
-    RUN cargo chef cook --release --recipe-path recipe.json -p opsense-kernel-julia
-    COPY . .
-    RUN cargo build --release -p opsense-kernel-julia && \
-        mkdir -p /out/kernel-julia && \
-        cp target/release/opsense-kernel-julia /out/kernel-julia/
-    SAVE ARTIFACT /out/kernel-julia AS LOCAL kernel-julia
+    RUN cargo build --release
+    SAVE ARTIFACT target/release/opsense               AS LOCAL opsense
+    SAVE ARTIFACT target/release/opsense-kernel-echo  AS LOCAL opsense-kernel-echo
+    SAVE ARTIFACT target/release/opsense-kernel-python AS LOCAL opsense-kernel-python
+    SAVE ARTIFACT target/release/opsense-kernel-julia  AS LOCAL opsense-kernel-julia
 
 # -----------------------------------------------------------------------
 # serve — Tầng 1 host: OpenResty reverse proxy + opsense + alloy
@@ -135,7 +111,7 @@ serve:
     COPY scripts/release.sh    /app/entrypoint.sh
 
     # Backend binary
-    COPY (+opsense/opsense) /app/opsense
+    COPY (+binaries/opsense) /app/opsense
     RUN chmod +x /app/*.sh
 
     ENTRYPOINT ["/app/entrypoint.sh", "/usr/bin/supervisord", "-n"]
@@ -146,10 +122,16 @@ serve:
 # runner — Tầng 2: opsense runner subcommand + default echo kernel
 # -----------------------------------------------------------------------
 runner:
-    FROM +recipe
-    COPY . .
-    RUN cargo build --release -p opsense && \
-        cargo build --release -p opsense-kernel-echo
+    FROM debian:bookworm-slim
+    ARG VERSION
+
+    RUN apt-get update && \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates libssl3 && \
+        apt-get clean && rm -rf /var/lib/apt/lists/*
+
+    COPY (+binaries/opsense)             /app/opsense
+    COPY (+binaries/opsense-kernel-echo)  /app/opsense-kernel-echo
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-echo
@@ -171,8 +153,8 @@ runner-python:
         pip install --no-cache-dir numpy pandas pyarrow protobuf && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    COPY (+opsense/opsense)                       /app/opsense
-    COPY (+kernel-python/kernel-python/opsense-kernel-python) /app/opsense-kernel-python
+    COPY (+binaries/opsense)             /app/opsense
+    COPY (+binaries/opsense-kernel-python) /app/opsense-kernel-python
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-python
@@ -188,8 +170,8 @@ runner-julia:
     FROM julia:1.10-bookworm
     ARG VERSION
 
-    COPY (+opsense/opsense)                       /app/opsense
-    COPY (+kernel-julia/kernel-julia/opsense-kernel-julia) /app/opsense-kernel-julia
+    COPY (+binaries/opsense)             /app/opsense
+    COPY (+binaries/opsense-kernel-julia) /app/opsense-kernel-julia
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-julia
