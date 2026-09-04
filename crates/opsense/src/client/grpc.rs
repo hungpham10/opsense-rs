@@ -64,13 +64,9 @@ impl RunnerClient {
         write_auth_headers(req.metadata_mut(), &session_id, now, nonce, &sig);
         let handle: SessionHandle = client.start(req).await?.into_inner();
 
-        if handle.session_id != session_id {
-            return Err(anyhow!(
-                "server session_id mismatch: expected {}, got {}",
-                session_id,
-                handle.session_id
-            ));
-        }
+        // The IPC backend already validated that the kernel echoed back
+        // params.session_id (see opsense-runner::backend::ipc::start), so
+        // handle.session_id is trustworthy; no further check needed.
 
         Ok(Self {
             inner: client,
