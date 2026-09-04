@@ -333,9 +333,16 @@ mod tests {
     }
 
     /// `load_bearer_from_env` đọc từ `OPSENSE_ACCESS_TOKEN` nếu có.
-    /// Test này tạm bỏ qua nếu env var đã được set (tránh flaky trên CI).
     #[test]
     fn test_load_bearer_from_env() {
+        // Clear any existing token file that could pollute this test.
+        if let Some(home) = std::env::var_os("HOME") {
+            let token_path = std::path::PathBuf::from(home)
+                .join(".config")
+                .join("opsense")
+                .join("token");
+            let _ = std::fs::remove_file(&token_path);
+        }
         // SAFETY: Test chạy đơn luồng, không race với threads khác.
         unsafe { std::env::set_var("OPSENSE_ACCESS_TOKEN", "test-token-abc") };
         let loaded = load_bearer_from_env();
