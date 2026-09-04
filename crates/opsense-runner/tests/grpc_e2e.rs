@@ -17,15 +17,16 @@ use opsense_proto::pb::{
     SessionParams, InterruptRequest, exec_event,
 };
 use opsense_runner::backend::IpcKernelBackend;
-use opsense_runner::config::RunnerConfig;
+use opsense_runner::config::{resolve_kernel_binary, RunnerConfig};
 use opsense_runner::server::RunnerService;
 use opsense_runner::session::SessionRegistry;
 
-/// Echo kernel binary from the workspace target dir; skip when absent.
+/// Echo kernel binary: resolved the same way `RunnerConfig::default()`
+/// resolves a kernel name — keeps the health `detail` reproducible
+/// across machines instead of leaking a CI-specific absolute path.
 fn echo_bin() -> Option<std::path::PathBuf> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/opsense-kernel-echo");
-    p.canonicalize().ok()
+    let p = resolve_kernel_binary("opsense-kernel-echo");
+    if p.exists() { Some(p) } else { None }
 }
 
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
