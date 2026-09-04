@@ -667,6 +667,13 @@ Còn lại **chỉ 4 bảng** (`sys_tenant`, `sys_oidc`, `sys_token_map`,
 - ✅ `init` subcommand (tạo config mẫu)
 - ✅ `serve` subcommand (axum + UDS/HTTP, GraphQL skeleton)
 - 🟡 **Phase 1 (đang làm)**: GraphQL schema + resolvers cho Tầng 1
+- 🟡 **Phase 1.5 (đang làm)**: OAuth2 Device Authorization Grant + Session Keys
+  - ✅ Refactor `admin.rs` → 3 traits + helpers + device + session modules
+  - ⏳ 2 bảng `sys_long_sessions` / `sys_short_sessions` (PR #3)
+  - ⏳ 9 OAuth endpoints dưới `/api/oauth/v1/` (PR #4)
+  - ⏳ Bearer middleware trong REPL/MCP (PR #5)
+  - ⏳ Tests + Prometheus metrics (PR #6)
+  - ⏳ Cleanup (serve.rs.bak, init.rs, docker-compose) (PR #7)
 - ✅ **Phase 2 (revised 2026-09-03): REPL ↔ Runner gRPC integration**
   - ✅ `RunnerClient` ở `crates/opsense/src/client/grpc.rs` — Ed25519 sign mỗi
     request, `ExecOutcome` aggregator (`ok`/`text`/`number`/`stdout`/`stderr`)
@@ -689,6 +696,71 @@ Còn lại **chỉ 4 bảng** (`sys_tenant`, `sys_oidc`, `sys_token_map`,
   - ✅ Tích hợp `Commands::Runner` vào `opsense` binary (`main.rs:34-38, 63-83`)
   - ⏳ `tests/grpc_e2e.rs` rewrite (cũ vẫn work với raw `KernelRunnerClient`)
 - ⏳ Cleanup: `crates/opsense/src/serve.rs.bak` (backup Aug 30, không load)
+
+### §9.2 OAuth2 Device Authorization Grant (RFC 8628)
+
+**Mục đích:** Cho phép REPL/MCP client xác thực với `opsense-serve` mà không cần
+password mỗi lần — cùng cơ chế như `gcloud auth login`.
+
+**Hai loại session:**
+
+| Loại | Bảng | TTL | Storage |
+|---|---|---|---|
+| Long session | `sys_long_sessions` | 8h | Ed25519 keypair, `private_key` mã hóa AES-256-GCM |
+| Short session | `sys_short_sessions` | 5min | Hashed `access_token`, partition drop tự cleanup |
+
+**Flow:**
+
+```
+REPL ──POST /api/oauth/v1/device/code──▶ Axum
+   ◀─── { device_code, user_code, interval }
+
+User ──GET /api/oauth/v1/device──▶ Axum (HTML form)
+       Nhập user_code → POST /api/oauth/v1/device/verify
+       (Bearer JWT → X-User-Id từ Nginx)
+
+REPL ──POST /api/oauth/v1/device/token──▶ Axum
+       Poll (interval) cho đến khi user duyệt
+       ◀─── { access_token, refresh_token, session_id }
+```
+
+**9 endpoints:**
+
+| Method | Path | Auth | Mô tả |
+|---|---|---|---|
+| POST | `/api/oauth/v1/device/code` | None | Tạo `device_code` + `user_code` |
+| GET | `/api/oauth/v1/device` | None | HTML form |
+| POST | `/api/oauth/v1/device/verify` | Bearer | User duyệt device code |
+| POST | `/api/oauth/v1/device/token` | None | Poll lấy `access_token` |
+| POST | `/api/oauth/v1/token/refresh` | None | Refresh `access_token` |
+| POST | `/api/oauth/v1/token/revoke` | Bearer | Revoke refresh token |
+| POST | `/api/oauth/v1/session/issue` | Bearer | Sinh Ed25519 keypair |
+| POST | `/api/oauth/v1/session/revoke` | Bearer | Revoke long session |
+| GET | `/api/oauth/v1/session/list` | Bearer | List long sessions |
+
+**Bearer validation:** Nginx `conf/nginx/vhost/04-api.conf` dùng `jwt_required=1`,
+validate HS256/JWKS, inject `X-User-Id` + `X-Tenant-Id` header.
+
+### §9.3 Session Management (Long / Short)
+
+**`sys_long_sessions`** — dùng cho MCP client dài hạn:
+
+- `session_id` = `base64(public_key)` (Ed25519, 32 bytes)
+- `private_key` = 32 bytes ngẫu nhiên, mã hóa AES-256-GCM bằng `MASTER_KEY`
+- Mỗi gRPC request: ký Ed25519 signature → runner verify bằng `session_id` (public key)
+- Lazy cleanup: khi lookup thấy `expires_at < now()` thì DELETE rồi return None
+
+**`sys_short_sessions`** — dùng cho REPL access_token:
+
+- 5 phút TTL, `token_hash` = `sha256(access_token)` để lookup
+- Postgres: partition theo timestamp, procedure drop partitions > 7 ngày
+- MySQL: `PARTITION BY RANGE` tương tự, EVENT scheduler gọi drop cũ
+
+**Admin methods:**
+
+- `issue_device_code`, `approve_device_code`, `poll_device_token`
+- `issue_long_session`, `revoke_long_session`, `list_long_sessions`
+- `insert_short_session`, `lookup_short_session`
 
 ---
 

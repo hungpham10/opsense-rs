@@ -11,11 +11,15 @@ ARG --global VERSION=latest
 # builder — shared Rust toolchain layer (apt deps only, no source yet)
 # -----------------------------------------------------------------------
 builder:
-    FROM rust:bookworm
+    FROM debian:bookworm-slim
+    ARG TOOLCHAIN_VERSION=1.94
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            pkg-config ca-certificates protobuf-compiler && \
-        apt-get clean && rm -rf /var/lib/apt/lists/*
+            pkg-config ca-certificates protobuf-compiler curl build-essential && \
+        apt-get clean && rm -rf /var/lib/apt/lists/* && \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${TOOLCHAIN_VERSION} && \
+        mv /root/.cargo/bin/* /usr/local/bin/ && \
+        rustc --version && cargo --version
     WORKDIR /app
     SAVE IMAGE --cache-hint
 

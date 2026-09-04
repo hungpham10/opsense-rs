@@ -6,6 +6,7 @@
 //! `/observations` endpoint.
 
 pub mod admin;
+pub mod oauth;
 pub mod repl;
 
 use std::collections::BTreeMap;
@@ -24,6 +25,8 @@ use opsense_core::{Config, Context, StationKind};
 use opsense_libs::vector::runtime::{Component, Event, Runtime};
 use opsense_model::secret::Secret;
 use opsense_model::resolver::Resolver;
+
+use crate::api::oauth::OAuthMetrics;
 
 #[derive(Debug)]
 pub struct XTenantId(i64);
@@ -73,6 +76,7 @@ pub struct AppState {
     context: Arc<Context>,
     runtime: Arc<RwLock<Runtime>>,
     admin_entity: Arc<opsense_model::entities::admin::Admin>,
+    oauth_metrics: Arc<OAuthMetrics>,
 }
 
 impl AppState {
@@ -83,6 +87,7 @@ impl AppState {
         let connector = Arc::new(Resolver::new(secret.clone()).await?);
 
         let admin_entity = Arc::new(opsense_model::entities::admin::Admin::new(&connector));
+        let oauth_metrics = Arc::new(OAuthMetrics::new());
 
         {
             let mut runtime = runtime.write().await;
@@ -108,6 +113,7 @@ impl AppState {
             context,
             runtime,
             admin_entity,
+            oauth_metrics,
             secret,
             connector,
         })

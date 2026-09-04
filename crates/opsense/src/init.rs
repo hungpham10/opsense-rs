@@ -67,7 +67,7 @@ mod tests {
         run(Some(&path), true).expect("force rewrites");
 
         // The generated file must load cleanly and expose the attribute.
-        let cfg = opsense_core::config::Config::load(&path).expect("template parses as config");
+        let cfg = opsense_core::Config::load(&path).expect("template parses as config");
         assert!(cfg.attributes.contains_key("prom_url"));
         // Everything under [pipeline] is commented out by default.
         assert!(cfg.pipeline.is_none());

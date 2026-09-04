@@ -38,6 +38,7 @@ pub async fn dispatch(line: &str, client: &OpsenseClient) -> anyhow::Result<Opti
         ":attr" | ":a" => cmd_attr(client, rest).await,
         ":node" | ":n" => cmd_node(client, rest).await,
         ":query" | ":q" => cmd_query(client, rest).await,
+        ":login" => cmd_login(rest).await,
 
         ":help" | ":h" | ":?" => Ok(Some(HELP_TEXT.to_string())),
 
@@ -269,6 +270,36 @@ fn format_node(node: &NodeSummary) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Auth: device flow login
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `:login [host]` — start OAuth2 device flow.
+/// `host` mặc định lấy từ `OPSENSE_HOST` env var; nếu không có sẽ dùng
+/// `http://127.0.0.1:8080` (UDS không phù hợp cho browser flow).
+async fn cmd_login(rest: &str) -> anyhow::Result<Option<String>> {
+    let host = if rest.trim().is_empty() {
+        std::env::var("OPSENSE_HOST")
+            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+    } else {
+        rest.trim().to_string()
+    };
+
+    let info = crate::client::request_device_code(&host).await?;
+    eprintln!(
+        "Open this URL in your browser:\n  {}{}\n\nAnd enter code: {}\n",
+        host, info.verification_uri, info.user_code
+    );
+
+    let token = crate::client::poll_token(&host, &info.device_code, info.interval as u64).await?;
+    let path = crate::client::save_token_to_disk(&token.access_token)?;
+
+    Ok(Some(format!(
+        "Logged in. Token saved to {}\nRestart REPL (`:quit` then `opsense repl`) to use it.",
+        path.display()
+    )))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Help text
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -283,6 +314,9 @@ Viewing:
 
 Station queries:
   :query <node> [from] [to]    query timeseries (timestamps in unix seconds)
+
+Auth:
+  :login                  start OAuth2 device flow (RFC 8628) and save token
 
 Pipeline editing:
   :node add <json>               add a new node (full config required)

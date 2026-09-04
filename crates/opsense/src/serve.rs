@@ -26,7 +26,7 @@ use tracing_subscriber::prelude::*;
 
 use opsense_core::Config;
 
-use crate::api::{AppState, admin, health_check, repl};
+use crate::api::{AppState, admin, health_check, oauth, repl};
 
 fn init_telemetry() -> Option<(SdkTracerProvider, SdkMeterProvider)> {
     let agent_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -114,7 +114,8 @@ pub async fn routes(app_state: AppState, enable_sentry: bool) -> Result<Router, 
     let router = Router::new()
         .route("/health", get(health_check))
         .nest("/api/repl", repl::routes(app_state.clone()))
-        .nest("/api/admin", admin::routes());
+        .nest("/api/admin", admin::routes())
+        .nest("/api/oauth", oauth::routes());
 
     let router = router
         .with_state(app_state)

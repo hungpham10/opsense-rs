@@ -23,8 +23,11 @@ sha2 = "0.10.9"
 subtle = "2.6"
 aes-gcm = "0.10.3"
 url = "2.5.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
 thiserror = { workspace = true }
 chrono = { workspace = true }
+async-trait = "0.1"
 log = { workspace = true }
 tracing = { workspace = true }
 

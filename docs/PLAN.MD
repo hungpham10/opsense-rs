@@ -233,6 +233,108 @@ Cập nhật `2026-09-01`. Branch `feature/refactor-to-decoupe-monorepo-into-mul
 
 ---
 
+## Phase 1.5 — OAuth2 Device Flow + Session Keys (đang thực hiện)
+
+> **Mục tiêu:** Cho phép REPL/MCP client xác thực với `opsense-serve` bằng OAuth2
+> Device Authorization Grant (RFC 8628) — cùng cơ chế như `gcloud auth login`,
+> phù hợp cho CLI/console mà không có browser redirect.
+
+### Vấn đề
+
+- REPL và MCP client cần truy cập `opsense-serve` (Axum server phía sau Nginx)
+- Hiện tại chỉ có `X-User-Id` header (Nginx inject sau khi validate JWT Bearer)
+- Cần cơ chế sinh token cho REPL/MCP mà không cần user nhập password mỗi lần
+
+### Thiết kế
+
+#### Hai bảng session
+
+| Bảng | TTL | Dùng cho | Cleanup |
+|---|---|---|---|
+| `sys_long_sessions` | 8h | MCP client dài hạn | Lazy (đọc thì xóa) |
+| `sys_short_sessions` | 5min | REPL access_token | DB partition drop hàng ngày |
+
+**`sys_long_sessions`** sinh Ed25519 keypair mỗi lần issue:
+- `session_id` = `base64(public_key)` (32 bytes)
+- `private_key` = 32 bytes ngẫu nhiên, mã hóa AES-256-GCM bằng `MASTER_KEY`
+- Dùng cho gRPC call: mỗi request ký Ed25519 signature, verify tại runner
+
+**`sys_short_sessions`** lưu hashed access_token cho REPL:
+- Token vãng lai, 5 phút, không cần lazy cleanup (partition drop tự xóa)
+
+#### OAuth2 Device Authorization Grant flow
+
+```
+1. REPL ──POST /api/oauth/v1/device/code──▶ Axum
+   ◀─── { device_code, user_code, interval } ───
+
+2. User mở browser ──GET /api/oauth/v1/device──▶ Axum (HTML form)
+   Nhập user_code → POST /api/oauth/v1/device/verify (Bearer JWT)
+
+3. REPL ──POST /api/oauth/v1/device/token──▶ Axum
+   Poll (interval) cho đến khi user duyệt
+   ◀─── { access_token, refresh_token, session_id } ───
+```
+
+#### 9 OAuth endpoints
+
+| Method | Path | Auth | Mô tả |
+|---|---|---|---|
+| POST | `/api/oauth/v1/device/code` | None | Tạo `device_code` + `user_code` |
+| GET | `/api/oauth/v1/device` | None | HTML form (nginx lua render) |
+| POST | `/api/oauth/v1/device/verify` | Bearer | User duyệt device code |
+| POST | `/api/oauth/v1/device/token` | None | Console poll lấy `access_token` |
+| POST | `/api/oauth/v1/token/refresh` | None | Refresh `access_token` |
+| POST | `/api/oauth/v1/token/revoke` | Bearer | Revoke refresh token |
+| POST | `/api/oauth/v1/session/issue` | Bearer | Sinh Ed25519 keypair, trả `(session_id, private_key)` |
+| POST | `/api/oauth/v1/session/revoke` | Bearer | Revoke long session |
+| GET | `/api/oauth/v1/session/list` | Bearer | List long sessions của user |
+
+#### Nginx Bearer validation (đã có sẵn)
+
+`conf/nginx/vhost/04-api.conf` dùng `jwt_required=1`:
+- Validate `Authorization: Bearer <token>` tại Nginx (JWKS hoặc HS256)
+- Inject `X-User-Id`, `X-Tenant-Id` header xuống Axum
+- REPL fallback chain: Bearer → `X-User-Id` → guest
+
+#### Runner auth (Phase sau)
+
+Runner local dùng JSON file config:
+```json
+{
+  "session_id": "base64(public_key)",
+  "private_key": "base64(private_key_32bytes)",
+  "access_token": "<Bearer token>"
+}
+```
+
+### File thay đổi
+
+| File | Action |
+|---|---|
+| `crates/opsense-model/src/entities/admin/mod.rs` | Rewrite — module folder + re-export |
+| `crates/opsense-model/src/entities/admin/errors.rs` | Create — `AdminError` |
+| `crates/opsense-model/src/entities/admin/helpers.rs` | Create — helper fns |
+| `crates/opsense-model/src/entities/admin/tenant.rs` | Create — `Tenant` trait + impl |
+| `crates/opsense-model/src/entities/admin/token.rs` | Create — `Token` trait + impl |
+| `crates/opsense-model/src/entities/admin/jwt.rs` | Create — `Jwt` trait + impl |
+| `crates/opsense-model/src/entities/admin/device.rs` | Create — device flow methods |
+| `crates/opsense-model/src/entities/admin/session.rs` | Create — session methods |
+| `crates/opsense-model/src/entities/admin.rs` | Delete — monolithic file |
+| `sql/postgres/07-create-sys-long-sessions.sql` | Create |
+| `sql/postgres/07-create-sys-short-sessions.sql` | Create — partitioned |
+| `sql/mysql/07-create-sys-long-sessions.sql` | Create |
+| `sql/mysql/07-create-sys-short-sessions.sql` | Create |
+| `crates/opsense/src/api/oauth/mod.rs` | Create — router |
+| `crates/opsense/src/api/oauth/v1.rs` | Create — 9 handlers |
+| `crates/opsense/src/api/mod.rs` | Edit — mount `/api/oauth` |
+| `crates/opsense/src/api/repl/mod.rs` | Edit — Bearer fallback chain |
+| `crates/opsense/src/serve.rs.bak` | Delete |
+| `crates/opsense/src/init.rs` | Edit line 70 — fix path |
+| `docker-compose.yml` | Edit — postgres healthcheck |
+
+---
+
 ## Phase 2 (revised sau Phase 4) — RunnerClient thay vì SessionManager
 
 > Phase 4 đã tách runner thành process độc lập + gRPC + Ed25519, nên Phase 2

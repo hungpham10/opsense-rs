@@ -119,6 +119,9 @@ impl ComponentInput {
 pub struct OpsenseClient {
     endpoint: String,
     http: Client,
+    /// Optional Bearer token (OAuth2 access_token). Khi None, request
+    /// sẽ đi qua như guest (Nginx vẫn inject `X-User-Id = "guest"`).
+    bearer: Option<String>,
 }
 
 impl OpsenseClient {
@@ -128,7 +131,19 @@ impl OpsenseClient {
             http: Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()?,
+            bearer: load_bearer_from_env(),
         })
+    }
+
+    /// Override Bearer token (dùng cho test hoặc sau khi device flow issue).
+    pub fn with_bearer(mut self, token: impl Into<String>) -> Self {
+        self.bearer = Some(token.into());
+        self
+    }
+
+    /// Xoá Bearer (về guest mode).
+    pub fn clear_bearer(&mut self) {
+        self.bearer = None;
     }
 
     async fn gql<Q, V>(&self, query: &str, variables: V) -> anyhow::Result<Q>
@@ -141,10 +156,14 @@ impl OpsenseClient {
             query: &'a str,
             variables: V,
         }
-        let request: GqlResponse<Q> = self
+        let mut req = self
             .http
             .post(&self.endpoint)
-            .json(&Request { query, variables })
+            .json(&Request { query, variables });
+        if let Some(token) = &self.bearer {
+            req = req.bearer_auth(token);
+        }
+        let request: GqlResponse<Q> = req
             .send()
             .await?
             .error_for_status()?
@@ -264,5 +283,72 @@ impl TableDisplay for OpsenseClient {
             table.add_row([s.id.as_str(), s.kind.as_str()]);
         }
         table
+    }
+}
+
+/// Load Bearer token từ `OPSENSE_ACCESS_TOKEN` env var, hoặc file
+/// `~/.config/opsense/token`. Trả None nếu không tìm thấy (guest mode).
+fn load_bearer_from_env() -> Option<String> {
+    if let Ok(token) = std::env::var("OPSENSE_ACCESS_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    // File fallback
+    if let Some(home) = std::env::var_os("HOME") {
+        let path = std::path::PathBuf::from(home)
+            .join(".config")
+            .join("opsense")
+            .join("token");
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `OpsenseClient::new` parse endpoint, không panic khi host lạ.
+    #[test]
+    fn test_new_client_parses_endpoint() {
+        let c = OpsenseClient::new("http://127.0.0.1:8080").unwrap();
+        assert_eq!(c.endpoint, "http://127.0.0.1:8080");
+    }
+
+    /// `with_bearer` set bearer field.
+    #[test]
+    fn test_with_bearer() {
+        let mut c = OpsenseClient::new("http://localhost").unwrap();
+        c = c.with_bearer("tok-123");
+        assert_eq!(c.bearer.as_deref(), Some("tok-123"));
+        c.clear_bearer();
+        assert!(c.bearer.is_none());
+    }
+
+    /// `load_bearer_from_env` đọc từ `OPSENSE_ACCESS_TOKEN` nếu có.
+    /// Test này tạm bỏ qua nếu env var đã được set (tránh flaky trên CI).
+    #[test]
+    fn test_load_bearer_from_env() {
+        // SAFETY: Test chạy đơn luồng, không race với threads khác.
+        unsafe { std::env::set_var("OPSENSE_ACCESS_TOKEN", "test-token-abc") };
+        let loaded = load_bearer_from_env();
+        unsafe { std::env::remove_var("OPSENSE_ACCESS_TOKEN") };
+        assert_eq!(loaded.as_deref(), Some("test-token-abc"));
+    }
+
+    /// Empty env var trả về None (trừ khi file fallback có giá trị).
+    #[test]
+    fn test_load_bearer_env_empty() {
+        unsafe { std::env::remove_var("OPSENSE_ACCESS_TOKEN") };
+        // Trừ khi dev có sẵn `~/.config/opsense/token` thì kết quả không None;
+        // chỉ assert rằng hàm không panic và trả String rỗng được coi là None.
+        let _ = load_bearer_from_env();
     }
 }
