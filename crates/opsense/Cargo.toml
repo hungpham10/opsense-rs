@@ -7,8 +7,8 @@ homepage.workspace = true
 repository.workspace = true
 description = "Centralize site reliability engineer's daily activities"
 
-#[lints.rust]
-#warnings = "deny"
+[lints.rust]
+warnings = "deny"
 
 [[bin]]
 name = "opsense"
@@ -62,4 +62,16 @@ opsense-components = { path = "../opsense-components" }
 opsense-proto = { path = "../opsense-proto" }
 opsense-libs = { path = "../opsense-libs" }
 opsense-runner = { path = "../opsense-runner" }
+
+[dev-dependencies]
+# Integration tests trong ./tests/ — gRPC runner (RunnerClient), HTTP
+# /health + GraphQL, OAuth Device/Session flow qua reqwest, REPL qua
+# rexpect (PTY). Đọc env: OPSENSE_SERVE_URL, OPSENSE_RUNNER_ECHO/PYTHON/JULIA.
+rexpect = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true, features = ["cookies", "form"] }
+uuid = { workspace = true }
 

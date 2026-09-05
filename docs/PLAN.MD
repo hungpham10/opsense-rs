@@ -2,8 +2,9 @@
 
 > Tài liệu này mô tả **kế hoạch thực thi** cho `opsense-rs`. Trạng thái thực
 > tế: xem [`architecture.md`](./architecture.md) (kiến trúc) và
-> [`CHECKLIST.MD`](./CHECKLIST.MD) (audit). Cập nhật gần nhất: **2026-09-03**
-> (Phase 5 Earthfile-based build & deployment).
+> [`CHECKLIST.MD`](./CHECKLIST.MD) (audit). Cập nhật gần nhất: **2026-09-04**
+> (Phase 5 build infra đã xong, CI unit test workflow đã chạy ổn trên GH
+> Action, compose giữ 5 services).
 
 ## Vấn đề
 
@@ -724,8 +725,8 @@ component deserialization.
 
 ## Trạng thái (rolling)
 
-> Audit ngày 2026-09-02 qua codegraph. Phase 3 thực tế đã xong từ trước —
-> docs cũ chưa cập nhật.
+> Audit ngày 2026-09-04: Phase 5 build infra đã xong, CI unit test chạy ổn
+> trên GH Action, compose giữ 5 services (đã sửa doc cho khớp disk state).
 
 - ✅ Phase scaffolding (Cargo, opsense-libs, opsense-core rewrite, opsense-components)
 - ✅ `init` subcommand (tạo config mẫu)
@@ -738,14 +739,16 @@ component deserialization.
   - ⏸ `Query.status` vs `Query.nodeInfo` — chờ user quyết
   - ✅ `opsense-components/` — cố tình bỏ theo refactor branch
   - ✅ `opsense-core::Context` methods — cố tình bỏ theo user quyết
-- 🟡 **Phase 2 (revised 2026-09-03): REPL ↔ Runner gRPC integration**
-  - ✅ `RunnerClient` ở `crates/opsense/src/client/grpc.rs` (Ed25519 sign mỗi
-    request, `ExecOutcome` aggregator)
-  - ✅ `KernelRepl` ở `crates/opsense/src/repl/kernel.rs` (state machine)
-  - ✅ CLI `--runner <endpoint>` ở `main.rs`
+- ✅ **Phase 2 (revised 2026-09-03): REPL ↔ Runner gRPC integration**
+  - ✅ `RunnerClient` ở `crates/opsense/src/client/grpc.rs` — Ed25519 sign mỗi
+    request, kèm `ExecOutcome` aggregator (`ok`/`text`/`number`/`stdout`/`stderr`)
+  - ✅ `KernelRepl` ở `crates/opsense/src/repl/kernel.rs` — state machine
+    (Idle/Inline/Block) + Reedline, multi-line block buffer
+  - ✅ CLI flag `--runner <endpoint>` ở `main.rs` (command `Repl`)
+  - ✅ 5 unit tests trong `grpc.rs` (multi-line, block, auth flow, interrupt, health)
   - ⏳ Phase 2 GraphQL bridge (host `AppState.runner`, 6 resolvers
     `kernelStart`/`kernelExecute`/...) — RunnerClient sẵn sàng, chỉ cần wrap
-  - ⏳ Tests verify pass khi `opsense-kernel-echo` binary buildable
+  - ⏳ Tests verify khi `opsense-kernel-echo` binary buildable
 - ✅ **Phase 3: REPL + MCP client** (đã xong từ trước audit 2026-09-02)
   - `crates/opsense/src/repl/{mod,commands,display}.rs` — Reedline REPL gọi GraphQL
   - `crates/opsense/src/mcp/{mod,server,tools}.rs` — rmcp server expose 6 tools
@@ -757,21 +760,29 @@ component deserialization.
   - ✅ `RunnerClient` (tonic) đã viết ở Phase 2 (xem `crates/opsense/src/client/grpc.rs`)
   - ⏳ Rewrite `tests/grpc_e2e.rs` (cũ vẫn work)
   - ✅ Tích hợp `Commands::Runner` vào `opsense` binary (`main.rs:34-38, 63-83`)
-- ✅ **Phase 2 (revised 2026-09-03): REPL ↔ Runner gRPC integration**
-  - ✅ `RunnerClient` ở `crates/opsense/src/client/grpc.rs` — Ed25519 sign mỗi
-    request, kèm `ExecOutcome` aggregator (`ok`/`text`/`number`/`stdout`/`stderr`)
-  - ✅ `KernelRepl` ở `crates/opsense/src/repl/kernel.rs` — state machine
-    (Idle/Inline/Block) + Reedline, multi-line block buffer
-  - ✅ CLI flag `--runner <endpoint>` ở `main.rs` (command `Repl`)
-  - ✅ 5 unit tests trong `grpc.rs` (multi-line, block, auth flow, interrupt, health)
-  - ⏳ Phase 2 GraphQL bridge (host `AppState.runner`, 6 resolvers
-    `kernelStart`/`kernelExecute`/...) — RunnerClient sẵn sàng, chỉ cần wrap
-  - ⏳ Tests verify khi `opsense-kernel-echo` binary buildable
+- ✅ **Phase 5: Earthfile-based build & deployment (2026-09-04)**
+  - 11 file tạo/cập nhật: `Earthfile`, `.earthignore`, `scripts/{entrypoint,nginx,alloy}.sh`,
+    `conf/supervisor/opsense.conf`, `conf/nginx/http.conf`, `docker-compose.yml`,
+    `.github/workflows/release.yml`, `Makefile`, loại bỏ Dockerfile cũ.
+  - `+builder` đã có `apt-get install protobuf-compiler` (resolve prerequisite #2).
+  - `docker-compose.yml` hiện có **5 services** (postgres, valkey, opsense-serve,
+    opsense-runner-python, opsense-runner-julia). `opsense-runner` (echo) build
+    được qua `+all-local` nhưng không nằm trong compose — dev tool ngoài stack.
+  - 4 image output: `opsense-serve`, `opsense-runner` (echo), `opsense-runner-python`,
+    `opsense-runner-julia`. Tag mặc định `local` (dev) hoặc `v*` (GH Action release).
+  - Known gaps: vector source (open #4), E2E test, prod deploy, Phase 2 GraphQL bridge.
+- ✅ **CI: unit test workflow (2026-09-04)**
+  - `.github/workflows/ci.yml` chạy `cargo test --workspace --all-targets` trên
+    push/PR `main` với Rust 1.94 + Python 3.12 + Julia 1.10 + redis 7 service.
+  - Cache: `Swatinem/rust-cache@v2` + Julia depot theo hash.
+  - **Đã chạy ổn** (user confirm 2026-09-04). Không phụ thuộc Earthly — test
+    trực tiếp nguồn Rust. Tách 2 workflow: CI = correctness gate, release =
+    image publish.
 - ⏳ Xóa `opsense-repl/`, `opsense-mcp/` (đã xóa khỏi workspace, xem Cargo.toml:3-15)
 
 ---
 
-## Phase 5 — Earthfile-based build & deployment (đang thực hiện)
+## Phase 5 — Earthfile-based build & deployment (✅ đã xong 2026-09-04 — build infra)
 
 > Phần này bổ sung cho Phase 4: dùng Earthly (`Earthfile`) làm công cụ build
 > & push image duy nhất, thay cho 4 Dockerfile rời rạc. Local dev dùng
@@ -794,7 +805,7 @@ component deserialization.
 ```
 opsense-rs/
 ├── Earthfile                    # Build 4 image: serve / runner / runner-python / runner-julia
-├── docker-compose.yml           # 6 services, chỉ image reference
+├── docker-compose.yml           # 5 services: serve + 2 runner (python/julia) + postgres + valkey
 ├── .earthignore                 # Tương tự .dockerignore
 ├── .github/workflows/
 │   └── release.yml              # Push tag v* → earthly --push +all
@@ -811,7 +822,7 @@ opsense-rs/
 
 | Target | Loại | Mô tả |
 |---|---|---|
-| `+base` | Image | `rust:bookworm` + `pkg-config` (chia sẻ) |
+| `+builder` | Image | `rust:bookworm` + `pkg-config` + `protobuf-compiler` (chia sẻ) |
 | `+recipe` | Artifact | `cargo chef prepare` → `recipe.json` |
 | `+opsense` | Artifact | Build `opsense` binary |
 | `+kernel-echo` | Artifact | Build `opsense-kernel-echo` (default) |
@@ -881,7 +892,7 @@ OPSENSE_TAG=v0.1.0 docker compose up -d
 ### Quyết định thiết kế
 
 - **Một Earthfile thay vì 4 Dockerfile**: cargo-chef `recipe.json` share
-  giữa 4 binary build, `SAVE IMAGE --cache-hint` ở `+base` giúp Earthly
+  giữa 4 binary build, `SAVE IMAGE --cache-hint` ở `+builder` giúp Earthly
   reuse layer khi không đổi. Earthly cũng tự parallel các `BUILD` không
   có dependency giữa chúng.
 - **Runner là service riêng trong compose**: tách theo kiến trúc 2 tầng
@@ -904,7 +915,7 @@ OPSENSE_TAG=v0.1.0 docker compose up -d
 
 | Tiêu chí | 4 Dockerfile | Earthfile |
 |---|---|---|
-| Cargo deps build | 4 lần | 1 lần (share qua `+base`/`+recipe`) |
+| Cargo deps build | 4 lần | 1 lần (share qua `+builder`/`+recipe`) |
 | Time build lần đầu | ~45 phút | ~25 phút (parallel + share) |
 | Time rebuild khi sửa code | ~10 phút/image | ~3-5 phút (chỉ binary target invalidate) |
 | Push registry | Script shell + GHCR login | `earthly --push` |
@@ -913,29 +924,32 @@ OPSENSE_TAG=v0.1.0 docker compose up -d
 
 ### Hiện trạng (rolling snapshot)
 
-Cập nhật 2026-09-03.
+Cập nhật 2026-09-04 (Phase 5 build infra đã xong).
 
 **Đã làm:**
 
 | File | Trạng thái |
 |---|---|
-| `Earthfile` | ✅ — `+base` + `+recipe` + 4 binary target + 4 image target + `+all-local` + `+all` |
+| `Earthfile` | ✅ — `+builder` (rust:bookworm + protoc) + `+recipe` (cargo-chef) + `+binaries` (4 binary artifact) + 4 image target (`+serve`/`+runner`/`+runner-python`/`+runner-julia`) + `+all-local` + `+all` |
 | `.earthignore` | ✅ — loại trừ `target/`, `.git/`, `secrets/`, ... |
 | `scripts/entrypoint.sh` | ✅ — tạo `/var/run/axum`, exec supervisord |
 | `scripts/nginx.sh` | ✅ — OpenResty foreground |
 | `scripts/alloy.sh` | ✅ — Alloy foreground |
 | `conf/supervisor/opsense.conf` | ✅ — 3 programs (app/nginx/alloy), NO tor |
 | `conf/nginx/http.conf` | ✅ — comment out `load_module libproxy.so` (line 29) |
-| `docker-compose.yml` | ✅ — 6 services, chỉ image reference, `OPSENSE_TAG` override |
+| `docker-compose.yml` | ✅ — 5 services, chỉ image reference, `OPSENSE_TAG` override |
 | `.github/workflows/release.yml` | ✅ — trigger `v*` → `earthly --push +all` |
-| `Makefile` | ✅ — 4 target: `server / runner / kernel-{echo,python,julia}` |
+| `.github/workflows/ci.yml` | ✅ — push/PR main → `cargo test --workspace --all-targets` (Rust 1.94 + Python 3.12 + Julia 1.10 + redis 7) |
+| `Makefile` | ✅ — 12 target: `help`/`build-local`/`build-cloud`/`up`/`down`/`down-v`/`ps`/`logs`/`restart`/`shell`/`encrypt`/`decrypt`/`sql-clean` |
 | `Dockerfile` (cũ) | 🗑️ Xoá — thay bằng Earthfile |
 
-**Còn lại:**
+**Còn lại (known gaps, post-Phase-5):**
 
 - ⏳ Test end-to-end local: cài Earthly → `earthly +all-local` → `docker compose up`
-- ⏳ Verify GH Action workflow khi push tag `v0.0.1`
+- ⏳ Verify GH Action `release.yml` khi push tag `v0.0.1`
 - ⏳ Production deploy với `OPSENSE_TAG=v*` pull từ ghcr.io
+- ⏳ Open gap #4: `conf/opsense.conf.toml` reference `http://vector:8686` không có trong compose
+- ⏳ Phase 2 GraphQL bridge (host `AppState.runner`)
 - ⏳ Phase 2 GraphQL bridge (cần `AppState.runner` để host dùng `RunnerClient` kết nối `opsense-runner:50051`)
 
 ### Test scenarios
@@ -957,20 +971,211 @@ Tóm tắt:
 | I — Cleanup | Prune image + Earthly cache |
 
 **Audit 2026-09-03** phát hiện 5 prerequisite chưa xong (xem
-`TEST-SCENARIOS.MD` §11) — phải giải quyết trước khi chạy test:
+`TEST-SCENARIOS.MD` §11). Tái kiểm **2026-09-04** sau khi hoàn tất build
+infra:
 
-1. `docker-compose.yml` chưa tồn tại trên đĩa.
-2. `Earthfile +base` thiếu `protobuf-compiler`.
-3. `Makefile` chưa có (PLAN.MD ghi nhầm "đã làm").
-4. `conf/opsense.conf.toml` reference `vector:8686` không có trong compose.
-5. Config mount qua `volumes:` chưa wire trong image `opsense-serve`.
+| # | Prerequisite | Status 2026-09-04 |
+|---|---|---|
+| 1 | `docker-compose.yml` chưa tồn tại | ✅ xong — tạo 3220 bytes, 5 services |
+| 2 | `Earthfile +base` thiếu `protobuf-compiler` | ✅ xong — `+builder` đã `apt-get install protobuf-compiler` |
+| 3 | `Makefile` chưa có (PLAN.MD ghi nhầm "đã làm") | ✅ xong — 3923 bytes, 12 target (`build-local`/`build-cloud`/`up`/`down`/`ps`/`logs`/`restart`/`shell`/`encrypt`/`decrypt`/`sql-clean`/`help`) |
+| 4 | `conf/opsense.conf.toml` reference `vector:8686` không có trong compose | ⚠️ vẫn open — note gap (xem Caveats dưới; **không block CI** vì CI chạy `cargo test` không cần compose) |
+| 5 | Config mount qua `volumes:` chưa wire trong image `opsense-serve` | ✅ xong — `opsense-serve` mount `./conf/opsense.conf.toml:/app/opsense.conf.toml:ro` |
+
+### Known gaps (post-Phase-5)
+
+- ⏳ End-to-end local test: cần Earthly cài sẵn trên dev máy → `make build-local`
+  → `make up` → verify 5 service healthy.
+- ⏳ Verify GH Action `release.yml` khi push tag `v0.0.1` (chưa push tag
+  nào; kiểm tra image push lên `ghcr.io/lap02921/opsense-*:v*`).
+- ⏳ Production deploy với `OPSENSE_TAG=v*` pull từ ghcr.io.
+- ⏳ **Open gap #4 (TEST-SCENARIOS.MD §11)**: `conf/opsense.conf.toml`
+  reference `http://vector:8686` không có service vector trong compose.
+  Cần bổ sung vector service hoặc rewrite config trước khi chạy
+  `docker compose up opsense-serve` end-to-end. **Không block CI** (CI
+  chạy `cargo test --workspace --all-targets` không cần compose).
+- ⏳ Phase 2 GraphQL bridge (cần `AppState.runner` để host dùng
+  `RunnerClient` kết nối `opsense-runner:50051`).
 
 ### Caveats
 
-- Earthfile `+base` chưa có `protoc` — cần bổ sung nếu build trong
-  container (CI runner đã có sẵn; Earthly image base `rust:bookworm`
-  thiếu `protobuf-compiler` cho crate `opsense-proto` có `build.rs`).
 - `opsense-runner-julia` image khá nặng (~1.5GB) vì kéo `julia:1.10-bookworm`.
   Có thể dùng `julia:1.10-alpine` để giảm, nhưng cần verify deps Linux.
 - `julia:1.10-bookworm` chỉ cần thiết khi user dùng Julia kernel.
   Có thể build 3 image runner tuỳ use case thay vì build sẵn cả 3.
+- `docker-compose.yml` hiện có **5 services** (postgres, valkey,
+  opsense-serve, opsense-runner-python, opsense-runner-julia) — echo
+  runner (`opsense-runner`) build được qua `+all-local` nhưng không nằm
+  trong compose. Compose cũ có 6 services là sai so với state hiện tại
+
+---
+
+## Service Account Auth (Cross-Machine) — Phase 6
+
+### Bối cảnh
+
+Cần phân tán REPL + Runner ra nhiều máy (không chỉ local). Hai luồng auth
+**độc lập**:
+
+| Luồng | Hướng | Credential | Lưu ở |
+|------|------|-----------|------|
+| **gRPC verify** | REPL → Runner | Ed25519 signature (session_id = public_key) | REPL: `~/.config/opsense/sessions/<id>.json` (mode 0600) |
+| **HTTP fetch** | Runner → Serve | Admin Bearer (`abt_*`) | Runner: `~/.config/opsense/runner.json` (mode 0600) |
+
+**Serve là nơi duy nhất mint keypair** — REPL/Runner không tự tạo.
+
+### Flow chi tiết
+
+```
+┌──────────┐                       ┌──────────┐                       ┌──────────┐
+│   REPL   │                       │  Runner  │                       │  Serve   │
+│  (local) │                       │ (remote) │                       │ (Nginx)  │
+└────┬─────┘                       └────┬─────┘                       └────┬─────┘
+     │                                  │                                  │
+     │ 1. opsense session issue         │                                  │
+     │    POST /api/oauth/v1/session/issue                                │
+     │    Bearer: <user_token>                                            │
+     │ ──────────────────────────────────────────────────────────────────>│
+     │                                  │                                  │
+     │                                  │ <── mint Ed25519 keypair ────────│
+     │ <────────────── { session_id, private_key, expires_in } ───────────│
+     │   save ~/.config/opsense/sessions/<id>.json (mode 0600)            │
+     │                                  │                                  │
+     │ 2. gRPC request (x-session-id, x-timestamp, x-nonce, x-signature)  │
+     │ ─────────────────────────────>  │                                  │
+     │                                  │ 3. cache hit?                    │
+     │                                  │    ├─ yes → verify ngay          │
+     │                                  │    └─ no  → POST /api/admin/v1/  │
+     │                                  │         session/resolve ──────> │
+     │                                  │         { private_key }          │
+     │                                  │         ← derive public_key ──── │
+     │                                  │         cache LRU                │
+     │                                  │         verify                   │
+     │                                  │                                  │
+     │                                  │ 4. fetch data (HTTP)             │
+     │                                  │    Bearer: <admin_token>         │
+     │                                  │    Nginx abt_* introspect path   │
+     │                                  │ ────────────────────────────────>│
+```
+
+### File layout
+
+- `~/.config/opsense/sessions/<session_id>.json` — REPL lưu keypair local
+  ```json
+  {
+    "session_id":  "...",
+    "private_key": "base64(32 bytes)",
+    "expires_at":  "2026-09-05T00:00:00Z",
+    "created_at":  "2026-09-04T00:00:00Z"
+  }
+  ```
+- `~/.config/opsense/runner.json` — Runner config
+  ```json
+  {
+    "serve_url":  "https://opsense.example.com",
+    "admin_token": "abt_xxx"
+  }
+  ```
+
+### CLI
+
+- `opsense session issue [--host URL]` — mint keypair, lưu JSON
+- `opsense session list` — xem remote + local
+- `opsense session revoke <id>` — revoke phía serve + xoá file local
+- `opsense session resolve <id>` — in `private_key` ra stdout
+- `opsense session import <id> <private_key> [--expires-at RFC3339]` — tạo file local
+
+### Runner code
+
+- `crates/opsense-runner/src/http_client.rs` — `ServeClient` (Bearer + timeout)
+- `crates/opsense-runner/src/auth.rs`:
+  - `verify_with_public_key()` — shared helper
+  - `LocalAuth` — in-process verify
+  - `RemoteAuth` — LRU cache `session_id → public_key`; miss → serve lookup
+- `crates/opsense-runner/src/config.rs` — `RunnerConfig::load()` đọc
+  `runner.json` + env overrides (`OPSENSE_SERVE_URL`, `OPSENSE_ADMIN_TOKEN`)
+- `crates/opsense-runner/src/lib.rs` — `build_auth(&cfg)` factory:
+  - `serve_url` + `admin_token` → `RemoteAuth`
+  - else → `LocalAuth`
+  - `auth_enabled = false` → `None`
+
+### Fail-closed semantics
+
+`RemoteAuth::verify_signature` nếu serve lookup lỗi (timeout, 5xx, network
+down) → trả `Ok(false)`, **không** trả `Err`. Lý do: gRPC layer phân biệt
+`Ok(false)` (= "signature không hợp lệ, từ chối request") với `Err` (= "lỗi
+hệ thống"); ta muốn behaviour ổn định khi serve down (mọi request bị từ
+chối) chứ không trả 500 lung tung.
+
+### Tests
+
+- `opsense-runner` lib: 20 tests pass
+  - `verify_with_public_key_roundtrip` — verify signature pass/fail
+  - `remote_auth_lookup_failure_returns_false_not_err` — fail-closed
+  - `remote_auth_create_challenge_unwired_errors` — chưa wire serve trả Err rõ ràng
+  - `config::file_overrides_bind_and_serve` — load JSON
+  - `http_client::trims_trailing_slash` / `empty_base_rejected`
+
+- `opsense` lib: 12 tests pass (gRPC client, GraphQL client, OAuth metrics, init)
+- `opsense-kernel-echo` integration: 5 tests pass
+
+### Out of scope (chưa làm)
+
+- `RemoteAuth::create_challenge` chưa wire tới serve (cần master_key ở serve)
+- `POST /api/admin/v1/session/resolve` — cần implement handler ở
+  `crates/opsense/src/api/admin/v1.rs` (reuse `resolve_long_session` model)
+  (đã sửa doc 2026-09-04).
+
+> ✅ **E2E integration test suite đã implement (Phase 1.7, 2026-09-05):**
+> full prod flow Nginx → Dex → UDS → Axum, 4 test files, CI workflow, `make test-integration`.
+
+---
+
+## Phase 1.7 — Integration Test Suite (full prod flow, 2026-09-05)
+
+> **Mục tiêu:** test E2E full prod flow **Nginx → Dex (OIDC) → UDS → Axum** với
+> 4 integration test files chạy trong `docker compose up` (Nginx port 8080,
+> Dex port 5556). KHÔNG dùng `serve-bare` (HTTP mode without Nginx) — đó chỉ
+> dành cho smoke local nhanh.
+
+### Approach: full prod flow, không shortcut
+
+- **Nginx** (`opsense-serve` image) tiếp tục validate Bearer JWT qua
+  lua-resty-openidc → proxy → UDS `/var/run/axum` → Axum.
+- **Dex** (`opsense-dex` image, `ghcr.io/dexidp/dex:v2.41.1`) chạy trong compose
+  với config `conf/dex/config.dev.yaml` (static client `opsense-test` + static
+  user `dev-user@example.com / password`).
+- **Compose chain** phụ thuộc: `postgres → opsense-dex → opsense-serve → 3 runners`.
+
+### OIDC config seed
+
+`sql/postgres/dev/50-init-tenant.sql` insert row vào `sys_oidc` với
+`name='default'`, `jwt_mode='jwks'`, `oidc_jwks_url` trỏ về Dex, và
+`oidc_client_secret` trỏ tới `sys_token_map` row chứa hex-encoded
+`opsense-dev-shared-secret-32-bytes-min!!`.
+
+### `opsense runner --health-check`
+
+CLI flag mới: `opsense runner --health-check <bind>` → kết nối gRPC
+`KernelRunner.Health` RPC, exit 0 / 1. Dùng cho docker `HEALTHCHECK`
+của 3 runners trong compose (thay vì TCP probe).
+
+### Integration test files
+
+| File | Coverage |
+|------|----------|
+| `tests/integration_health.rs` | /health, /graphql introspection |
+| `tests/integration_oauth.rs` | Dex login (rexpect PTY) → cookie → Bearer → device flow → session issue |
+| `tests/integration_runner_grpc.rs` | 3 runners qua gRPC, Ed25519 auth, Health RPC |
+| `tests/integration_repl_pty.rs` | REPL `--runner` mode qua rexpect (skip nếu runner/binary không sẵn) |
+
+### Local run
+
+```sh
+make test-integration   # build 4 images + compose up + cargo test --test-threads=1
+make test-integration-down
+```
+
+CI: `.github/workflows/integration.yml` chạy cùng flow trên
+`ubuntu-latest`, `timeout-minutes: 30`, cache cargo qua `Swatinem/rust-cache`,
+upload compose logs nếu fail.

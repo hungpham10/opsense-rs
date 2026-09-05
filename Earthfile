@@ -109,6 +109,9 @@ serve:
     COPY conf/nginx/vhost       /usr/local/openresty/nginx/conf/http.d/vhost
     COPY conf/config.alloy      /etc/alloy/config.alloy
 
+    # Dex OIDC config (for integration test consistency; not used in prod unless Nginx points to Dex).
+    COPY conf/dex/config.dev.yaml /etc/dex/config.dev.yaml
+
     # Helper scripts + entrypoint
     COPY scripts/nginx.sh      /app/nginx.sh
     COPY scripts/alloy.sh      /app/alloy.sh
@@ -121,6 +124,7 @@ serve:
     ENTRYPOINT ["/app/entrypoint.sh", "/usr/bin/supervisord", "-n"]
     EXPOSE 8080
     SAVE IMAGE --push ${REGISTRY}/${IMAGE_PREFIX}-serve:${VERSION}
+    SAVE IMAGE opsense-serve:${VERSION}
 
 # -----------------------------------------------------------------------
 # runner — Tầng 2: opsense runner subcommand + default echo kernel
@@ -143,6 +147,7 @@ runner:
     EXPOSE 50051
     ENTRYPOINT ["/app/opsense", "runner"]
     SAVE IMAGE --push ${REGISTRY}/${IMAGE_PREFIX}-runner:${VERSION}
+    SAVE IMAGE opsense-runner:${VERSION}
 
 # -----------------------------------------------------------------------
 # runner-python — runner with Python 3.12 + opsense-kernel-python
@@ -166,6 +171,7 @@ runner-python:
     EXPOSE 50051
     ENTRYPOINT ["/app/opsense", "runner"]
     SAVE IMAGE --push ${REGISTRY}/${IMAGE_PREFIX}-runner-python:${VERSION}
+    SAVE IMAGE opsense-runner-python:${VERSION}
 
 # -----------------------------------------------------------------------
 # runner-julia — runner with Julia 1.10 + opsense-kernel-julia
@@ -183,6 +189,7 @@ runner-julia:
     EXPOSE 50051
     ENTRYPOINT ["/app/opsense", "runner"]
     SAVE IMAGE --push ${REGISTRY}/${IMAGE_PREFIX}-runner-julia:${VERSION}
+    SAVE IMAGE opsense-runner-julia:${VERSION}
 
 # -----------------------------------------------------------------------
 # all-local — build all 4 images with tag `local` (no push). Dev workflow.
@@ -203,3 +210,15 @@ all:
     BUILD +runner
     BUILD +runner-python
     BUILD +runner-julia
+
+# -----------------------------------------------------------------------
+# integration-images — build 4 images (serve + 3 runners) with a CI-friendly
+# tag (no registry push). Used by `.github/workflows/integration.yml` for
+# smoke tests: `earthly +integration-images` then tag :ci aliases for
+# `docker compose up`.
+# -----------------------------------------------------------------------
+integration-images:
+    BUILD --build-arg VERSION=ci-${GITHUB_SHA:-local} +serve
+    BUILD --build-arg VERSION=ci-${GITHUB_SHA:-local} +runner
+    BUILD --build-arg VERSION=ci-${GITHUB_SHA:-local} +runner-python
+    BUILD --build-arg VERSION=ci-${GITHUB_SHA:-local} +runner-julia

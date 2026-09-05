@@ -6,6 +6,21 @@ poll_interval_seconds = 60
 cache_block_seconds = 300
 cache_max_blocks = 288
 
+# Minimal pipeline: clock source → null sink. Required so the bare
+# `opsense serve` container (which mounts this file) has an explicit
+# `[pipeline]` instead of relying on the in-code default. Override or
+# extend this section to wire real sources/sinks for your environment.
+[pipeline]
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 60
+
+[[pipeline.components]]
+type = "null"
+id = "null"
+inputs = ["clock"]
+
 # Capacity per metric (unit depends on the metric: cores, GB, req/s, ...).
 [capacity]
 cpu_usage = 32.0

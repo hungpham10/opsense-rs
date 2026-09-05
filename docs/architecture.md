@@ -297,6 +297,69 @@ Ctrl-D                        → close + return
 `KernelRepl`. Khi không có `--runner`, REPL rơi về GraphQL mode (`repl/mod.rs`
 tự check `runner.is_some()`).
 
+### 3.9 Service Account Auth (Cross-Machine)
+
+Khi REPL và Runner ở **khác máy**, cần thay `LocalAuth` (in-process) bằng
+`RemoteAuth` (lookup public_key từ serve khi cache miss). Keypair Ed25519 do
+**serve** mint (qua `POST /api/oauth/v1/session/issue`); REPL chỉ nhận và
+lưu, Runner chỉ verify.
+
+```
+┌──────────┐                       ┌──────────┐                       ┌──────────┐
+│   REPL   │                       │  Runner  │                       │  Serve   │
+│  (local) │                       │ (remote) │                       │ (Nginx)  │
+└────┬─────┘                       └────┬─────┘                       └────┬─────┘
+     │ 1. opsense session issue         │                                  │
+     │ ──────────────────────────────────────────────────────────────────>│
+     │                                  │ <── mint Ed25519 keypair ────────│
+     │ <────────────── { session_id, private_key, expires_in } ───────────│
+     │                                  │                                  │
+     │ 2. gRPC request (signed)         │                                  │
+     │ ─────────────────────────────>  │                                  │
+     │                                  │ 3. cache hit?                    │
+     │                                  │    ├─ yes → verify               │
+     │                                  │    └─ no  → POST /api/admin/v1/  │
+     │                                  │         session/resolve ──────> │
+     │                                  │         { private_key }          │
+     │                                  │         ← derive public_key ──── │
+     │                                  │         cache LRU                │
+     │                                  │         verify                   │
+```
+
+**Hai luồng auth độc lập** — REPL/Runner **không** tự tạo keypair:
+
+| Luồng | Hướng | Credential | Lưu trên |
+|------|------|-----------|----------|
+| gRPC verify | REPL → Runner | Ed25519 (session_id = public_key) | REPL: `~/.config/opsense/sessions/<id>.json` (mode 0600) |
+| HTTP fetch | Runner → Serve | Admin Bearer (`abt_*`) | Runner: `~/.config/opsense/runner.json` (mode 0600) |
+
+#### Code map
+
+| File | Vai trò |
+|------|---------|
+| `crates/opsense/src/api/oauth/v1.rs` | `session_issue/revoke/list` handlers (đã có) |
+| `crates/opsense/src/api/admin/v1.rs` | `session/resolve` handler (TODO: chưa implement) |
+| `crates/opsense/src/client/session.rs` | REPL HTTP client: `issue/list/revoke` |
+| `crates/opsense/src/cli/session.rs` | `opsense session {issue,list,revoke,resolve,import}` |
+| `crates/opsense-runner/src/http_client.rs` | `ServeClient` (Bearer + timeout) |
+| `crates/opsense-runner/src/auth.rs` | `verify_with_public_key()`, `LocalAuth`, `RemoteAuth` (LRU) |
+| `crates/opsense-runner/src/config.rs` | `RunnerConfig::load()` đọc `runner.json` + env |
+| `crates/opsense-runner/src/lib.rs` | `build_auth(&cfg)` factory |
+
+#### Fail-closed
+
+`RemoteAuth::verify_signature` nếu serve lookup lỗi (timeout, 5xx, network
+down) → trả `Ok(false)`, **không** trả `Err`. gRPC layer coi `Ok(false)` =
+"signature không hợp lệ" (reject) còn `Err` = "lỗi hệ thống" (500). Khi
+serve down ta muốn reject hết (fail-closed) chứ không trả 500 lung tung.
+
+#### Out of scope
+
+- E2E test cần serve thật (chưa có serve instance trong CI)
+- `POST /api/admin/v1/session/resolve` handler chưa implement (cần reuse
+  `resolve_long_session` ở model layer)
+- `RemoteAuth::create_challenge` chưa wire serve (cần master_key ở serve)
+
 ---
 
 ## 4. AppState (Tầng 1 — phase 1)
@@ -660,8 +723,8 @@ Còn lại **chỉ 4 bảng** (`sys_tenant`, `sys_oidc`, `sys_token_map`,
 
 ## 9. Roadmap
 
-> Audit ngày 2026-09-03. Phase 2 REPL mode (RunnerClient + KernelRepl) đã xong;
-> Phase 2 GraphQL bridge chỉ còn wrap RunnerClient qua resolvers.
+> Audit ngày 2026-09-04. Phase 5 build infra + CI unit test workflow đã xong;
+> Phase 2 GraphQL bridge vẫn cần wrap RunnerClient qua resolvers.
 
 - ✅ Phase scaffolding (Cargo, opsense-libs, opsense-core rewrite, opsense-components)
 - ✅ `init` subcommand (tạo config mẫu)
@@ -695,6 +758,25 @@ Còn lại **chỉ 4 bảng** (`sys_tenant`, `sys_oidc`, `sys_token_map`,
   - ✅ `RunnerClient` (tonic) đã viết ở Phase 2 (`crates/opsense/src/client/grpc.rs`)
   - ✅ Tích hợp `Commands::Runner` vào `opsense` binary (`main.rs:34-38, 63-83`)
   - ⏳ `tests/grpc_e2e.rs` rewrite (cũ vẫn work với raw `KernelRunnerClient`)
+- ✅ **Phase 5: Earthfile-based build & deployment (2026-09-04)**
+  - `Earthfile` build 4 image (`opsense-serve`, `opsense-runner` echo,
+    `opsense-runner-python`, `opsense-runner-julia`) qua `+builder`/`+recipe`/
+    `+binaries` chia sẻ cargo-chef cache.
+  - `docker-compose.yml` hiện có **5 services** (postgres, valkey,
+    opsense-serve, opsense-runner-python, opsense-runner-julia). Echo
+    runner build được nhưng chạy ngoài compose.
+  - `Makefile` 12 target (`build-local`/`build-cloud`/`up`/`down`/...).
+  - `.github/workflows/release.yml` push tag `v*` → `earthly --push +all`
+    → 4 image lên `ghcr.io/lap02921/opsense-*:v*`.
+  - Known gaps: vector service (open #4), E2E test, prod deploy, Phase 2
+    GraphQL bridge.
+- ✅ **CI: unit test workflow (2026-09-04)**
+  - `.github/workflows/ci.yml` chạy `cargo test --workspace --all-targets`
+    trên push/PR `main`.
+  - Toolchain: Rust 1.94 + Python 3.12 + Julia 1.10 + redis 7 service +
+    protoc.
+  - Đã chạy ổn (user confirm 2026-09-04). Tách 2 workflow: CI =
+    correctness gate, release = image publish.
 - ⏳ Cleanup: `crates/opsense/src/serve.rs.bak` (backup Aug 30, không load)
 
 ### §9.2 OAuth2 Device Authorization Grant (RFC 8628)
@@ -791,7 +873,7 @@ validate HS256/JWKS, inject `X-User-Id` + `X-Tenant-Id` header.
 ### 10.2 Earthfile target graph
 
 ```
-+base (rust:bookworm + pkg-config)          ← cache share
++builder (rust:bookworm + pkg-config + protoc)  ← cache share
    ↓
 +recipe (cargo chef prepare → recipe.json)  ← cache share
    ↓
@@ -833,7 +915,7 @@ curl http://localhost:8080/health
 - Image push lên `ghcr.io/lap02921/opsense-*:v*`
 - Production server: `OPSENSE_TAG=v* docker compose pull && up -d`
 
-### 10.5 Compose (6 services)
+### 10.5 Compose (5 services, hiện tại)
 
 `docker-compose.yml` chỉ reference image (không có `build:` context).
 Tag override qua biến `OPSENSE_TAG` (default `local`):
@@ -842,15 +924,19 @@ Tag override qua biến `OPSENSE_TAG` (default `local`):
 services:
   opsense:
     image: opsense-serve:${OPSENSE_TAG:-local}
-  opsense-runner:
-    image: opsense-runner:${OPSENSE_TAG:-local}
   opsense-runner-python:
     image: opsense-runner-python:${OPSENSE_TAG:-local}
   opsense-runner-julia:
     image: opsense-runner-julia:${OPSENSE_TAG:-local}
   postgres:    { image: postgres:16-alpine }
-  valkey:      { image: valkey/valkey:9.0-alpine }
+  valkey:      { image: valkey/valkey:9-alpine }
 ```
+
+`opsense-runner` (echo) **không nằm trong compose** — Earthfile `+all-local`
+vẫn build nó (artifact `+binaries/opsense-kernel-echo` + image
+`opsense-runner:local`) nhưng nó là dev/test tool chạy ngoài stack
+(REPL mode `--runner` cần endpoint của runner; user tự chạy `docker run
+--rm -p 50051:50051 opsense-runner:local` cho local dev).
 
 ### 10.6 File-level thay đổi (Phase 5)
 
@@ -863,16 +949,16 @@ services:
 | `scripts/alloy.sh` | **Mới** — Alloy foreground |
 | `conf/supervisor/opsense.conf` | **Mới** — 3 programs (app/nginx/alloy), NO tor |
 | `conf/nginx/http.conf` | Sửa 1 dòng — comment out `load_module libproxy.so` |
-| `docker-compose.yml` | Viết lại — 6 services, image reference only |
+| `docker-compose.yml` | Viết lại — 5 services, image reference only |
 | `.github/workflows/release.yml` | **Mới** — trigger `v*` → `earthly --push +all` |
-| `Makefile` | Viết lại — 4 target `server / runner / kernel-{echo,python,julia}` |
+| `Makefile` | Viết lại — 12 target (`help`/`build-local`/`build-cloud`/`up`/`down`/`down-v`/`ps`/`logs`/`restart`/`shell`/`encrypt`/`decrypt`/`sql-clean`) |
 | `Dockerfile` (cũ) | **Xoá** — thay bằng Earthfile |
 
 ### 10.7 Quyết định thiết kế chính
 
 - **Một Earthfile thay 4 Dockerfile**: `+recipe` build 1 lần, cả 4 binary
   cùng đọc → giảm ~70% build time lần đầu. `SAVE IMAGE --cache-hint` ở
-  `+base` giúp Earthly reuse layer khi không đổi base.
+  `+builder` giúp Earthly reuse layer khi không đổi base.
 - **Runner tách thành service riêng**: đúng theo kiến trúc 2 tầng
   (§3.1). Host `opsense serve` giao tiếp qua `OPSENSE_RUNNER_GRPC` env.
 - **3 runner image riêng**: mỗi image chạy đúng 1 kernel backend, user
@@ -888,11 +974,45 @@ services:
 
 ### 10.8 Caveats
 
-- `+base` image thiếu `protobuf-compiler` cho `opsense-proto` (`build.rs`).
-  Earthly build trong CI cần bổ sung `apt-get install protobuf-compiler`
-  hoặc build trong image có sẵn protoc.
 - `opsense-runner-julia` khá nặng (~1.5GB) vì kéo `julia:1.10-bookworm`.
   Có thể dùng `julia:1.10-alpine` để giảm, nhưng cần verify deps Linux.
 - Khi Phase 2 GraphQL bridge bật, host sẽ tạo `RunnerClient` tới
-  `opsense-runner:50051` (env `OPSENSE_RUNNER_GRPC`). Compose đã
-  wire sẵn — chỉ cần thêm env khi triển khai thực tế.
+  `opsense-runner-python:50051` hoặc `opsense-runner-julia:50051` (env
+  `OPSENSE_RUNNER_GRPC`). Compose đã wire sẵn — chỉ cần thêm env khi
+  triển khai thực tế.
+- Open gap (`conf/opsense.conf.toml` reference `http://vector:8686` không
+  có service vector trong compose): cần bổ sung vector service hoặc
+  rewrite config trước khi `docker compose up opsense-serve` chạy
+  end-to-end. **Không block CI** (CI chạy `cargo test` không cần compose).
+
+### 10.9 CI workflow (Tầng 1 — unit test)
+
+`.github/workflows/ci.yml` chạy trên push/PR `main`:
+
+| Job | Runner | Mục đích |
+|---|---|---|
+| `test` (Setup & Unit Tests) | `ubuntu-latest` | Build + test workspace |
+
+Service đi kèm: `redis:7` (port 6379, healthcheck) cho `opsense-libs`
+test cần Redis backend.
+
+Toolchains cài trong job:
+- `rust: 1.94` (dtolnay)
+- `python: 3.12` + numpy, pandas, pyarrow, protobuf
+- `julia: 1.10` + Arrow, DataFrames, CSV, Plots
+- `protoc` (`apt-get install protobuf-compiler`)
+
+Cache:
+- `Swatinem/rust-cache@v2` (key `ci`)
+- Julia depot theo hash
+
+Commands:
+- `cargo build --workspace --all-targets`
+- `cargo test --workspace --all-targets`
+
+CI KHÔNG dùng Earthly — test trực tiếp source Rust. Earthly chỉ chạy
+trong `.github/workflows/release.yml` (push tag `v*` → build/push 4 image
+lên ghcr.io). Tách 2 workflow: CI = correctness gate, release = image
+publish.
+
+Trạng thái: ✅ chạy ổn từ 2026-09-04 (user confirm).

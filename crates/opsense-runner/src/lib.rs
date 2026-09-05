@@ -22,19 +22,21 @@
 pub mod auth;
 pub mod backend;
 pub mod config;
+pub mod http_client;
 pub mod server;
 pub mod session;
 
-pub use auth::{Auth, AuthContext, LocalAuth};
+pub use auth::{Auth, AuthContext, LocalAuth, RemoteAuth};
 pub use backend::{EchoBackend, HealthInfo, KernelBackend, KernelOutput, LocalBackend};
 pub use config::{RunnerConfig, resolve_kernel_binary};
+pub use http_client::ServeClient;
 pub use server::{RunnerService, serve};
 pub use session::{SessionMeta, SessionRegistry};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use opsense_proto::pb::kernel_runner_server::KernelRunnerServer;
 
 /// The gRPC service handle: hosts mount this into their own tonic
@@ -47,6 +49,27 @@ pub fn kernel_runner_service(
     auth: Option<Arc<dyn Auth>>,
 ) -> KernelRunnerServer<RunnerService> {
     RunnerService::new(registry, cfg, auth).with_limits()
+}
+
+/// Chọn `Auth` impl dựa trên `cfg`:
+/// - Có `serve_url` + `admin_token` → `RemoteAuth` (cache miss → hỏi serve).
+/// - Ngược lại → `LocalAuth::new()` (in-process, không network).
+///
+/// Khi `cfg.auth_enabled = false` thì trả `None` (auth off).
+pub fn build_auth(cfg: &RunnerConfig) -> Result<Option<Arc<dyn Auth>>> {
+    if !cfg.auth_enabled {
+        return Ok(None);
+    }
+    if let (Some(url), Some(token)) = (&cfg.serve_url, &cfg.admin_token) {
+        let serve = Arc::new(
+            ServeClient::new(url.clone(), token.clone(), cfg.serve_http_timeout_secs)
+                .context("build ServeClient for RemoteAuth")?,
+        );
+        let remote = Arc::new(RemoteAuth::new(serve, cfg.pubkey_cache_capacity));
+        Ok(Some(remote))
+    } else {
+        Ok(Some(Arc::new(LocalAuth::new())))
+    }
 }
 
 /// Standalone runner process: host the service until Ctrl-C, then release

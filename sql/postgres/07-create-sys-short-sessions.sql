@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS sys_short_sessions (
     expires_at  TIMESTAMPTZ NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, created_at)
-) PARTITION BY RANGE (EXTRACT(EPOCH FROM created_at));
+) PARTITION BY RANGE (created_at);
 
 -- Partition mặc định cho data không khớp range nào (fallback)
 CREATE TABLE IF NOT EXISTS sys_short_sessions_default

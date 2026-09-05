@@ -209,7 +209,9 @@ pub async fn run() -> std::io::Result<()> {
         _ => {
             // Default: Unix socket mode
             let path = PathBuf::from("/var/run/axum");
-            let _ = tokio::fs::remove_file(&path).await;
+            // Path may be a stale file OR directory (e.g. baked into the
+            // Docker image); either way, clear it before binding.
+            let _ = tokio::fs::remove_dir_all(&path).await;
             tokio::fs::create_dir_all(path.parent().unwrap()).await?;
 
             let make_service = router.into_make_service_with_connect_info::<UdsConnectInfo>();

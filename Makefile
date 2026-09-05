@@ -20,7 +20,7 @@ ifeq ($(VERSION),local)
   ALIAS_RUNNER_JL  := opsense-runner-julia:local
 endif
 
-.PHONY: help build-local build-cloud up down logs ps restart shell encrypt decrypt sql-clean
+.PHONY: help build-local build-cloud up down logs ps restart shell encrypt decrypt sql-clean test-integration test-integration-down
 
 help:
 	@echo "Opsense dev shortcuts:"
@@ -36,6 +36,8 @@ help:
 	@echo "  make encrypt F=env/secrets.dev.yaml      - sops -e một secrets file"
 	@echo "  make decrypt F=env/secrets.dev.enc.yaml  - sops -d một secrets file"
 	@echo "  make sql-clean     - xoá *.sql files sinh ra sau init"
+	@echo "  make test-integration         - Build + compose up + run full integration suite (Nginx + UDS + Dex)"
+	@echo "  make test-integration-down    - Cleanup compose (down -v)"
 	@echo ""
 	@echo "Biến override:"
 	@echo "  VERSION=1.2.3 REGISTRY=... IMAGE_PREFIX=... make build-local  (build cloud tag)"
@@ -99,3 +101,33 @@ decrypt:
 
 sql-clean:
 	find ./sql -name '*.sql' -newer ./Makefile -print -delete
+
+# Integration test: build images + compose up + run integration test suite.
+# Test approach: full prod flow (Nginx + UDS + OIDC provider Dex + Axum).
+# Skip prerequisites (build, compose up) nếu images đã có sẵn.
+test-integration:
+	@echo ">>> Building 4 images (serve + runner + python + julia) via Earthly"
+	$(EARTHLY) +all-local
+	@echo ">>> Tag :local aliases cho compose"
+	@if [ "$(VERSION)" = "local" ]; then \
+		docker tag $(REGISTRY)/$(IMAGE_PREFIX)-serve:local     $(ALIAS_SERVE); \
+		docker tag $(REGISTRY)/$(IMAGE_PREFIX)-runner:local    $(ALIAS_RUNNER); \
+		docker tag $(REGISTRY)/$(IMAGE_PREFIX)-runner-python:local $(ALIAS_RUNNER_PY); \
+		docker tag $(REGISTRY)/$(IMAGE_PREFIX)-runner-julia:local  $(ALIAS_RUNNER_JL); \
+	fi
+	@echo ">>> Compose up + wait for healthy"
+	APP_ENV=$(APP_ENV) OPSENSE_TAG=$(VERSION) $(COMPOSE) up -d --wait --wait-timeout 180
+	@echo ">>> Run integration test suite (Nginx + UDS + Dex + Axum)"
+	APP_ENV=$(APP_ENV) OPSENSE_SERVE_URL=http://127.0.0.1:8080 \
+	OPSENSE_DEX_ISSUER=http://127.0.0.1:5556/dex \
+	OPSENSE_RUNNER_ECHO=127.0.0.1:50051 \
+	OPSENSE_RUNNER_PYTHON=127.0.0.1:50052 \
+	OPSENSE_RUNNER_JULIA=127.0.0.1:50053 \
+	DB_DSN=postgres://opsense:opsense123@127.0.0.1:5432/opsense \
+	cargo test --workspace --test integration_health --test integration_oauth \
+		--test integration_runner_grpc --test integration_repl_pty \
+		-- --test-threads=1
+
+# Cleanup after integration test.
+test-integration-down:
+	$(COMPOSE) down -v

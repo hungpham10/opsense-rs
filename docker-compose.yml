@@ -37,17 +37,70 @@ services:
   valkey:
     image: valkey/valkey:9-alpine
     container_name: opsense-valkey
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     networks: [opsense-net]
+
+  # Dex OIDC provider (integration test only).
+  # Image: ghcr.io/dexidp/dex:v2.41.1
+  # Config: conf/dex/config.dev.yaml (static client + static user).
+  # Exposed port 5556 for host-side OIDC discovery debug.
+  opsense-dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    container_name: opsense-dex
+    command: dex serve /etc/dex/config.yaml
+    volumes:
+      - ./conf/dex/config.dev.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "5556:5556"
+    networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5556/dex/.well-known/openid-configuration | grep -q issuer || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # opsense-runner (echo) — bare Tầng 2 runner with no kernel deps.
+  # Referenced by opsense-serve via OPSENSE_RUNNER_GRPC=opsense-runner:50051.
+  # Required for `docker compose up opsense-serve` end-to-end smoke (was missing
+  # in earlier compose revisions; PLAN.MD §10.5 known gap).
+  opsense-runner:
+    image: opsense-runner:${OPSENSE_TAG:-local}
+    container_name: opsense-runner
+    networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "/app/opsense runner --health-check || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
 
   opsense-runner-python:
-    image: opsense-runner-python:local
+    image: opsense-runner-python:${OPSENSE_TAG:-local}
     container_name: opsense-runner-python
     networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "/app/opsense runner --health-check || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
 
   opsense-runner-julia:
-    image: opsense-runner-julia:local
+    image: opsense-runner-julia:${OPSENSE_TAG:-local}
     container_name: opsense-runner-julia
     networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "/app/opsense runner --health-check || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
 
   opsense-serve:
     image: opsense-serve:local
@@ -60,6 +113,8 @@ services:
       # Mount the whole sql tree so release.sh can run schema (depth=1) then
       # the env-specific seed (depth=2) at boot.
       - ./sql:/app/sql:ro
+      # Dex OIDC config (mounted into image for consistency with compose service).
+      - ./conf/dex/config.dev.yaml:/etc/dex/config.dev.yaml:ro
     environment:
       # App
       APP_ENV: ${APP_ENV:-dev}
@@ -87,10 +142,10 @@ services:
       # Redis (valkey)
       REDIS_HOST: opsense-valkey
       REDIS_PORT: 6379
-      REDIS_USERNAME: ""
-      REDIS_PASSWORD: ""
     depends_on:
       postgres:
+        condition: service_healthy
+      opsense-dex:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]

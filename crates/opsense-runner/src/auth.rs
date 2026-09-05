@@ -1,4 +1,4 @@
-//! Auth trait + local Ed25519 implementation.
+//! Auth trait + Ed25519 implementations.
 //!
 //! Phase 4: every request carries `x-session-id` (= Ed25519 public key),
 //! `x-timestamp`, `x-nonce`, `x-signature`. Sign scheme:
@@ -8,14 +8,25 @@
 //! ```
 //!
 //! Runner verifies with the session-id (= public key). Timestamps must fall
-//! inside a ±30 s window. `resolve_private_key` always returns `None` until the
-//! future phase wires the server-API lookup.
+//! inside a ±30 s window.
+//!
+//! Hai implementation:
+//! - [`LocalAuth`]: tự verify bằng public_key decode từ session_id (in-process).
+//!   Chỉ phù hợp khi REPL + Runner cùng máy.
+//! - [`RemoteAuth`]: cache miss → hỏi serve `POST /api/admin/v1/session/resolve`,
+//!   lấy private_key, re-derive public_key, cache LRU, rồi verify.
+//!   Phù hợp khi REPL + Runner khác máy.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{SigningKey, Verifier, VerifyingKey, SIGNATURE_LENGTH};
 use rand::{RngCore, rngs::OsRng};
 use subtle::ConstantTimeEq;
+
+use crate::http_client::{ServeClient, SessionResolveRequest, SessionResolveResponse};
 
 /// ±30s clock-skew window for timestamp checks.
 pub const TIMESTAMP_WINDOW_SECS: i64 = 30;
@@ -184,13 +195,6 @@ impl Auth for LocalAuth {
         nonce: u64,
         signature: &[u8],
     ) -> Result<bool> {
-        if signature.len() != SIGNATURE_LENGTH {
-            return Ok(false);
-        }
-        let now = chrono::Utc::now().timestamp();
-        if (now - timestamp).abs() > TIMESTAMP_WINDOW_SECS {
-            return Ok(false);
-        }
         let public_bytes = B64
             .decode(session_id)
             .with_context(|| format!("session_id is not valid base64: {session_id}"))?;
@@ -199,14 +203,7 @@ impl Auth for LocalAuth {
         }
         let mut pk = [0u8; 32];
         pk.copy_from_slice(&public_bytes);
-        let verifying = VerifyingKey::from_bytes(&pk)
-            .map_err(|e| anyhow!("invalid ed25519 public key: {e}"))?;
-        let message = format!("{timestamp}:{nonce}:{method}");
-        let sig_bytes: [u8; SIGNATURE_LENGTH] = signature
-            .try_into()
-            .map_err(|_| anyhow!("signature is not 64 bytes"))?;
-        let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
-        Ok(verifying.verify(message.as_bytes(), &sig).is_ok())
+        verify_with_public_key(&pk, method, timestamp, nonce, signature)
     }
 
     async fn create_challenge(&self, _session_id: &str) -> Result<Challenge> {
@@ -235,6 +232,206 @@ impl Auth for LocalAuth {
         response: &[u8],
     ) -> Result<bool> {
         // Constant-time compare avoids leaking timing info about the prefix.
+        Ok(expected_plaintext.ct_eq(response).into())
+    }
+}
+
+/// Verify signature bằng `public_key` đã biết (32 bytes). Pure function —
+/// chia sẻ giữa `LocalAuth` và `RemoteAuth` để đảm bảo logic verify giống
+/// nhau, chỉ khác nguồn public_key.
+pub(crate) fn verify_with_public_key(
+    public_key: &[u8; 32],
+    method: &str,
+    timestamp: i64,
+    nonce: u64,
+    signature: &[u8],
+) -> Result<bool> {
+    if signature.len() != SIGNATURE_LENGTH {
+        return Ok(false);
+    }
+    let now = chrono::Utc::now().timestamp();
+    if (now - timestamp).abs() > TIMESTAMP_WINDOW_SECS {
+        return Ok(false);
+    }
+    let verifying = VerifyingKey::from_bytes(public_key)
+        .map_err(|e| anyhow!("invalid ed25519 public key: {e}"))?;
+    let message = format!("{timestamp}:{nonce}:{method}");
+    let sig_bytes: [u8; SIGNATURE_LENGTH] = signature
+        .try_into()
+        .map_err(|_| anyhow!("signature is not 64 bytes"))?;
+    let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+    Ok(verifying.verify(message.as_bytes(), &sig).is_ok())
+}
+
+// =========================================================================
+// RemoteAuth — REPL và Runner khác máy
+// =========================================================================
+
+/// LRU cache đơn giản (Mutex<HashMap>) cho `session_id → public_key`.
+/// Khi đầy thì pop ngẫu nhiên phần tử cũ nhất (O(1) amortized).
+#[derive(Debug)]
+struct PubkeyCache {
+    map:   HashMap<String, [u8; 32]>,
+    order: Vec<String>, // FIFO eviction
+    cap:   usize,
+}
+
+impl PubkeyCache {
+    fn new(cap: usize) -> Self {
+        Self { map: HashMap::new(), order: Vec::new(), cap: cap.max(1) }
+    }
+    fn get(&mut self, k: &str) -> Option<[u8; 32]> {
+        self.map.get(k).copied()
+    }
+    fn put(&mut self, k: String, v: [u8; 32]) {
+        if self.map.contains_key(&k) {
+            self.map.insert(k, v);
+            return;
+        }
+        if self.map.len() >= self.cap {
+            // Evict oldest
+            if let Some(oldest) = self.order.first().cloned() {
+                self.map.remove(&oldest);
+                self.order.remove(0);
+            }
+        }
+        self.map.insert(k.clone(), v);
+        self.order.push(k);
+    }
+}
+
+/// Auth backed by HTTP calls tới serve, có LRU cache public_key theo
+/// `session_id`. Phù hợp khi REPL + Runner ở 2 máy khác nhau.
+pub struct RemoteAuth {
+    serve:  Arc<ServeClient>,
+    cache:  Mutex<PubkeyCache>,
+}
+
+impl RemoteAuth {
+    /// `serve` phải có `base_url` + `admin_token` đã set.
+    /// `cache_cap` = số session_id tối đa cache.
+    pub fn new(serve: Arc<ServeClient>, cache_cap: usize) -> Self {
+        Self {
+            serve,
+            cache: Mutex::new(PubkeyCache::new(cache_cap)),
+        }
+    }
+
+    /// Lookup public_key: hit cache trả ngay, miss → gọi serve
+    /// `/api/admin/v1/session/resolve` rồi re-derive từ private_key.
+    async fn lookup_public_key(&self, session_id: &str) -> Result<Option<[u8; 32]>> {
+        if let Some(pk) = self.cache.lock().unwrap().get(session_id) {
+            return Ok(Some(pk));
+        }
+        let resp: SessionResolveResponse = self
+            .serve
+            .post(
+                "/api/admin/v1/session/resolve",
+                &SessionResolveRequest { session_id },
+            )
+            .await
+            .context("POST /api/admin/v1/session/resolve")?;
+
+        if !resp.active {
+            return Ok(None);
+        }
+        let pk_b64 = resp
+            .private_key
+            .as_deref()
+            .ok_or_else(|| anyhow!("session/resolve returned active=true but no private_key"))?;
+        let pk_bytes = B64
+            .decode(pk_b64)
+            .context("private_key not valid base64")?;
+        if pk_bytes.len() != 32 {
+            anyhow::bail!(
+                "private_key decoded to {} bytes, expected 32",
+                pk_bytes.len()
+            );
+        }
+        let mut priv_arr = [0u8; 32];
+        priv_arr.copy_from_slice(&pk_bytes);
+        let signing = SigningKey::from_bytes(&priv_arr);
+        let public_key = signing.verifying_key().to_bytes();
+
+        self.cache
+            .lock()
+            .unwrap()
+            .put(session_id.to_string(), public_key);
+        Ok(Some(public_key))
+    }
+}
+
+#[async_trait::async_trait]
+impl Auth for RemoteAuth {
+    async fn generate_keypair(&self) -> Result<(String, Vec<u8>)> {
+        // Serve mới là nơi mint keypair. Method này chỉ dùng cho test;
+        // gọi từ runtime sẽ trả về keypair tạm để không phá API.
+        LocalAuth::new().generate_keypair().await
+    }
+
+    async fn verify_signature(
+        &self,
+        session_id: &str,
+        method: &str,
+        timestamp: i64,
+        nonce: u64,
+        signature: &[u8],
+    ) -> Result<bool> {
+        // Fail-closed: serve lookup lỗi → reject signature, không phải Err.
+        // Caller (gRPC) coi `Ok(false)` = "không hợp lệ" còn `Err` = "lỗi hệ thống";
+        // ta muốn behaviour ổn định khi serve down (mọi request bị từ chối).
+        let pk = match self.lookup_public_key(session_id).await {
+            Ok(Some(p)) => p,
+            Ok(None) => return Ok(false),
+            Err(e) => {
+                tracing::warn!(
+                    "RemoteAuth: serve lookup failed for {session_id}: {e:#} — rejecting signature"
+                );
+                return Ok(false);
+            }
+        };
+        verify_with_public_key(&pk, method, timestamp, nonce, signature)
+    }
+
+    async fn resolve_private_key(&self, session_id: &str) -> Result<Option<Vec<u8>>> {
+        let resp: SessionResolveResponse = self
+            .serve
+            .post(
+                "/api/admin/v1/session/resolve",
+                &SessionResolveRequest { session_id },
+            )
+            .await
+            .context("POST /api/admin/v1/session/resolve")?;
+        if !resp.active {
+            return Ok(None);
+        }
+        let pk_b64 = match resp.private_key.as_deref() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let bytes = B64
+            .decode(pk_b64)
+            .context("private_key not valid base64")?;
+        if bytes.len() != 32 {
+            anyhow::bail!("private_key length {} != 32", bytes.len());
+        }
+        Ok(Some(bytes))
+    }
+
+    async fn create_challenge(&self, _session_id: &str) -> Result<Challenge> {
+        // Remote runner không giữ master_key — không thể encrypt local.
+        // Tương lai sẽ proxy tới serve endpoint (nếu có); hiện tại trả lỗi.
+        Err(anyhow!(
+            "RemoteAuth::create_challenge not yet wired to serve (no master_key locally)"
+        ))
+    }
+
+    async fn verify_challenge(
+        &self,
+        _session_id: &str,
+        expected_plaintext: &[u8],
+        response: &[u8],
+    ) -> Result<bool> {
         Ok(expected_plaintext.ct_eq(response).into())
     }
 }
@@ -354,5 +551,82 @@ mod tests {
         let challenge = auth.create_challenge("s").await.unwrap();
         assert_eq!(challenge.plaintext.len(), 32);
         unsafe { std::env::remove_var("MASTER_KEY") };
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use crate::http_client::ServeClient;
+    use ed25519_dalek::Signer;
+
+    /// `verify_with_public_key` share giữa LocalAuth + RemoteAuth.
+    #[tokio::test]
+    async fn verify_with_public_key_roundtrip() {
+        // Tạo keypair local, derive public_key, verify.
+        let (sid, priv_bytes) = LocalAuth::new().generate_keypair().await.unwrap();
+        let mut pk = [0u8; 32];
+        pk.copy_from_slice(&B64.decode(&sid).unwrap());
+        let mut priv_arr = [0u8; 32];
+        priv_arr.copy_from_slice(&priv_bytes);
+
+        let signing = SigningKey::from_bytes(&priv_arr);
+        let now = chrono::Utc::now().timestamp();
+        let nonce = 7u64;
+        let message = format!("{now}:{nonce}:Execute");
+        let sig = signing.sign(message.as_bytes());
+
+        assert!(
+            verify_with_public_key(&pk, "Execute", now, nonce, &sig.to_bytes())
+                .unwrap()
+        );
+        // Stale timestamp → false
+        let stale = now - 60;
+        let msg2 = format!("{stale}:{nonce}:Execute");
+        let sig2 = signing.sign(msg2.as_bytes());
+        assert!(
+            !verify_with_public_key(&pk, "Execute", stale, nonce, &sig2.to_bytes())
+                .unwrap()
+        );
+    }
+
+    /// `RemoteAuth::verify_signature` trả `Ok(false)` (không panic) khi
+    /// lookup serve thất bại — KHÔNG được trả Err cho caller gRPC path.
+    /// Dùng URL chắc chắn không phản hồi.
+    #[tokio::test]
+    async fn remote_auth_lookup_failure_returns_false_not_err() {
+        // 127.0.0.1:1 chắc chắn connection refused.
+        let serve = Arc::new(
+            ServeClient::new(
+                "http://127.0.0.1:1".to_string(),
+                "abt_test".to_string(),
+                2,
+            )
+            .unwrap(),
+        );
+        let auth = RemoteAuth::new(serve, 16);
+        let ok = auth
+            .verify_signature("any-session-id", "Ping", chrono::Utc::now().timestamp(), 0, &[0u8; 64])
+            .await
+            .unwrap();
+        // lookup fail → trả Ok(None) → verify_signature trả Ok(false).
+        assert!(!ok);
+    }
+
+    /// `RemoteAuth::create_challenge` chưa wired serve → trả Err rõ ràng
+    /// (không panic), để caller biết mà báo lỗi chứ không silently fail.
+    #[tokio::test]
+    async fn remote_auth_create_challenge_unwired_errors() {
+        let serve = Arc::new(
+            ServeClient::new(
+                "http://127.0.0.1:1".to_string(),
+                "abt".to_string(),
+                2,
+            )
+            .unwrap(),
+        );
+        let auth = RemoteAuth::new(serve, 16);
+        let err = auth.create_challenge("s").await.unwrap_err();
+        assert!(err.to_string().contains("RemoteAuth"));
     }
 }

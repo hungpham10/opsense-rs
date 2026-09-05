@@ -22,6 +22,9 @@ futures-util = { workspace = true }
 opsense-libs = { path = "../opsense-libs" }
 opsense-proto = { path = "../opsense-proto" }
 rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 subtle = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -30,3 +33,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 arrow = { workspace = true, features = ["ipc"] }
+tempfile = { workspace = true }

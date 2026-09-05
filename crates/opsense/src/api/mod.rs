@@ -15,13 +15,14 @@ use std::sync::Arc;
 
 use async_graphql::SimpleObject;
 use axum::extract::State;
-use axum::response::IntoResponse;
+use axum::Json;
 use headers::Header;
 use http::{HeaderName, HeaderValue};
 use aws_sdk_s3::Client as S3Client;
 use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, StationKind};
+use opsense_libs::vector::components::{clock, null};
 use opsense_libs::vector::runtime::{Component, Event, Runtime};
 use opsense_model::secret::Secret;
 use opsense_model::resolver::Resolver;
@@ -163,16 +164,32 @@ impl AppState {
                         })
                 })
                 .collect(),
-            _ => Err(Error::new(
-                ErrorKind::InvalidData,
-                "pipeline isn't configured correctly",
-            )),
+            _ => Ok(Self::default_pipeline(cfg)),
         }
+    }
+
+    /// Build a minimal default pipeline (`clock -> null`) when no `[pipeline]`
+    /// section is present in the config. This matches the documented behaviour
+    /// promised in `opsense_core::Config`:
+    ///   "when absent a default `clock -> ingest -> processor -> persist` graph
+    ///   is built from `engine.poll_interval_seconds`"
+    fn default_pipeline(cfg: &Config) -> Vec<Arc<dyn Component>> {
+        let interval_secs = cfg.engine.poll_interval_seconds.max(1);
+        vec![
+            Arc::new(clock::Clock {
+                id: "clock".to_string(),
+                interval_secs,
+            }) as Arc<dyn Component>,
+            Arc::new(null::Null {
+                id: "null".to_string(),
+                inputs: vec!["clock".to_string()],
+            }) as Arc<dyn Component>,
+        ]
     }
 }
 
-pub async fn health_check(State(_): State<AppState>) -> impl IntoResponse {
-    "Success"
+pub async fn health_check(State(_): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ok": true }))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

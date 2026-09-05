@@ -13,11 +13,12 @@ permissions:
 jobs:
   build-push:
     name: Build & push 4 images via Earthly
+    needs: integration  # Wait for integration test pass trước khi push image release.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: earthly/actions-setup-earthly@v1
+      - uses: earthly/actions-setup@v1
         with:
           version: latest
 
