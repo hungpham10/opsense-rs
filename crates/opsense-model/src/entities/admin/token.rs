@@ -95,11 +95,11 @@ impl Token for Admin {
         // Cú pháp upsert tùy dialect.
         let sql = if self.kind(tenant_id).is_mysql() {
             "INSERT INTO sys_token_map (tenant_id, service, token) \
-             VALUES (?1, ?2, ?3) \
+             VALUES ($1, $2, $3) \
              ON DUPLICATE KEY UPDATE token = VALUES(token), updated_at = CURRENT_TIMESTAMP"
         } else {
             "INSERT INTO sys_token_map (tenant_id, service, token) \
-             VALUES (?1, ?2, ?3) \
+             VALUES ($1, $2, $3) \
              ON CONFLICT (tenant_id, service) DO UPDATE SET \
              token = EXCLUDED.token, updated_at = CURRENT_TIMESTAMP"
         };
@@ -139,7 +139,7 @@ impl Token for Admin {
 
         let pool = self.dbt(tenant_id);
         let mut conn = pool.acquire().await?;
-        let row = sqlx::query("SELECT id FROM sys_token_map WHERE tenant_id = ?1 AND service = ?2")
+        let row = sqlx::query("SELECT id FROM sys_token_map WHERE tenant_id = $1 AND service = $2")
             .bind(tenant_id)
             .bind(&service)
             .fetch_optional(&mut *conn)
@@ -153,7 +153,7 @@ impl Token for Admin {
 
         let upsert_sql = if self.kind(tenant_id).is_mysql() {
             "INSERT INTO sys_user (tenant_id, user_id, token_hash, token_id, expires_at, revoked_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL) \
+             VALUES ($1, $2, $3, $4, $5, NULL) \
              ON DUPLICATE KEY UPDATE \
              token_hash = VALUES(token_hash), \
              token_id = VALUES(token_id), \
@@ -162,7 +162,7 @@ impl Token for Admin {
              updated_at = CURRENT_TIMESTAMP"
         } else {
             "INSERT INTO sys_user (tenant_id, user_id, token_hash, token_id, expires_at, revoked_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL) \
+             VALUES ($1, $2, $3, $4, $5, NULL) \
              ON CONFLICT (tenant_id, user_id) DO UPDATE SET \
              token_hash = EXCLUDED.token_hash, \
              token_id = EXCLUDED.token_id, \
@@ -187,7 +187,7 @@ impl Token for Admin {
         let pool = self.dbt(tenant_id);
         let mut conn = pool.acquire().await?;
         let row = sqlx::query(
-            "SELECT token_id FROM sys_user WHERE tenant_id = ?1 AND user_id = ?2",
+            "SELECT token_id FROM sys_user WHERE tenant_id = $1 AND user_id = $2",
         )
         .bind(tenant_id)
         .bind(user_id)
@@ -207,7 +207,7 @@ impl Token for Admin {
         let mut conn = pool.acquire().await?;
         let result = sqlx::query(
             "UPDATE sys_user SET revoked_at = CURRENT_TIMESTAMP \
-             WHERE tenant_id = ?1 AND user_id = ?2",
+             WHERE tenant_id = $1 AND user_id = $2",
         )
         .bind(tenant_id)
         .bind(user_id)
@@ -233,7 +233,7 @@ impl Token for Admin {
              CAST(revoked_at AS TEXT) AS revoked_at, \
              CAST(last_used_at AS TEXT) AS last_used_at, \
              CAST(created_at AS TEXT) AS created_at \
-             FROM sys_user WHERE tenant_id = ?1",
+             FROM sys_user WHERE tenant_id = $1",
         )
         .bind(tenant_id)
         .fetch_all(&mut *conn)

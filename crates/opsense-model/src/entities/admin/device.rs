@@ -65,7 +65,7 @@ impl Admin {
         sqlx::query(
             "INSERT INTO sys_device_code \
              (tenant_id, device_code, user_code, interval_secs, expires_at, status) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+             VALUES ($1, $2, $3, $4, $5, 'pending')",
         )
         .bind(tenant_id)
         .bind(&device_code)
@@ -106,7 +106,7 @@ impl Admin {
         // 1. Lookup device code
         let row = sqlx::query(
             "SELECT id, status, CAST(expires_at AS TEXT) AS expires_at \
-             FROM sys_device_code WHERE tenant_id = ?1 AND user_code = ?2",
+             FROM sys_device_code WHERE tenant_id = $1 AND user_code = $2",
         )
         .bind(tenant_id)
         .bind(user_code)
@@ -146,7 +146,7 @@ impl Admin {
         let mut conn = pool.acquire().await?;
 
         let row2 = sqlx::query(
-            "INSERT INTO sys_token_map (tenant_id, service, token) VALUES (?1, ?2, ?3)",
+            "INSERT INTO sys_token_map (tenant_id, service, token) VALUES ($1, $2, $3)",
         )
         .bind(tenant_id)
         .bind(format!("user:{user_id}"))
@@ -160,7 +160,7 @@ impl Admin {
         sqlx::query(
             "INSERT INTO sys_user \
              (tenant_id, user_id, token_hash, token_id, expires_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (tenant_id, user_id) DO UPDATE SET \
                token_hash = EXCLUDED.token_hash, \
                token_id   = EXCLUDED.token_id, \
@@ -178,9 +178,9 @@ impl Admin {
         // 5. Cập nhật device_code → approved + lưu tokens
         sqlx::query(
             "UPDATE sys_device_code \
-             SET status = 'approved', user_id = ?1, approved_at = CURRENT_TIMESTAMP, \
-                 access_token = ?2, refresh_token = ?3 \
-             WHERE id = ?4",
+             SET status = 'approved', user_id = $1, approved_at = CURRENT_TIMESTAMP, \
+                 access_token = $2, refresh_token = $3 \
+             WHERE id = $4",
         )
         .bind(user_id)
         .bind(&access_token)
@@ -207,7 +207,7 @@ impl Admin {
         let row = sqlx::query(
             "SELECT status, user_id, CAST(expires_at AS TEXT) AS expires_at, \
                     access_token, refresh_token, interval_secs \
-             FROM sys_device_code WHERE tenant_id = ?1 AND device_code = ?2",
+             FROM sys_device_code WHERE tenant_id = $1 AND device_code = $2",
         )
         .bind(tenant_id)
         .bind(device_code)

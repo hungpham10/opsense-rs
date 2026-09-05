@@ -88,7 +88,7 @@ impl Admin {
                 let pool = self.dbt(tenant_id);
                 let mut conn = pool.acquire().await?;
                 let row = sqlx::query(
-                    "SELECT token FROM sys_token_map WHERE tenant_id = ?1 AND service = ?2",
+                    "SELECT token FROM sys_token_map WHERE tenant_id = $1 AND service = $2",
                 )
                 .bind(tenant_id)
                 .bind(service_name)
@@ -131,7 +131,7 @@ impl Admin {
                 let pool = self.dbt(tenant_id);
                 let mut conn = pool.acquire().await?;
                 let row = sqlx::query(
-                    "SELECT token FROM sys_token_map WHERE tenant_id = ?1 AND id = ?2",
+                    "SELECT token FROM sys_token_map WHERE tenant_id = $1 AND id = $2",
                 )
                 .bind(tenant_id)
                 .bind(token_id)

@@ -33,7 +33,7 @@ impl Jwt for Admin {
              CAST(expires_at AS TEXT) AS expires_at, \
              CAST(revoked_at AS TEXT) AS revoked_at \
              FROM sys_user \
-             WHERE tenant_id = ?1 AND token_hash = ?2",
+             WHERE tenant_id = $1 AND token_hash = $2",
         )
         .bind(tenant_id)
         .bind(sha256_hex(token.as_bytes()))
@@ -65,7 +65,7 @@ impl Jwt for Admin {
         }
 
         // Best-effort cập nhật last_used_at
-        let _ = sqlx::query("UPDATE sys_user SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?1")
+        let _ = sqlx::query("UPDATE sys_user SET last_used_at = CURRENT_TIMESTAMP WHERE id = $1")
             .bind(record_id)
             .execute(&mut *conn)
             .await;

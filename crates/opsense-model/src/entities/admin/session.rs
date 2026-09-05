@@ -74,7 +74,7 @@ impl Admin {
         let mut conn = pool.acquire().await?;
         let _ = sqlx::query(
             "DELETE FROM sys_long_sessions \
-             WHERE tenant_id = ?1 AND user_id = ?2 AND expires_at < CURRENT_TIMESTAMP",
+             WHERE tenant_id = $1 AND user_id = $2 AND expires_at < CURRENT_TIMESTAMP",
         )
         .bind(tenant_id)
         .bind(user_id)
@@ -90,7 +90,7 @@ impl Admin {
         sqlx::query(
             "INSERT INTO sys_long_sessions \
              (tenant_id, user_id, session_id, private_key_enc, status, expires_at) \
-             VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
+             VALUES ($1, $2, $3, $4, 'active', $5)",
         )
         .bind(tenant_id)
         .bind(user_id)
@@ -120,7 +120,7 @@ impl Admin {
         let affected = sqlx::query(
             "UPDATE sys_long_sessions \
              SET status = 'revoked' \
-             WHERE tenant_id = ?1 AND user_id = ?2 AND session_id = ?3 AND status = 'active'",
+             WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3 AND status = 'active'",
         )
         .bind(tenant_id)
         .bind(user_id)
@@ -147,7 +147,7 @@ impl Admin {
         // Lazy cleanup expired trước
         let _ = sqlx::query(
             "DELETE FROM sys_long_sessions \
-             WHERE tenant_id = ?1 AND user_id = ?2 AND expires_at < CURRENT_TIMESTAMP",
+             WHERE tenant_id = $1 AND user_id = $2 AND expires_at < CURRENT_TIMESTAMP",
         )
         .bind(tenant_id)
         .bind(user_id)
@@ -160,7 +160,7 @@ impl Admin {
                     CAST(last_used_at AS TEXT) AS last_used_at, \
                     CAST(created_at AS TEXT) AS created_at \
              FROM sys_long_sessions \
-             WHERE tenant_id = ?1 AND user_id = ?2 \
+             WHERE tenant_id = $1 AND user_id = $2 \
              ORDER BY created_at DESC",
         )
         .bind(tenant_id)
@@ -205,7 +205,7 @@ impl Admin {
         let row = sqlx::query(
             "SELECT private_key_enc, status, CAST(expires_at AS TEXT) AS expires_at \
              FROM sys_long_sessions \
-             WHERE tenant_id = ?1 AND user_id = ?2 AND session_id = ?3",
+             WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3",
         )
         .bind(tenant_id)
         .bind(user_id)
@@ -225,7 +225,7 @@ impl Admin {
             // Lazy cleanup
             let _ = sqlx::query(
                 "DELETE FROM sys_long_sessions \
-                 WHERE tenant_id = ?1 AND session_id = ?2",
+                 WHERE tenant_id = $1 AND session_id = $2",
             )
             .bind(tenant_id)
             .bind(session_id)
@@ -242,7 +242,7 @@ impl Admin {
         // Best-effort cập nhật last_used_at
         let _ = sqlx::query(
             "UPDATE sys_long_sessions SET last_used_at = CURRENT_TIMESTAMP \
-             WHERE tenant_id = ?1 AND session_id = ?2",
+             WHERE tenant_id = $1 AND session_id = $2",
         )
         .bind(tenant_id)
         .bind(session_id)
@@ -279,7 +279,7 @@ impl Admin {
         sqlx::query(
             "INSERT INTO sys_short_sessions \
              (tenant_id, user_id, session_id, token_hash, expires_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(tenant_id)
         .bind(user_id)
@@ -311,7 +311,7 @@ impl Admin {
         let row = sqlx::query(
             "SELECT user_id, session_id, CAST(expires_at AS TEXT) AS expires_at \
              FROM sys_short_sessions \
-             WHERE tenant_id = ?1 AND token_hash = ?2",
+             WHERE tenant_id = $1 AND token_hash = $2",
         )
         .bind(tenant_id)
         .bind(&token_hash)

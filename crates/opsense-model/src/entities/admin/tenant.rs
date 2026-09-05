@@ -54,7 +54,7 @@ impl Tenant for Admin {
 
         let pool = self.dbt(0);
         let mut conn = pool.acquire().await?;
-        let row = sqlx::query("SELECT id FROM sys_tenant WHERE host = ?1")
+        let row = sqlx::query("SELECT id FROM sys_tenant WHERE host = $1")
             .bind(host)
             .fetch_optional(&mut *conn)
             .await?;
@@ -81,7 +81,7 @@ impl Tenant for Admin {
         let row = sqlx::query(
             "SELECT id, jwt_mode, jwt_secret, session_secret, oidc_issuer, oidc_jwks_url, \
              oidc_client_id, oidc_client_secret, oidc_expected_alg \
-             FROM sys_oidc WHERE tenant_id = ?1 AND name = ?2",
+             FROM sys_oidc WHERE tenant_id = $1 AND name = $2",
         )
         .bind(tenant_id)
         .bind(oidc_name)
