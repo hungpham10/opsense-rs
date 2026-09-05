@@ -270,15 +270,21 @@ async fn oauth_full_flow_dex_nginx_axum() {
     }
 
     // 1. Hit `/api/oauth/v1/device/code` qua Nginx (no auth) → lấy device_code
-    let device: DeviceCodeResponse = client
+    let resp = client
         .post(format!("{}/api/oauth/v1/device/code", serve_url()))
         .json(&serde_json::json!({}))
         .send()
         .await
-        .expect("device/code request")
-        .json()
-        .await
-        .expect("device/code JSON");
+        .expect("device/code request");
+
+    // Check status trước khi deserialize — in body nếu lỗi để debug
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        panic!("device/code returned {status}: {body}");
+    }
+
+    let device: DeviceCodeResponse = resp.json().await.expect("device/code JSON");
     assert!(!device.device_code.is_empty());
     assert!(!device.user_code.is_empty());
 
