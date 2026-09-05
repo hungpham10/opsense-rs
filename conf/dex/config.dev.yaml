@@ -1,0 +1,51 @@
+# Dex config for integration test (dev only).
+# Image: ghcr.io/dexidp/dex:v2.41.1
+# Run: dex serve /etc/dex/config.yaml
+#
+# Static OIDC client + static password user → test full OIDC flow
+# (browser → Nginx → Dex → UDS → Axum) without external IdP.
+#
+# Issuer: http://opsense-dex:5556/dex
+# Client: opsense-test
+# Secret: opsense-dev-shared-secret-32-bytes-min!!
+# User: dev-user@example.com / password
+
+issuer: http://opsense-dex:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+staticClients:
+  - id: opsense-test
+    name: Opsense Test Client
+    secret: opsense-dev-shared-secret-32-bytes-min!!
+    redirectURIs:
+      - http://localhost:8080/callback
+      - http://127.0.0.1:8080/callback
+    grantTypes:
+      - authorization_code
+      - refresh_token
+      - urn:ietf:params:oauth:grant-type:device_code
+    responseTypes:
+      - code
+    scopeMappings:
+      - scopes: [openid, email, profile]
+        identityProvider: static
+
+# Static password DB (enablePasswordDB = true)
+enablePasswordDB: true
+staticPasswords:
+  - email: dev-user@example.com
+    # bcrypt(password="password", rounds=10) — Dex-compatible $2b$ prefix.
+    hash: $2b$10$XyvfzkvT3YcLHB6DWle.3egKeghQ4bLGvR3XchL5OusGICmefH/Ba
+    username: dev-user
+    userID: dev-user
+
+# Static identity providers (for scope mappings)
+staticIdentityProviders:
+  - id: static
+    name: Static
+    type: static

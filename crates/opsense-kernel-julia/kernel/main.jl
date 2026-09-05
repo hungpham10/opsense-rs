@@ -436,9 +436,9 @@ function handle(envelope::Vector{UInt8})::Bool
             return false
         end
         send_control(2, msg_welcome())
-    elseif field == 12 # health_request
+    elseif field == 10 # health_request
         packages = [msg_package(n) for n in DEFAULT_PACKAGES]
-        send_control(13, msg_health(packages))
+        send_control(11, msg_health(packages))
     elseif field == 3 # start_session
         params = pb_fields(first_msg(top, 3))
         sid = first_str(params, 1)
@@ -483,7 +483,7 @@ function handle(envelope::Vector{UInt8})::Bool
         else
             send_control(7, msg_ack(true))
         end
-    elseif field == 15 # shutdown
+    elseif field == 13 # shutdown
         send_control(7, msg_ack(true))
         return false
     else

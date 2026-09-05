@@ -8,14 +8,12 @@
 //! `config` would shadow the external `config` crate, so the dependency is
 //! renamed to `config_crate` (`package = "config"`) in `Cargo.toml`.
 
-pub mod collector;
-pub mod config;
-pub mod context;
-pub mod script;
-pub mod source;
-pub mod station;
-pub mod template;
+mod config;
+mod context;
+mod station;
 
-pub use context::{Context, OpsenseContext, Stations, Watermarks};
-pub use opsense_model::{LogLevel, Observation, Signal, TelemetryKind, TimeSeries};
-pub use station::{Cursor, Stage, Station};
+pub use config::Config;
+pub use context::{Context, Stations};
+pub use station::{CategoryStation, PatternStation, Station, StationKind, TimeseriesStation};
+
+pub use opsense_model::events::{LogLevel, Observation, Signal, TelemetryKind, TimeSeries};

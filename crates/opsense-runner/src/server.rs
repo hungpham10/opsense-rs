@@ -1,19 +1,22 @@
 //! gRPC service implementation: translate `KernelRunner` calls onto the
-//! local kernel backend.
+//! local IPC backend, layered with Ed25519 auth verify + implicit
+//! keepalive.
 
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use futures_util::StreamExt;
 use opsense_proto::pb::kernel_runner_server::KernelRunner;
 use opsense_proto::pb::{
-    exec_event, Ack, CloseRequest as PbCloseRequest, CodeRequest, DatasetAck, DatasetChunk,
-    DatasetHeader, ErrorEvent, ExecEvent, HealthRequest, HealthStatus, InterruptRequest,
-    SessionHandle, SessionParams,
+    Ack, CloseRequest, CodeRequest, ErrorEvent, ExecEvent, HealthRequest, HealthStatus,
+    InterruptRequest, SessionHandle, SessionParams, VerifyRequest, VerifyResponse, exec_event,
+    PingRequest, Pong,
 };
-use opsense_session::{KernelBackend, KernelConfig, LocalIpcBackend};
+
+use crate::auth::{Auth, AuthContext};
+use crate::config::RunnerConfig;
+use crate::session::SessionRegistry;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -25,12 +28,13 @@ pub type ExecEventStream =
     Pin<Box<dyn futures_util::Stream<Item = Result<ExecEvent, Status>> + Send>>;
 
 fn internal(err: anyhow::Error) -> Status {
-    // Preserve the root cause verbatim in the status message (checklist §11).
     Status::internal(format!("{err:#}"))
 }
 
 pub struct RunnerService {
-    backend: Arc<LocalIpcBackend>,
+    registry: Arc<SessionRegistry>,
+    cfg: crate::RunnerConfig,
+    auth: Option<Arc<dyn Auth>>,
 }
 
 /// gRPC message ceiling mirroring the framed-protocol cap (large datasets /
@@ -39,9 +43,15 @@ pub const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 
 impl RunnerService {
     #[must_use]
-    pub fn new(cfg: KernelConfig) -> Self {
+    pub fn new(
+        registry: Arc<SessionRegistry>,
+        cfg: crate::RunnerConfig,
+        auth: Option<Arc<dyn Auth>>,
+    ) -> Self {
         Self {
-            backend: Arc::new(LocalIpcBackend::new(cfg)),
+            registry,
+            cfg,
+            auth,
         }
     }
 
@@ -58,21 +68,77 @@ impl RunnerService {
 impl KernelRunner for RunnerService {
     type ExecuteStream = ExecEventStream;
 
-    async fn start_session(&self, request: Request<SessionParams>) -> Grpc<SessionHandle> {
+    async fn start(&self, request: Request<SessionParams>) -> Grpc<SessionHandle> {
+        let auth_ctx = AuthContext::try_from(request.metadata()).ok();
         let params = request.into_inner();
-        let id = self.backend.start_session(params).await.map_err(internal)?;
-        Ok(Response::new(SessionHandle { session_id: id }))
+
+        let id = self
+            .registry
+            .start(params.clone(), auth_ctx.as_ref())
+            .await
+            .map_err(internal)?;
+
+        if params.require_challenge {
+            let auth = self.auth.as_ref().ok_or_else(|| {
+                internal(anyhow::anyhow!(
+                    "require_challenge=true but runner has no auth backend"
+                ))
+            })?;
+
+            let challenge = auth
+                .create_challenge(&id)
+                .await
+                .map_err(internal)?;
+
+            self.registry
+                .attach_challenge(&id, challenge.plaintext.clone(), Some(params.requested_role.clone()))
+                .await;
+
+            Ok(Response::new(SessionHandle {
+                session_id: id,
+                challenge: challenge.ciphertext,
+            }))
+        } else {
+            Ok(Response::new(SessionHandle {
+                session_id: id,
+                challenge: vec![],
+            }))
+        }
+    }
+
+    async fn verify(&self, request: Request<VerifyRequest>) -> Grpc<VerifyResponse> {
+        let req = request.into_inner();
+        match self
+            .registry
+            .verify_challenge(&req.session_id, &req.response)
+            .await
+        {
+            Ok(Some(role)) => Ok(Response::new(VerifyResponse {
+                ok: true,
+                role,
+                error: String::new(),
+            })),
+            Ok(None) => Ok(Response::new(VerifyResponse {
+                ok: false,
+                role: String::new(),
+                error: "no pending challenge for this session".into(),
+            })),
+            Err(e) => Ok(Response::new(VerifyResponse {
+                ok: false,
+                role: String::new(),
+                error: e.to_string(),
+            })),
+        }
     }
 
     async fn execute(&self, request: Request<CodeRequest>) -> Grpc<Self::ExecuteStream> {
+        let auth_ctx = AuthContext::try_from(request.metadata()).ok();
         let req = request.into_inner();
         let outcome = self
-            .backend
-            .execute(&req.session_id, req.clone())
+            .registry
+            .execute(&req.session_id, req.clone(), auth_ctx.as_ref())
             .await
             .map_err(internal)?;
-        // The connection driver folds `done` into `events`; re-order so the
-        // stream always ends with done after any result/error payloads.
         let mut events: Vec<Result<ExecEvent, Status>> = outcome
             .events
             .into_iter()
@@ -113,49 +179,11 @@ impl KernelRunner for RunnerService {
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
-    async fn send_dataset(
-        &self,
-        request: Request<tonic::Streaming<DatasetChunk>>,
-    ) -> Grpc<DatasetAck> {
-        let mut stream = request.into_inner();
-        let mut session_id = String::new();
-        let mut dataset_ref = String::new();
-        let mut chunks: Vec<bytes::Bytes> = Vec::new();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk: DatasetChunk = chunk.map_err(|e| Status::invalid_argument(e.to_string()))?;
-            if session_id.is_empty() {
-                session_id = chunk.session_id;
-                dataset_ref = chunk.dataset_ref;
-            }
-            chunks.push(chunk.arrow_ipc.into());
-        }
-        if chunks.is_empty() {
-            return Err(Status::invalid_argument(
-                "SendDataset requires at least one chunk",
-            ));
-        }
-
-        let header = DatasetHeader {
-            session_id,
-            dataset_ref,
-            rows: 0, // the kernel reports actual row counts in the ack
-            cols: 0,
-            columns: vec![],
-        };
-        let session_id = header.session_id.clone();
-        let ack = self
-            .backend
-            .send_dataset(&session_id, header, chunks)
-            .await
-            .map_err(internal)?;
-        Ok(Response::new(ack))
-    }
-
     async fn interrupt(&self, request: Request<InterruptRequest>) -> Grpc<Ack> {
+        let auth_ctx = AuthContext::try_from(request.metadata()).ok();
         let req = request.into_inner();
-        self.backend
-            .interrupt(&req.session_id, &req.request_id)
+        self.registry
+            .interrupt(&req.session_id, &req.request_id, auth_ctx.as_ref())
             .await
             .map_err(internal)?;
         Ok(Response::new(Ack {
@@ -164,20 +192,38 @@ impl KernelRunner for RunnerService {
         }))
     }
 
-    async fn close_session(&self, request: Request<PbCloseRequest>) -> Grpc<Ack> {
+    async fn close(&self, request: Request<CloseRequest>) -> Grpc<Ack> {
+        let auth_ctx = AuthContext::try_from(request.metadata()).ok();
         let req = request.into_inner();
-        self.backend
-            .close_session(&req.session_id)
+        self.registry
+            .close(&req.session_id, auth_ctx.as_ref())
             .await
             .map_err(internal)?;
         Ok(Response::new(Ack {
             ok: true,
             error: String::new(),
+        }))
+    }
+
+    async fn ping(&self, request: Request<PingRequest>) -> Grpc<Pong> {
+        let auth_ctx = AuthContext::try_from(request.metadata()).ok();
+        let req = request.into_inner();
+        if let (Some(ctx), Some(auth)) = (auth_ctx, &self.auth)
+            && auth
+                .verify_signature(&ctx.session_id, "Ping", ctx.timestamp, ctx.nonce, &ctx.signature)
+                .await
+                .unwrap_or(false)
+        {
+            self.registry.touch(&req.session_id).await;
+        }
+        Ok(Response::new(Pong {
+            alive: true,
+            server_time: chrono::Utc::now().timestamp(),
         }))
     }
 
     async fn health(&self, _request: Request<HealthRequest>) -> Grpc<HealthStatus> {
-        let info = self.backend.health().await.map_err(internal)?;
+        let info = self.registry.health().await.map_err(internal)?;
         Ok(Response::new(HealthStatus {
             ok: info.ok,
             kernel_name: format!("runner/{}", info.name),
@@ -188,14 +234,22 @@ impl KernelRunner for RunnerService {
     }
 }
 
+impl RunnerService {
+    #[must_use]
+    pub fn registry(&self) -> &SessionRegistry {
+        &self.registry
+    }
+}
+
 /// Bind and serve until Ctrl-C (or `shutdown` fires); afterwards every kernel
 /// process owned by this runner is released.
 ///
 /// # Errors
 /// Propagates bind/serve failures.
-pub async fn serve(bind: SocketAddr, cfg: KernelConfig) -> Result<()> {
-    let service = RunnerService::new(cfg);
-    let shutdown_backend = Arc::clone(&service.backend);
+pub async fn serve(bind: SocketAddr, cfg: RunnerConfig, auth: Option<Arc<dyn Auth>>) -> Result<()> {
+    let backend = Arc::new(crate::backend::IpcKernelBackend::from_env());
+    let registry = Arc::new(SessionRegistry::new(backend, auth.clone(), cfg.clone()));
+    let service = RunnerService::new(registry, cfg, auth);
     let result = tonic::transport::Server::builder()
         .add_service(pb::kernel_runner_server::KernelRunnerServer::new(service))
         .serve_with_shutdown(bind, async {
@@ -203,7 +257,6 @@ pub async fn serve(bind: SocketAddr, cfg: KernelConfig) -> Result<()> {
             tracing::info!("runner shutting down");
         })
         .await;
-    shutdown_backend.shutdown().await?;
     result?;
     Ok(())
 }

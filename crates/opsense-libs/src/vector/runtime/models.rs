@@ -2,6 +2,7 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::io::Error;
 use std::sync::Arc;
 
+use async_graphql::SimpleObject;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,7 +89,8 @@ pub struct Message {
 }
 
 /// Read-only view of one node in the running pipeline, for status tooling.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, SimpleObject)]
+#[graphql(name = "NodeInfo")]
 pub struct NodeInfo {
     pub id: String,
     pub component_type: String,
@@ -143,7 +145,7 @@ pub trait Component: Identify + Send + Sync + Debug {
     /// Called once during pipeline construction, before the component task is
     /// spawned. Use this for eager registration of shared resources (e.g.
     /// stations) that must be visible before any `run()` polling occurs.
-    async fn pre_run(&self) -> Result<(), Error> {
+    async fn prepare(&self) -> Result<(), Error> {
         Ok(())
     }
 }

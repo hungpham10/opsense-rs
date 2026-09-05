@@ -7,13 +7,8 @@
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
-use arrow::array::Int64Array;
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::writer::StreamWriter;
-use arrow::record_batch::RecordBatch;
-use bytes::Bytes;
 use opsense_proto::host::KernelConnection;
-use opsense_proto::pb::{value, CodeRequest, DatasetHeader, SessionParams};
+use opsense_proto::pb::{CodeRequest, SessionParams, value};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
@@ -110,47 +105,6 @@ async fn python_kernel_parity_lifecycle() {
     assert!(out.ok(), "{out:?}");
     match &out.value.expect("captured result").kind {
         Some(value::Kind::Text(text)) => assert_eq!(text, "42"),
-        other => panic!("unexpected value {other:?}"),
-    }
-
-    // A dataset pushed over ARROW frames reaches Python as a pandas DataFrame.
-    let schema = std::sync::Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![std::sync::Arc::new(Int64Array::from(vec![7, 8, 9]))],
-    )
-    .unwrap();
-    let mut buf = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-    }
-    let ack = k
-        .conn
-        .send_dataset(
-            DatasetHeader {
-                session_id: "py-s1".into(),
-                dataset_ref: "@1".into(),
-                rows: 3,
-                cols: 1,
-                columns: vec!["n".into()],
-            },
-            vec![Bytes::from(buf)],
-        )
-        .await
-        .expect("send dataset");
-    assert!(ack.ok, "{}", ack.error);
-    assert_eq!(ack.rows, 3);
-
-    let out = k
-        .conn
-        .execute(code_req("py-s1", "r2", "result = int(@1['n'].sum())"))
-        .await
-        .expect("dataset execute");
-    assert!(out.ok(), "{out:?}");
-    match &out.value.expect("sum result").kind {
-        Some(value::Kind::Text(text)) => assert_eq!(text, "24"),
         other => panic!("unexpected value {other:?}"),
     }
 

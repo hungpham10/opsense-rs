@@ -1,0 +1,35 @@
+name: Release Images
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    name: Build & push 4 images via Earthly
+    needs: integration  # Wait for integration test pass trước khi push image release.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: earthly/actions-setup@v1
+        with:
+          version: latest
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push all images
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: earthly --push --build-arg VERSION=$VERSION +all

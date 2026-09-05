@@ -2,7 +2,7 @@
 //! fit the uniform band grid minimising boundary crossings, then inspect
 //! bands / occupancy. Includes a station-seeded end-to-end chain.
 
-use opsense_rhai::{call_process, ScriptSource};
+use opsense_rhai::{ScriptSource, call_process};
 
 fn obs(ts: i64, val: f64) -> serde_json::Value {
     serde_json::json!({

@@ -1,519 +1,304 @@
-//! `Station` — the unified station abstraction shared across crates.
-//!
-//! Mỗi node có thể publish một "station" dưới một id; consumer (Rhai, MCP,
-//! HTTP, các transform khác) đọc qua `OpsenseContext.stations`. Ba hình thức:
-//!
-//! - `Timeseries` — bounded time-series cache bọc `LruCache`. Mỗi `(stage,
-//!   metric_id)` là một entry; value là `BTreeMap<ts, Observation>` để range
-//!   scan nhanh. Evict theo entry (nghĩa là theo `(stage, metric)`).
-//! - `Category` — radix + KMP substring search (`Search<u8>`), kèm index
-//!   key/value để trả về kết quả dạng `(key, value)`.
-//! - `Pattern` — Aho-Corasick multi-pattern matcher (`AhoCorasick`), kèm
-//!   bộ đếm hit/miss.
-//!
-//! `Station` là `Send + Sync` (cả `Search`/`AhoCorasick`/`LruCache` đều
-//! `Send + Sync`), nên có thể nằm sau `Arc<RwLock<Station>>` trong registry.
-//!
-//! `query`/`append`/`add_pattern`/`is_known`/`insert_entry`/`search_entries`
-//! là **async** vì `Search::*` và `AhoCorasick::*` đều async (còn `LruCache`
-//! đã sync) — nhưng thực tế không await IO (chỉ bookkeeping/automaton), nên
-//! chi phí trên mỗi lời gọi là một future tầm thường. Giữ async để
-//! `read_window` (trên trait `Context`) cũng async và object-safe qua native
-//! `async fn` trong trait. Rhai gọi các hàm này qua `block_on` (an toàn vì
-//! script chạy trên `spawn_blocking`), còn MCP/REPL await trực tiếp.
-
-use std::collections::{BTreeMap, HashMap};
+use std::io::{Error, ErrorKind};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+
+use async_graphql::Enum;
+use tokio::sync::RwLock;
 
 use opsense_libs::ahocorasick::AhoCorasick;
 use opsense_libs::lru::LruCache;
 use opsense_libs::search::Search;
-use opsense_model::Observation;
-use serde::{Deserialize, Serialize};
-use serde_json::Value as Json;
+use opsense_libs::snowflake_id::SnowflakeId;
+use opsense_model::events::Observation;
 
-/// Giai đoạn của một observation trong pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Stage {
-    /// Freshly fetched from sources (post-reduce).
-    Raw,
-
-    /// Published by the processor node after each cycle.
-    Processed,
+#[derive(Clone, Debug)]
+pub struct Block {
+    pub items: Vec<Observation>,
+    pub range: (i64, i64),
+    pub last_updated: i64,
 }
 
-impl Stage {
-    #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Stage::Raw => "raw",
-            Stage::Processed => "processed",
+impl Default for Block {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            range: (i64::MAX, u64::MIN as i64),
+            last_updated: 0,
         }
     }
 }
 
-/// Which node's cursor.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Cursor {
-    Named(String),
-    IngestDone,
-    ProcessedDone,
-}
-
-/// Time-series station: an LRU cache of `(stage, metric)` → `BTreeMap<ts, obs>`.
-///
-/// `metrics` is a side index of known metric ids so `query_all` can enumerate
-/// them without reaching into the `LruCache`'s internal map.
 pub struct TimeseriesStation {
-    pub cache: LruCache<(Stage, String), BTreeMap<i64, Observation>, 16>,
-    metrics: Mutex<HashMap<String, ()>>,
-    /// Stages this station is declared to hold, fixed at creation time by the
-    /// owning node (e.g. an `http_source` station is raw-only). `append` warns
-    /// on a foreign stage and `describe` reports it, so a misconfigured sink
-    /// snapshotting an empty stage is visible instead of silently `[]`.
-    pub stages: Vec<Stage>,
+    caches: LruCache<i64, Block, 32>,
+    block_duration: i64,
 }
 
-/// Aho-Corasick pattern station: the matcher plus hit/miss counters (matching
-/// the old `TextIndex::PatternInner` semantics so MCP/REPL stats survive).
+impl Default for TimeseriesStation {
+    fn default() -> Self {
+        Self::new(32, None)
+    }
+}
+
+impl TimeseriesStation {
+    pub fn new(capacity: usize, block_duration_secs: Option<i64>) -> Self {
+        const SECONDS_IN_WEEK: i64 = 7 * 24 * 60 * 60;
+
+        Self {
+            caches: LruCache::new(capacity),
+            block_duration: block_duration_secs.unwrap_or(SECONDS_IN_WEEK),
+        }
+    }
+
+    #[inline]
+    pub fn get_block_id(&self, timestamp: i64) -> i64 {
+        timestamp / self.block_duration
+    }
+
+    pub fn query_range(&mut self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
+        let start_block = self.get_block_id(from_ts);
+        let end_block = self.get_block_id(to_ts);
+        let mut result = Vec::new();
+
+        for block_id in start_block..=end_block {
+            let block = self.caches.get(&block_id)?;
+            let block_start = (block_id) * self.block_duration;
+            let block_end = (block_id + 1) * self.block_duration - 1;
+
+            let req_start = from_ts.max(block_start);
+            let req_end = to_ts.min(block_end);
+
+            // Kiểm tra xem Block đã bao phủ (cover) đủ khoảng thời gian yêu cầu chưa
+            if req_start >= block.range.0 && req_end <= block.range.1 {
+                for item in &block.items {
+                    if item.ts >= req_start && item.ts <= req_end {
+                        result.push(item.clone());
+                    }
+                }
+            } else {
+                return None; // Cache Miss do thiếu khoảng phủ dữ liệu
+            }
+        }
+
+        Some(result)
+    }
+
+    pub fn update_range(
+        &mut self,
+        records: &[Observation],
+        query_from: i64,
+        query_to: i64,
+        now: i64,
+    ) {
+        let start_block = self.get_block_id(query_from);
+        let end_block = self.get_block_id(query_to);
+
+        for block_id in start_block..=end_block {
+            let mut block = self.caches.get(&block_id).unwrap_or_default();
+
+            let block_start = block_id * self.block_duration;
+            let block_end = (block_id + 1) * self.block_duration - 1;
+
+            // Lọc các observation thuộc về block này
+            for obs in records {
+                if obs.ts >= block_start && obs.ts <= block_end {
+                    block.items.push(obs.clone());
+                }
+            }
+
+            // Sap xep va xoa trung lặp
+            block.items.sort_by_key(|x| x.ts);
+            block.items.dedup_by_key(|x| x.ts);
+
+            // Cập nhật range bao phủ và timestamp sửa đổi
+            let eff_from = query_from.max(block_start);
+            let eff_to = query_to.min(block_end);
+
+            block.range.0 = block.range.0.min(eff_from);
+            block.range.1 = block.range.1.max(eff_to);
+            block.last_updated = now;
+
+            self.caches.put(block_id, block);
+        }
+    }
+}
+
 pub struct PatternStation {
-    pub automaton: AhoCorasick,
-    pub hits: AtomicU64,
-    pub misses: AtomicU64,
+    automaton: Arc<RwLock<AhoCorasick>>,
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
-/// Radix + KMP category station: the search index plus the key/value entries
-/// map (matching the old `TextIndex::KeyValue` semantics).
-pub struct CategoryStation {
-    pub search: Search<u8>,
-    pub entries: Mutex<BTreeMap<usize, (String, String)>>,
-    /// Side index `key → record idx` để `insert_entry` idempotent: re-index
-    /// cùng key (node re-fetch) chỉ cập nhật value, không tạo record mới.
-    pub key_index: Mutex<HashMap<String, usize>>,
-    pub next_idx: AtomicU64,
-}
-
-/// Một station, quản lý qua `Arc<RwLock<Station>>` trong
-/// `OpsenseContext.stations` (keyed bởi component id).
-pub enum Station {
-    /// Time-series cache (bounded LRU over `(stage, metric)` entries).
-    Timeseries(Box<TimeseriesStation>),
-    /// Radix + KMP substring search trên key, kèm entries key/value.
-    Category(CategoryStation),
-    /// Aho-Corasick multi-pattern matcher, kèm bộ đếm hit/miss.
-    Pattern(PatternStation),
-}
-
-impl Station {
-    /// Tạo một timeseries station rỗng. `capacity` là tổng số entry (sẽ chia
-    /// đều cho 16 shard — phải là bội của 16 để không lãng phí).
-    #[must_use]
-    pub fn timeseries(capacity: usize) -> Self {
-        Self::timeseries_with(capacity, vec![Stage::Raw, Stage::Processed])
-    }
-
-    /// Như [`Station::timeseries`] nhưng khai báo rõ station chứa những stage
-    /// nào (thứ tự hiển thị trong `describe` theo thứ tự khai báo).
-    #[must_use]
-    pub fn timeseries_with(capacity: usize, stages: Vec<Stage>) -> Self {
-        Station::Timeseries(Box::new(TimeseriesStation {
-            cache: LruCache::new(capacity.next_multiple_of(16)),
-            metrics: Mutex::new(HashMap::new()),
-            stages,
-        }))
-    }
-
-    /// Tạo một category station rỗng (radix + KMP search + entries map).
-    #[must_use]
-    pub fn category() -> Self {
-        Station::Category(CategoryStation {
-            search: Search::in_memory(1),
-            entries: Mutex::new(BTreeMap::new()),
-            key_index: Mutex::new(HashMap::new()),
-            next_idx: AtomicU64::new(1),
-        })
-    }
-
-    /// Tạo một pattern station rỗng (Aho-Corasick).
-    #[must_use]
-    pub fn pattern() -> Self {
-        Station::Pattern(PatternStation {
-            automaton: AhoCorasick::new(),
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-        })
-    }
-
-    /// Append một batch observation vào stage tương ứng.
-    ///
-    /// Gom theo `metric_id` rồi merge vào `BTreeMap` hiện có (ghi đè theo ts),
-    /// cuối cùng `put` lại vào `LruCache` — `LruCache` không có `entry()` nên
-    /// dùng get-modify-put.
-    pub async fn append(&mut self, stage: Stage, batch: &[Observation]) {
-        let Station::Timeseries(ts) = self else {
-            return;
-        };
-        if !ts.stages.contains(&stage) {
-            tracing::warn!(
-                "append to undeclared stage `{}` (station declares: {})",
-                stage.as_str(),
-                ts.stages.iter().map(Stage::as_str).collect::<Vec<_>>().join(", ")
-            );
-        }
-        let mut by_metric: HashMap<String, BTreeMap<i64, Observation>> = HashMap::new();
-        for obs in batch {
-            by_metric
-                .entry(obs.metric_id.clone())
-                .or_default()
-                .insert(obs.ts, obs.clone());
-        }
-        {
-            let mut metrics = ts.metrics.lock().expect("station metrics lock");
-            for m in by_metric.keys() {
-                metrics.insert(m.clone(), ());
-            }
-        }
-        for (metric, incoming) in by_metric {
-            let key = (stage, metric);
-            let mut existing = ts.cache.get(&key).unwrap_or_default();
-            existing.extend(incoming);
-            ts.cache.put(key, existing);
-        }
-    }
-
-    /// Query một metric cụ thể trong `[from_ts, to_ts]` (exclusive from,
-    /// inclusive to) — khớp semantics cũ của store.
-    pub async fn query(
-        &self,
-        stage: Stage,
-        metric: &str,
-        from_ts: i64,
-        to_ts: i64,
-    ) -> Vec<Observation> {
-        eprintln!("[Q] query stage={:?} metric={} ({},{})", stage, metric, from_ts, to_ts);
-        let Station::Timeseries(ts) = self else {
-            return Vec::new();
-        };
-        let Some(map) = ts
-            .cache
-            .get_with_load(&(stage, metric.to_string()), from_ts as u64, to_ts as u64)
-            .await
-        else {
-            return Vec::new();
-        };
-        map.range((
-            std::ops::Bound::Excluded(from_ts),
-            std::ops::Bound::Included(to_ts),
-        ))
-        .map(|(_, v)| v.clone())
-        .collect()
-    }
-
-    /// Query mọi metric của station trong `[from_ts, to_ts]`.
-    pub async fn query_all(&self, stage: Stage, from_ts: i64, to_ts: i64) -> Vec<Observation> {
-        let Station::Timeseries(ts) = self else {
-            return Vec::new();
-        };
-        let metrics: Vec<String> = ts
-            .metrics
-            .lock()
-            .expect("station metrics lock")
-            .keys()
-            .cloned()
-            .collect();
-        let mut out = Vec::new();
-        for metric in metrics {
-            let Some(map) = ts
-                .cache
-                .get_with_load(&(stage, metric), from_ts as u64, to_ts as u64)
-                .await
-            else {
-                continue;
-            };
-            out.extend(
-                map.range((
-                    std::ops::Bound::Excluded(from_ts),
-                    std::ops::Bound::Included(to_ts),
-                ))
-                .map(|(_, v)| v.clone()),
-            );
-        }
-        out
-    }
-
-    // ── Pattern (Aho-Corasick) operations ──────────────────────────────────
-
-    /// Thêm một pattern (chỉ có nghĩa trên variant `Pattern`). Tự động
-    /// `optimize` lại automaton khi pattern mới được thêm.
-    pub async fn add_pattern(&mut self, pattern: &str) {
-        let Station::Pattern(p) = self else {
-            return;
-        };
-        let before = p.automaton.pattern_count();
-        p.automaton.add(pattern.to_string());
-        if p.automaton.pattern_count() > before {
-            p.automaton.optimize().await;
-        }
-    }
-
-    /// Kiểm tra `text` có khớp pattern nào đã biết không (variant `Pattern`).
-    /// Trả `None` khi gọi trên variant khác. Cập nhật bộ đếm hit/miss.
-    pub async fn is_known(&self, text: &str) -> Option<bool> {
-        let Station::Pattern(p) = self else {
-            return None;
-        };
-        p.hits.fetch_add(1, Ordering::Relaxed);
-        let matched = p.automaton.similar(&text.to_string()).await;
-        if matched {
-            p.hits.fetch_add(1, Ordering::Relaxed);
-            Some(true)
-        } else {
-            p.misses.fetch_add(1, Ordering::Relaxed);
-            Some(false)
-        }
-    }
-
-    /// Danh sách pattern đã đăng ký (variant `Pattern`).
-    #[must_use]
-    pub fn patterns(&self) -> Vec<String> {
-        match self {
-            Station::Pattern(p) => p.automaton.patterns(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Thống kê pattern: `(tổng_pattern, hits, misses)`.
-    #[must_use]
-    pub fn pattern_stats(&self) -> (usize, u64, u64) {
-        match self {
-            Station::Pattern(p) => (
-                p.automaton.pattern_count(),
-                p.hits.load(Ordering::Relaxed),
-                p.misses.load(Ordering::Relaxed),
-            ),
-            _ => (0, 0, 0),
-        }
-    }
-
-    // ── Category (radix + KMP) operations ──────────────────────────────────
-
-    /// Index một cặp key/value (variant `Category`). Idempotent per key: key
-    /// đã tồn tại chỉ được cập nhật value thay vì tạo record mới — node
-    /// re-fetch cùng cửa sổ không làm phình catalog.
-    pub async fn insert_entry(&mut self, key: &[u8], value: &str) {
-        let Station::Category(c) = self else {
-            return;
-        };
-        if key.is_empty() {
-            return;
-        }
-        let key_str = String::from_utf8_lossy(key).to_string();
-
-        // Key đã index → chỉ update value tại record cũ.
-        if let Some(&idx) = c.key_index.lock().expect("category key index lock").get(&key_str) {
-            if let Some(entry) = c
-                .entries
-                .lock()
-                .expect("category entries lock")
-                .get_mut(&idx)
-            {
-                entry.1 = value.to_string();
-            }
-            return;
-        }
-
-        let idx = c.next_idx.fetch_add(1, Ordering::Relaxed) as usize;
-        let _ = c
-            .search
-            .insert_chain(idx, key, &vec![None; key.len()])
-            .await;
-        c.entries.lock().expect("category entries lock").insert(
-            idx,
-            (String::from_utf8_lossy(key).to_string(), value.to_string()),
-        );
-        c.key_index
-            .lock()
-            .expect("category key index lock")
-            .insert(key_str, idx);
-    }
-
-    /// Substring search trên key đã index → các cặp `(key, value)`.
-    pub async fn search_entries(
-        &self,
-        pattern: &str,
-        depth: Option<usize>,
-    ) -> Vec<(String, String)> {
-        let Station::Category(c) = self else {
-            return Vec::new();
-        };
-        let hits = match c.search.search(pattern.as_bytes(), depth).await {
-            Ok(hits) => hits,
-            Err(_) => return Vec::new(),
-        };
-        let entries = c.entries.lock().expect("category entries lock");
-        hits.into_iter()
-            .filter_map(|(rid, _)| entries.get(&rid).map(|(k, v)| (k.clone(), v.clone())))
-            .collect()
-    }
-
-    /// Số entry đã index (variant `Category`).
-    #[must_use]
-    pub fn entry_count(&self) -> usize {
-        match self {
-            Station::Category(c) => c.entries.lock().expect("category entries lock").len(),
-            _ => 0,
-        }
-    }
-
-    /// Mọi entry đã index, sắp theo key.
-    #[must_use]
-    pub fn all_entries(&self) -> Vec<(String, String)> {
-        match self {
-            Station::Category(c) => c
-                .entries
-                .lock()
-                .expect("category entries lock")
-                .values()
-                .cloned()
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Một trang entry đã index, sắp theo key — dùng cho pagination trên
-    /// HTTP/MCP. Trả `(items, total)`; `total` là tổng số entry để client tính
-    /// số trang. Variant `Category`.
-    #[must_use]
-    pub fn list_entries(&self, offset: usize, limit: usize) -> (Vec<(String, String)>, usize) {
-        let Station::Category(c) = self else {
-            return (Vec::new(), 0);
-        };
-        let entries = c.entries.lock().expect("category entries lock");
-        let mut sorted: Vec<(String, String)> = entries.values().cloned().collect();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        let total = sorted.len();
-        let items = sorted
-            .into_iter()
-            .skip(offset)
-            .take(limit.max(1))
-            .collect();
-        (items, total)
-    }
-
-    /// Metadata cho HTTP `/describe` và MCP.
-    #[must_use]
-    pub fn describe(&self) -> Json {
-        match self {
-            Station::Timeseries(ts) => {
-                let metrics = ts.metrics.lock().expect("station metrics lock").len();
-                // Stage hiện đang có ít nhất một điểm trong cache (có thể rỗng
-                // vì LRU eviction — khác với `stages` vốn là khai báo tĩnh).
-                let populated: Vec<&str> = ts
-                    .stages
-                    .iter()
-                    .filter(|stage| {
-                        ts.metrics
-                            .lock()
-                            .expect("station metrics lock")
-                            .keys()
-                            .any(|m| ts.cache.get(&(**stage, m.clone())).is_some())
-                    })
-                    .map(Stage::as_str)
-                    .collect();
-                serde_json::json!({
-                    "backend": "timeseries",
-                    "stages": ts.stages.iter().map(Stage::as_str).collect::<Vec<_>>(),
-                    "populated_stages": populated,
-                    "metrics": metrics,
-                })
-            }
-            Station::Category(_) => serde_json::json!({ "backend": "category" }),
-            Station::Pattern(_) => serde_json::json!({ "backend": "pattern" }),
-        }
+impl Default for PatternStation {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl PatternStation {
-    /// Pass-through: `AhoCorasick::add` (dùng bởi `PatternStationTransform`).
-    pub fn add(&mut self, pattern: String) {
-        self.automaton.add(pattern);
+    pub fn new() -> Self {
+        Self {
+            automaton: Arc::new(RwLock::new(AhoCorasick::new())),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+        }
     }
 
-    /// Pass-through: `AhoCorasick::optimize` (async).
-    pub async fn optimize(&mut self) {
-        self.automaton.optimize().await;
+    pub async fn set(&self, template: &str) {
+        self.automaton.write().await.add(template.to_string());
     }
 
-    /// Pass-through: `AhoCorasick::similar` (async).
-    pub async fn similar(&self, sample: &String) -> bool {
-        self.automaton.similar(sample).await
+    pub async fn commit(&self) {
+        self.automaton.write().await.optimize().await;
+    }
+
+    pub async fn lookup(&self, sample: &str) -> bool {
+        let matched = {
+            self.automaton
+                .read()
+                .await
+                .similar(&sample.to_string())
+                .await
+        };
+
+        if matched {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+
+        matched
+    }
+
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    pub fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
+    }
+}
+
+pub struct CategoryStation {
+    search: Search,
+    id: SnowflakeId,
+}
+
+impl Default for CategoryStation {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl CategoryStation {
-    /// Pass-through: `Search::insert_chain` (dùng bởi `CategoryStationTransform`).
-    pub async fn insert_chain(
-        &mut self,
-        index: usize,
-        key: &[u8],
-        metas: &[Option<&[u8]>],
-    ) -> Result<(), opsense_libs::search::Error> {
-        self.search.insert_chain(index, key, metas).await
+    pub fn new() -> Self {
+        Self {
+            search: Search::<u8>::in_memory(1),
+            id: SnowflakeId::new(1, 1),
+        }
+    }
+
+    pub async fn insert(&mut self, text: &str, metadata: &str) -> Result<u64, Error> {
+        let record_id = self.id.generate() as u64;
+        let key_bytes = text.as_bytes();
+
+        let mut metas = vec![None; key_bytes.len()];
+        if !key_bytes.is_empty() {
+            metas[0] = Some(metadata.as_bytes());
+        }
+
+        self.search
+            .insert_chain(record_id as usize, key_bytes, &metas)
+            .await
+            .map_err(|error| {
+                Error::new(ErrorKind::BrokenPipe, format!("insert failed: {error}"))
+            })?;
+        Ok(record_id)
+    }
+
+    pub async fn contains(
+        &self,
+        sample: &str,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<Vec<(u64, u64)>, Error> {
+        let pattern_bytes = sample.as_bytes();
+
+        Ok(self
+            .search
+            .search(pattern_bytes, None, offset, limit)
+            .await
+            .map_err(|error| Error::new(ErrorKind::BrokenPipe, format!("search failed: {error}")))?
+            .into_iter()
+            .map(|(record_id, _)| (record_id as u64, offset.unwrap_or(0) as u64))
+            .collect())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub enum Station {
+    Timeseries(Arc<RwLock<TimeseriesStation>>),
+    Category(Arc<RwLock<CategoryStation>>),
+    Pattern(Arc<RwLock<PatternStation>>),
+}
 
-    #[tokio::test]
-    async fn insert_entry_is_idempotent_per_key() {
-        let mut st = Station::category();
-        st.insert_entry(b"cpu_usage", "1").await;
-        st.insert_entry(b"cpu_usage", "2").await;
-        st.insert_entry(b"cpu_usage", "2").await;
-        st.insert_entry(b"mem_usage", "3").await;
-
-        assert_eq!(st.entry_count(), 2, "re-index cùng key không tạo entry mới");
-        assert_eq!(
-            st.search_entries("cpu", None).await,
-            vec![("cpu_usage".to_string(), "2".to_string())],
-            "value phải được cập nhật trên record cũ"
-        );
-    }
-
-    #[tokio::test]
-    async fn list_entries_paginates_sorted_by_key() {
-        let mut st = Station::category();
-        for key in ["delta", "alpha", "charlie", "bravo"] {
-            st.insert_entry(key.as_bytes(), "v").await;
+impl Station {
+    /// GraphQL `kind` discriminator.
+    #[must_use]
+    pub fn kind(&self) -> StationKind {
+        match self {
+            Station::Timeseries(_) => StationKind::Timeseries,
+            Station::Category(_) => StationKind::Category,
+            Station::Pattern(_) => StationKind::Pattern,
         }
+    }
+}
 
-        let (page, total) = st.list_entries(0, 2);
-        assert_eq!(total, 4);
-        assert_eq!(
-            page,
-            vec![
-                ("alpha".to_string(), "v".to_string()),
-                ("bravo".to_string(), "v".to_string()),
-            ],
-            "trang đầu sắp theo key"
-        );
-        let (page, _) = st.list_entries(2, 2);
-        assert_eq!(
-            page,
-            vec![
-                ("charlie".to_string(), "v".to_string()),
-                ("delta".to_string(), "v".to_string()),
-            ],
-            "trang sau tiếp tục từ offset"
-        );
-        let (page, total) = st.list_entries(10, 2);
-        assert_eq!(total, 4);
-        assert!(page.is_empty(), "offset ngoài phạm vi → trang rỗng");
+/// Discriminator cho GraphQL — bám sát các variant của [`Station`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Enum)]
+#[graphql(rename_items = "lowercase")]
+pub enum StationKind {
+    Timeseries,
+    Category,
+    Pattern,
+}
 
-        // Trên variant khác: rỗng.
-        assert_eq!(Station::pattern().list_entries(0, 10).1, 0);
+impl TryFrom<&Station> for Arc<RwLock<TimeseriesStation>> {
+    type Error = Error;
+
+    fn try_from(station: &Station) -> Result<Self, Self::Error> {
+        match station {
+            Station::Timeseries(inner) => Ok(Arc::clone(inner)),
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Station is not of type Timeseries",
+            )),
+        }
+    }
+}
+
+impl TryFrom<&Station> for Arc<RwLock<CategoryStation>> {
+    type Error = Error;
+
+    fn try_from(station: &Station) -> Result<Self, Self::Error> {
+        match station {
+            Station::Category(inner) => Ok(Arc::clone(inner)),
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Station is not of type Category",
+            )),
+        }
+    }
+}
+
+impl TryFrom<&Station> for Arc<RwLock<PatternStation>> {
+    type Error = Error;
+
+    fn try_from(station: &Station) -> Result<Self, Self::Error> {
+        match station {
+            Station::Pattern(inner) => Ok(Arc::clone(inner)),
+            _ => Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Station is not of type Pattern",
+            )),
+        }
     }
 }

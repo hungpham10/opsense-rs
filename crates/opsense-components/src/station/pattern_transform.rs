@@ -1,41 +1,50 @@
-//! `PatternStationTransform` — trạm đứng giữa pipeline: forward signal gốc
-//! cho downstream (như mọi transform), đồng thời feed text từ cửa sổ window
-//! vào `Station::Pattern(AhoCorasick)` đăng ký trong `OpsenseContext.stations`
-//! để đếm hit/miss (matching substring).
+//! `pattern_station_transform` — nhận message JSON từ upstream, feed text
+//! từ field `text_field` vào station `Pattern` (Aho-Corasick) rồi forward
+//! message xuống downstream với field `matched` (true/false) được thêm vào
+//! payload. Component chỉ tương tác với [`PatternStation`] — không đọc
+//! station khác.
 //!
-//! Pattern được đăng ký trước (config `patterns`, idempotent) hoặc sau (Rhai
-//! `pattern_add` / API). Mỗi observation đóng góp một lượt match: text lấy từ
-//! label `text_field` (default `"log"`), fallback về trường `metric_id`.
-//!
-//! Component được đăng ký thủ công (thay vì qua `#[transform]`) vì proc-macro
-//! sinh `#[derive]` với span khiến `default = "default_text_field"` không resolve
-//! được; viết rõ ràng giúp `Deserialize` derive hoạt động đáng tin cậy.
+//! Pattern đăng ký sẵn qua config `patterns`. Mỗi message có field
+//! `text_field` (mặc định `"text"`) chứa log line cần match.
 
 use std::io::Error;
+use std::sync::Arc;
 
-use opsense_core::registry;
-use opsense_core::station::Station;
-use opsense_core::Context;
+use serde_json::Value;
+use tokio::sync::{RwLock, mpsc};
 
-use tokio::sync::mpsc;
+use opsense_core::PatternStation;
+use opsense_core::Station;
 use opsense_macros::transform;
 
-use crate::signal;
+use super::downcast_ctx;
 use crate::vector::runtime::{Component, Identify, Message, Outbound};
-use crate::OpsenseContext;
 
-#[transform(derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq))]
+#[transform]
 pub struct PatternStationTransform {
     pub id: String,
     pub inputs: Vec<String>,
 
-    /// Label chứa text cần match; default `"log"`. Fallback về `metric_id`.
+    /// Field JSON chứa log line cần match. Mặc định `"text"`.
     #[serde(default = "default_text_field")]
     pub text_field: String,
 
-    /// Pattern đăng ký sẵn khi node khởi động (idempotent theo giá trị).
+    /// Pattern đăng ký sẵn khi node khởi động.
     #[serde(default)]
     pub patterns: Vec<String>,
+
+    /// Tên field ghi kết quả match (`true`/`false`) vào payload trước khi
+    /// forward. Mặc định `"matched"`.
+    #[serde(default = "default_matched_field")]
+    pub matched_field: String,
+}
+
+fn default_text_field() -> String {
+    "text".to_string()
+}
+
+fn default_matched_field() -> String {
+    "matched".to_string()
 }
 
 impl PatternStationTransform {
@@ -46,12 +55,9 @@ impl PatternStationTransform {
             inputs: inputs.iter().map(|s| (*s).to_string()).collect(),
             text_field: default_text_field(),
             patterns: Vec::new(),
+            matched_field: default_matched_field(),
         }
     }
-}
-
-fn default_text_field() -> String {
-    "log".to_string()
 }
 
 impl_pattern_station_transform!(
@@ -61,63 +67,47 @@ impl_pattern_station_transform!(
         rx: &mut mpsc::Receiver<Message>,
         tx: Outbound,
     ) -> Result<(), Error> {
-        let ctx = tx
-            .ctx
-            .as_ref()
-            .and_then(|c| c.as_any().downcast_ref::<OpsenseContext>())
-            .ok_or_else(|| Error::other("OpsenseContext not injected into Runtime"))?;
-
-        // Đăng ký station (first-wins) + register pattern sẵn (idempotent)
-        // trước khi xử lý window. `AhoCorasick` đã là async (`Send`),
-        // nên gọi trực tiếp `.await` trong task tokio.
-        {
-            let st = registry::ensure_pattern(&self.id).await;
-            let mut g = st.write().await;
-            if let Station::Pattern(auto) = &mut *g {
-                for pattern in &self.patterns {
-                    auto.add(pattern.clone());
-                }
-                auto.optimize().await;
+        let ctx = downcast_ctx(&tx)?;
+        ctx.registry(
+            &self.id,
+            Station::Pattern(Arc::new(RwLock::new(PatternStation::new()))),
+        )
+        .await
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(e)
             }
+        })?;
+        let me = ctx.station::<Arc<RwLock<PatternStation>>>(&self.id).await?;
+
+        // Seed các pattern cấu hình sẵn + commit automaton.
+        {
+            let g = me.read().await;
+            for p in &self.patterns {
+                g.set(p).await;
+            }
+            g.commit().await;
         }
 
         while let Some(msg) = rx.recv().await {
-            // Forward trước tiên: downstream không bao giờ bị trễ vì trạm.
-            for stream in &tx.streams {
-                let _ = stream.send(msg.clone()).await;
+            // Forward bản gốc trước.
+            for s in &tx.streams {
+                let _ = s.send(msg.clone()).await;
             }
-
-            let event = signal::event(&msg);
-            if event != Some(signal::DATA_READY) && event != Some(signal::PROCESSED) {
-                continue;
-            }
-            let Some(ts) = signal::ts(&msg) else {
+            let Some(text) = msg.payload.get(&self.text_field).and_then(Value::as_str) else {
                 continue;
             };
-
-            let from = ctx.get_node_watermark(&self.id);
-            if ts <= from {
-                continue;
+            let matched = me.read().await.lookup(text).await;
+            // Forward thêm bản đã gắn `matched_field` để consumer dễ xử lý.
+            let mut stamped = msg.clone();
+            if let Some(obj) = stamped.payload.as_object_mut() {
+                obj.insert(self.matched_field.clone(), Value::Bool(matched));
             }
-
-            let batch = ctx
-                .read_window(&self.inputs, signal::src(&msg), from, ts, None)
-                .await;
-            for obs in &batch {
-                let text = obs
-                    .labels
-                    .get(&self.text_field)
-                    .cloned()
-                    .unwrap_or_else(|| obs.metric_id.clone());
-                // `similar` vừa update hit/miss counter, vừa trả về kết quả
-                // khớp — ta chỉ cần side-effect đếm, nên bỏ qua giá trị trả về.
-                let st = registry::ensure_pattern(&self.id).await;
-                let g = st.read().await;
-                if let Station::Pattern(auto) = &*g {
-                    let _ = auto.similar(&text).await;
-                }
+            for s in &tx.streams {
+                let _ = s.send(stamped.clone()).await;
             }
-            ctx.set_node_watermark(&self.id, ts);
         }
         Ok(())
     }

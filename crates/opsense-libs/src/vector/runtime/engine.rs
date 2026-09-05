@@ -81,6 +81,14 @@ impl Bootstrap {
             .unwrap_or(ComponentType::Unknown)
     }
 
+    /// Snapshot of the currently loaded `Arc<dyn Component>`. Used by
+    /// `Runtime::components` to serialize the live component list via
+    /// typetag's `Serialize` impl. The lock is held only long enough to
+    /// clone the `Arc`.
+    pub fn current_component(&self) -> Option<Arc<dyn Component>> {
+        self.component.read().ok().map(|c| c.clone())
+    }
+
     pub fn reload(&self, component: &Arc<dyn Component>) -> Result<(), Error> {
         let mut lock = self
             .component
@@ -448,6 +456,40 @@ impl Runtime {
         snapshot.as_ref().clone()
     }
 
+    /// Full list of components currently registered. Returns each as a JSON
+    /// value via typetag's `Serialize` impl — round-trips to `ComponentInput`
+    /// for `Mutation.addNode` / `removeNode` / `updateNode`.
+    ///
+    /// Order is deterministic (by node id) so the output is stable.
+    pub fn components(&self) -> Vec<serde_json::Value> {
+        let (Ok(nodes), Ok(bootstraps)) = (self.nodes.read(), self.bootstraps.read()) else {
+            return Vec::new();
+        };
+        // nodes: HashMap<String, usize> (id → bootstrap-index)
+        // bootstraps: HashMap<usize, Bootstrap> (bootstrap-index → Bootstrap)
+        let mut entries: Vec<(String, &Bootstrap)> = Vec::new();
+        for (id, idx) in &*nodes {
+            if let Some(b) = bootstraps.get(idx) {
+                entries.push((id.clone(), b));
+            }
+        }
+        // Sort by id for deterministic output
+        entries.sort_by_key(|(id, _)| id.clone());
+
+        entries
+            .into_iter()
+            .filter_map(|(id, b)| {
+                let comp = b.current_component()?;
+                let mut value = serde_json::to_value(&*comp).ok()?;
+                // Inject `id` field so the serialized form matches `ComponentInput`
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("id".into(), serde_json::Value::String(id));
+                }
+                Some(value)
+            })
+            .collect()
+    }
+
     fn build_topology(&self) -> Vec<NodeInfo> {
         let (Ok(nodes), Ok(bootstraps), Ok(tasks), Ok(sources), Ok(sinks)) = (
             self.nodes.read(),
@@ -794,13 +836,16 @@ impl Runtime {
 
             info!("Component {} with id {} is starting", component.id(), idx);
 
-            // Eagerly call pre_run before spawning so shared resources (e.g.
+            // Eagerly call prepare before spawning so shared resources (e.g.
             // stations) are registered before any task polling or select! fires.
             // `add_new_nodes` is sync but the surrounding `reload` is invoked
             // from an async context, so we drive the future on a separate OS
             // thread to avoid "Cannot start a runtime from within a runtime"
             // from `Handle::block_on` on a worker thread.
-            info!("engine.add_new_nodes: invoking pre_run for component {}", component.id());
+            info!(
+                "engine.add_new_nodes: invoking prepare for component {}",
+                component.id()
+            );
             let (tx_done, rx_done) = std::sync::mpsc::channel::<Result<(), String>>();
             // Deref the reference to get the Arc, then clone the Arc (cheap refcount bump).
             let comp: Arc<dyn Component> = Arc::clone(*component);
@@ -811,31 +856,35 @@ impl Runtime {
                 {
                     Ok(rt) => rt,
                     Err(e) => {
-                        let _ = tx_done.send(Err(format!(
-                            "pre_run: failed to build runtime: {}",
-                            e
-                        )));
+                        let _ =
+                            tx_done.send(Err(format!("prepare: failed to build runtime: {}", e)));
                         return;
                     }
                 };
-                let result = rt.block_on(async move {
-                    comp.pre_run().await.map_err(|e| e.to_string())
-                });
+                let result =
+                    rt.block_on(async move { comp.prepare().await.map_err(|e| e.to_string()) });
                 let _ = tx_done.send(result);
             });
             match rx_done.recv() {
                 Ok(Ok(())) => {
-                    info!("engine.add_new_nodes: pre_run completed ok for {}", component.id());
+                    info!(
+                        "engine.add_new_nodes: prepare completed ok for {}",
+                        component.id()
+                    );
                 }
                 Ok(Err(e)) => {
-                    return Err(Error::other(
-                        format!("pre_run failed for {}: {}", component.id(), e),
-                    ));
+                    return Err(Error::other(format!(
+                        "prepare failed for {}: {}",
+                        component.id(),
+                        e
+                    )));
                 }
                 Err(e) => {
-                    return Err(Error::other(
-                        format!("pre_run thread dropped for {}: {}", component.id(), e),
-                    ));
+                    return Err(Error::other(format!(
+                        "prepare thread dropped for {}: {}",
+                        component.id(),
+                        e
+                    )));
                 }
             }
 

@@ -1,0 +1,160 @@
+name: opsense
+
+# Docker Compose v2 stack for local dev.
+#
+# Bring up the whole stack with:
+#   docker compose up -d
+#
+# Services:
+#   - postgres    : primary persistence (postgres:16-alpine)
+#   - valkey      : cache layer (valkey 7-alpine)
+#   - runner*     : 3 image variants of the analysis runner (echo/python/julia)
+#   - opsense-serve: the main HTTP/gRPC server (opsense + nginx + alloy under supervisor)
+#
+# The opsense-serve image is built by Earthly: `earthly +all-local` first, then
+# `docker compose up`. See Makefile shortcuts.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: opsense-postgres
+    environment:
+      POSTGRES_DB: opsense
+      POSTGRES_USER: opsense
+      POSTGRES_PASSWORD: opsense123
+    # Mount depth=1 schema files only — Postgres initdb runs every *.sql
+    # in this directory at first boot. Env-specific seeds (depth=2) are
+    # mounted into opsense-serve and run by scripts/release.sh.
+    volumes:
+      - ./sql/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opsense -d opsense"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [opsense-net]
+
+  valkey:
+    image: valkey/valkey:9-alpine
+    container_name: opsense-valkey
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks: [opsense-net]
+
+  # Dex OIDC provider (integration test only).
+  # Image: ghcr.io/dexidp/dex:v2.41.1
+  # Config: conf/dex/config.dev.yaml (static client + static user).
+  # Exposed port 5556 for host-side OIDC discovery debug.
+  opsense-dex:
+    image: ghcr.io/dexidp/dex:v2.41.1
+    container_name: opsense-dex
+    command: dex serve /etc/dex/config.yaml
+    volumes:
+      - ./conf/dex/config.dev.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "5556:5556"
+    networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5556/dex/.well-known/openid-configuration | grep -q issuer || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # opsense-runner (echo) — bare Tầng 2 runner with no kernel deps.
+  # Referenced by opsense-serve via OPSENSE_RUNNER_GRPC=opsense-runner:50051.
+  # Required for `docker compose up opsense-serve` end-to-end smoke (was missing
+  # in earlier compose revisions; PLAN.MD §10.5 known gap).
+  opsense-runner:
+    image: opsense-runner:${OPSENSE_TAG:-local}
+    container_name: opsense-runner
+    networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "/app/opsense runner --health-check || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  opsense-runner-python:
+    image: opsense-runner-python:${OPSENSE_TAG:-local}
+    container_name: opsense-runner-python
+    networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "/app/opsense runner --health-check || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  opsense-runner-julia:
+    image: opsense-runner-julia:${OPSENSE_TAG:-local}
+    container_name: opsense-runner-julia
+    networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "/app/opsense runner --health-check || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  opsense-serve:
+    image: opsense-serve:local
+    container_name: opsense-serve
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./env/secrets.dev.enc.yaml:/app/secrets/secrets.dev.enc.yaml:ro
+      - ./conf/opsense.conf.toml:/app/opsense.conf.toml:ro
+      # Mount the whole sql tree so release.sh can run schema (depth=1) then
+      # the env-specific seed (depth=2) at boot.
+      - ./sql:/app/sql:ro
+      # Dex OIDC config (mounted into image for consistency with compose service).
+      - ./conf/dex/config.dev.yaml:/etc/dex/config.dev.yaml:ro
+    environment:
+      # App
+      APP_ENV: ${APP_ENV:-dev}
+      ENCRYPTED_FILE: /app/secrets/secrets.${APP_ENV:-dev}.enc.yaml
+      OPSENSE_CONFIG: /app/opsense.conf.toml
+      DB_DSN: postgres://opsense:opsense123@opsense-postgres:5432/opsense
+      SQL_BASE: /app/sql
+      RUST_LOG: info
+      # Database init (release.sh prepare)
+      POSTGRES_HOST: opsense-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: opsense
+      POSTGRES_PASSWORD: opsense123
+      POSTGRES_DATABASE: opsense
+      # Runner discovery
+      OPSENSE_RUNNER_GRPC: opsense-runner:50051
+      # Nginx / supervisor boot (release.sh sed)
+      NGINX_DIR: /usr/local/openresty/nginx/conf
+      NGINX_LOG: main
+      HTTP_SERVER: localhost
+      ENVIRONMENT: dev
+      USE_TOR: "false"
+      # Alloy metrics
+      USE_ALLOY: "false"
+      # Redis (valkey)
+      REDIS_HOST: opsense-valkey
+      REDIS_PORT: 6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opsense-dex:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    networks: [opsense-net]
+
+networks:
+  opsense-net:
+    driver: bridge

@@ -1,26 +1,32 @@
 //! End-to-end over real gRPC: spin up the runner service backed by the echo
 //! kernel binary and drive it with the generated client — proving the full
 //! serve ↔ runner ↔ kernel chain minus the Python kernel itself.
+//!
+//! Phase 4: tests the new design — auth (disabled for these tests via
+//! `None`), `Start`/`Execute`/`Interrupt`/`Close`/`Ping`/`Health` RPCs,
+//! implicit keepalive. `send_dataset` is removed.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use opsense_proto::pb::kernel_runner_client::KernelRunnerClient;
 use opsense_proto::pb::value as pb_value;
 use opsense_proto::pb::{
-    exec_event, CloseRequest, CodeRequest, DatasetChunk, DatasetHeader, HealthRequest,
-    SessionHandle, SessionParams,
+    CloseRequest, CodeRequest, HealthRequest, PingRequest, SessionHandle,
+    SessionParams, InterruptRequest, exec_event,
 };
+use opsense_runner::backend::IpcKernelBackend;
+use opsense_runner::config::{resolve_kernel_binary, RunnerConfig};
 use opsense_runner::server::RunnerService;
-use opsense_session::backend::chunk_record_batch;
-use opsense_session::{GrpcRunnerBackend, KernelBackend, KernelConfig};
+use opsense_runner::session::SessionRegistry;
 
-/// Echo kernel binary from the workspace target dir; skip when absent.
+/// Echo kernel binary: resolved the same way `RunnerConfig::default()`
+/// resolves a kernel name — keeps the health `detail` reproducible
+/// across machines instead of leaking a CI-specific absolute path.
 fn echo_bin() -> Option<std::path::PathBuf> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/opsense-kernel-echo");
-    p.canonicalize().ok()
+    let p = resolve_kernel_binary("opsense-kernel-echo");
+    if p.exists() { Some(p) } else { None }
 }
 
 async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -29,11 +35,13 @@ async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let addr = listener.local_addr().unwrap();
     drop(listener);
 
-    let cfg = KernelConfig::for_command(
-        echo_bin().expect("echo kernel binary must be built for this test"),
-    );
+    let bin = echo_bin().expect("echo kernel binary must be built for this test");
+    let cfg = RunnerConfig::default();
+    let backend = Arc::new(IpcKernelBackend::new(bin, vec![]));
+    let registry = Arc::new(SessionRegistry::new(backend, None, cfg.clone()));
+    let service = RunnerService::new(registry, cfg, None);
+
     let handle = tokio::spawn(async move {
-        let service = RunnerService::new(cfg);
         tonic::transport::Server::builder()
             .add_service(service.with_limits())
             .serve(addr)
@@ -46,12 +54,11 @@ async fn start_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
-async fn grpc_roundtrip_start_execute_dataset_close() {
-    let Some(bin) = echo_bin() else {
+async fn grpc_roundtrip_start_execute_ping_close() {
+    let Some(_bin) = echo_bin() else {
         eprintln!("skipping: opsense-kernel-echo not built");
         return;
     };
-    let _ = bin;
     let (addr, server) = start_server().await;
 
     let mut client = KernelRunnerClient::connect(format!("http://{addr}"))
@@ -69,12 +76,12 @@ async fn grpc_roundtrip_start_execute_dataset_close() {
 
     // Start session.
     let handle: SessionHandle = client
-        .start_session(tonic::Request::new(SessionParams {
+        .start(tonic::Request::new(SessionParams {
             session_id: "grpc-s1".into(),
             ..SessionParams::default()
         }))
         .await
-        .expect("start session")
+        .expect("start")
         .into_inner();
     assert_eq!(handle.session_id, "grpc-s1");
 
@@ -104,57 +111,20 @@ async fn grpc_roundtrip_start_execute_dataset_close() {
     }
     assert_eq!(text.as_deref(), Some("echo: 1 + 1"));
 
-    // SendDataset: two chunks of Arrow IPC through client-streaming gRPC.
-    let segments = arrow_segments();
-    let out = tonic::Request::new(futures_util::stream::iter(
-        segments
-            .into_iter()
-            .enumerate()
-            .map(|(i, seg)| DatasetChunk {
-                session_id: "grpc-s1".into(),
-                dataset_ref: "@1".into(),
-                seq: i as u64,
-                last: i == 2,
-                arrow_ipc: seg.to_vec(),
-            }),
-    ));
-    let ack = client
-        .send_dataset(out)
-        .await
-        .expect("send dataset")
-        .into_inner();
-    assert!(ack.ok, "{}", ack.error);
-    assert_eq!(ack.rows, 9); // three 3-row batches
-
-    // df directive echoes the dataset back as a DataFrame value.
-    let mut stream = client
-        .execute(tonic::Request::new(CodeRequest {
-            request_id: "r2".into(),
+    // Ping (implicit keepalive + monitoring).
+    let pong = client
+        .ping(tonic::Request::new(PingRequest {
             session_id: "grpc-s1".into(),
-            code: "df".into(),
-            input_names: vec![],
-            timeout_ms: 5_000,
         }))
         .await
-        .expect("df execute")
+        .expect("ping")
         .into_inner();
-    let mut rows = 0i64;
-    while let Some(event) = stream.message().await.expect("event") {
-        match event.event {
-            Some(exec_event::Event::ResultValue(v)) => {
-                if let Some(pb_value::Kind::Dataframe(df)) = v.kind {
-                    rows = df.rows;
-                }
-            }
-            Some(exec_event::Event::Done(true)) => break,
-            _ => {}
-        }
-    }
-    assert_eq!(rows, 9);
+    assert!(pong.alive);
+    assert!(pong.server_time > 0);
 
     // Interrupt when idle answers Ack directly.
     let ack = client
-        .interrupt(tonic::Request::new(opsense_proto::pb::InterruptRequest {
+        .interrupt(tonic::Request::new(InterruptRequest {
             session_id: "grpc-s1".into(),
             request_id: "none".into(),
         }))
@@ -165,7 +135,7 @@ async fn grpc_roundtrip_start_execute_dataset_close() {
 
     // Close session.
     let ack = client
-        .close_session(tonic::Request::new(CloseRequest {
+        .close(tonic::Request::new(CloseRequest {
             session_id: "grpc-s1".into(),
         }))
         .await
@@ -176,102 +146,26 @@ async fn grpc_roundtrip_start_execute_dataset_close() {
     server.abort();
 }
 
-/// Three 3-row RecordBatches, each its own Arrow IPC stream segment.
-fn arrow_segments() -> Vec<Bytes> {
-    use arrow::array::Int64Array;
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::ipc::writer::StreamWriter;
-    use arrow::record_batch::RecordBatch;
-    use std::sync::Arc;
-
-    let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int64, false)]));
-    (0..3)
-        .map(|round| {
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
-            )
-            .unwrap();
-            let mut buf = Vec::new();
-            {
-                let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
-                writer.write(&batch).unwrap();
-                writer.finish().unwrap();
-            }
-            let _ = round;
-            Bytes::from(buf)
-        })
-        .collect()
-}
-
 #[tokio::test]
-async fn grpc_backend_roundtrips_chunked_million_rows() {
-    let Some(bin) = echo_bin() else {
+async fn grpc_health_returns_runner_info() {
+    let Some(_bin) = echo_bin() else {
         eprintln!("skipping: opsense-kernel-echo not built");
         return;
     };
-    let _ = bin;
     let (addr, server) = start_server().await;
 
-    // The exact backend a remote session would use.
-    let backend = GrpcRunnerBackend::connect(&addr.to_string())
+    let mut client = KernelRunnerClient::connect(format!("http://{addr}"))
         .await
         .expect("connect");
-    let sid = backend
-        .start_session(SessionParams {
-            session_id: "grpc-big".into(),
-            ..SessionParams::default()
-        })
-        .await
-        .expect("start");
 
-    let batch = arrow::record_batch::RecordBatch::try_new(
-        std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("n", arrow::datatypes::DataType::Int64, false),
-        ])),
-        vec![std::sync::Arc::new(arrow::array::Int64Array::from(
-            (0..1_000_000i64).collect::<Vec<_>>(),
-        ))],
-    )
-    .unwrap();
-    let segments = chunk_record_batch(&batch).expect("chunking");
-    assert!(
-        segments.len() > 10,
-        "expected many chunks, got {}",
-        segments.len()
-    );
-
-    let header = DatasetHeader {
-        session_id: sid.clone(),
-        dataset_ref: "@big".into(),
-        rows: 1_000_000,
-        cols: 1,
-        columns: vec!["n".into()],
-    };
-    let ack = backend
-        .send_dataset(&sid, header, segments)
+    let health = client
+        .health(tonic::Request::new(HealthRequest {}))
         .await
-        .expect("send dataset");
-    assert!(ack.ok, "{}", ack.error);
-    assert_eq!(ack.rows, 1_000_000);
+        .expect("health")
+        .into_inner();
+    assert!(health.ok);
+    assert_eq!(health.kernel_name, "runner/ipc");
+    assert_eq!(health.detail, "command \"target/debug/opsense-kernel-echo\" args []");
 
-    let outcome = backend
-        .execute(
-            &sid,
-            CodeRequest {
-                request_id: "r1".into(),
-                session_id: sid.clone(),
-                code: "df".into(),
-                input_names: vec![],
-                timeout_ms: 30_000,
-            },
-        )
-        .await
-        .expect("df over grpc");
-    assert!(outcome.ok(), "{outcome:?}");
-    match outcome.value.expect("dataframe").kind {
-        Some(pb_value::Kind::Dataframe(df)) => assert_eq!(df.rows, 1_000_000),
-        other => panic!("unexpected value {other:?}"),
-    }
     server.abort();
 }
