@@ -2,7 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use opsense::{mcp, repl, runner, serve, session};
+use opsense::{mcp, repl, runner, serve, session, token};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -61,6 +61,17 @@ enum Commands {
     Session {
         #[command(subcommand)]
         action: SessionSubcmd,
+    },
+    /// Encrypt/decrypt helper cho `sys_token_map.token` (Postgres bytea).
+    /// Dùng để generate SQL seed với MASTER_KEY cố định.
+    ///
+    ///   opsense token encrypt "plain text"   → in `\\xHEXHEX...` (paste vào SQL)
+    ///   opsense token decrypt "\\xHEXHEX..." → in plaintext
+    ///
+    /// Master key lấy từ env `MASTER_KEY` (32 ASCII bytes).
+    Token {
+        action: String,
+        payload: String,
     },
 }
 
@@ -173,6 +184,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     if let Err(e) = session::cli::run(cmd) {
                         eprintln!("session error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Token { action, payload }) => {
+                    let master_key = std::env::var("MASTER_KEY").unwrap_or_default();
+                    if let Err(e) = token::run(&master_key, &action, &payload).await {
+                        eprintln!("token error: {e}");
                         std::process::exit(1);
                     }
                 }

@@ -123,6 +123,11 @@ services:
       DB_DSN: postgres://opsense:opsense123@opsense-postgres:5432/opsense
       SQL_BASE: /app/sql
       RUST_LOG: info
+      # Symmetric key for AES-256-GCM encrypt/decrypt of secrets stored in
+      # `sys_token_map.token` (oidc_client_secret, session_secret, …).
+      # MUST match the key used to encrypt the blobs in
+      # sql/postgres/dev/50-init-tenant.sql (32 ASCII bytes, dev only).
+      MASTER_KEY: "0123456789abcdef0123456789abcdef"
       # Database init (release.sh prepare)
       POSTGRES_HOST: opsense-postgres
       POSTGRES_PORT: 5432
