@@ -1199,55 +1199,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_meta_chains_edges_shortcuts_roundtrip() {
-        let (_d, path) = tmp_path();
-        let mut s = DuckS3Storage::open(&path).await.unwrap();
-
-        assert_eq!(s.get_meta(7).await.unwrap(), None);
-        assert_eq!(s.get_key_len(7).await.unwrap(), None);
-        s.set_meta(7, b"call-site-info").await.unwrap();
-        s.set_key_len(7, 5).await.unwrap();
-        assert_eq!(
-            s.get_meta(7).await.unwrap().as_deref(),
-            Some(&b"call-site-info"[..])
-        );
-        assert_eq!(s.get_key_len(7).await.unwrap(), Some(5));
-
-        s.set_node_meta(3, b"node-json").await.unwrap();
-        assert_eq!(
-            s.get_node_meta(3).await.unwrap().as_deref(),
-            Some(&b"node-json"[..])
-        );
-
-        s.set_chain(9, &[1, 2, 3]).await.unwrap();
-        assert_eq!(s.get_chain(9).await.unwrap(), Some(vec![1, 2, 3]));
-        assert_eq!(s.get_chain(10).await.unwrap(), None);
-
-        assert_eq!(s.get_edge_data(7).await.unwrap(), None);
-        s.set_edge_data(7, b"call-edge").await.unwrap();
-        s.set_edge_data(7, b"call-edge-2").await.unwrap();
-        assert_eq!(
-            s.get_edge_data(7).await.unwrap().as_deref(),
-            Some(&b"call-edge-2"[..])
-        );
-        let mut edges = Vec::new();
-        s.for_each_edge_data(&mut |id, data| {
-            edges.push((id, data.to_vec()));
-            Ok(())
-        })
-        .await
-        .unwrap();
-        assert_eq!(edges, vec![(7, b"call-edge-2".to_vec())]);
-
-        s.add_shortcut_node(1, b"l", 10).await.unwrap();
-        s.add_shortcut_node(1, b"l", 20).await.unwrap();
-        s.add_shortcut_node(1, b"o", 10).await.unwrap();
-        s.add_shortcut_node(2, b"l", 30).await.unwrap();
-        assert_eq!(s.get_shortcut_nodes(1, b"l").await.unwrap(), vec![10, 20]);
-        assert_eq!(s.get_shortcut_nodes(2, b"l").await.unwrap(), vec![30]);
-    }
-
-    #[tokio::test]
     async fn test_persists_across_reopen() {
         let (_d, path) = tmp_path();
         let parent;

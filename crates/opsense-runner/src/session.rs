@@ -45,7 +45,6 @@ pub struct SessionMeta {
 pub struct SessionRegistry {
     backend: Arc<dyn KernelBackend>,
     auth: Option<Arc<dyn Auth>>,
-    cfg: RunnerConfig,
     sessions: Arc<Mutex<HashMap<String, SessionMeta>>>,
     sweeper: Option<JoinHandle<()>>,
 }
@@ -69,7 +68,6 @@ impl SessionRegistry {
         Self {
             backend,
             auth,
-            cfg,
             sessions,
             sweeper: Some(sweeper),
         }

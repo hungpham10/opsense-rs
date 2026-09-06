@@ -33,7 +33,6 @@ fn internal(err: anyhow::Error) -> Status {
 
 pub struct RunnerService {
     registry: Arc<SessionRegistry>,
-    cfg: crate::RunnerConfig,
     auth: Option<Arc<dyn Auth>>,
 }
 
@@ -45,12 +44,11 @@ impl RunnerService {
     #[must_use]
     pub fn new(
         registry: Arc<SessionRegistry>,
-        cfg: crate::RunnerConfig,
+        _cfg: crate::RunnerConfig,
         auth: Option<Arc<dyn Auth>>,
     ) -> Self {
         Self {
             registry,
-            cfg,
             auth,
         }
     }
