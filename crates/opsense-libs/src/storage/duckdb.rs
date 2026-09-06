@@ -498,24 +498,6 @@ impl EdgeDataStorage for DuckS3Storage {
         conn.execute("DELETE FROM rt_edges", []).map_err(db_err)?;
         Ok(())
     }
-
-    async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare("SELECT id, data FROM rt_edges ORDER BY id")
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
-            .map_err(db_err)?;
-        for r in rows {
-            let (id, data) = r.map_err(db_err)?;
-            f(id as usize, &data)?;
-        }
-        Ok(())
-    }
 }
 
 // ==================== ChainStorage ====================

@@ -350,7 +350,7 @@ mod tests {
         let cfg = RunnerConfig::default();
         let backend = Arc::new(IpcKernelBackend::new(bin, vec![]));
         let registry = Arc::new(SessionRegistry::new(backend, None, cfg.clone()));
-        let service = RunnerService::new(registry, cfg, None);
+        let service = RunnerService::new(registry, None);
 
         let handle = tokio::spawn(async move {
             tonic::transport::Server::builder()
