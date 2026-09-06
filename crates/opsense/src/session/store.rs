@@ -72,11 +72,10 @@ pub fn list_sessions_on_disk() -> Result<Vec<SessionFile>> {
             continue;
         }
         let body = std::fs::read(&path).ok();
-        if let Some(body) = body {
-            if let Ok(s) = serde_json::from_slice::<SessionFile>(&body) {
+        if let Some(body) = body
+            && let Ok(s) = serde_json::from_slice::<SessionFile>(&body) {
                 out.push(s);
             }
-        }
     }
     Ok(out)
 }

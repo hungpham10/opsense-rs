@@ -22,7 +22,7 @@ pub async fn serve(client: OpsenseClient) -> std::io::Result<()> {
 }
 
 fn stdio_err<E: std::fmt::Display>(e: E) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+    std::io::Error::other(e.to_string())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

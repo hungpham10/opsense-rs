@@ -27,11 +27,10 @@ pub fn run(path: Option<&Path>, force: bool) -> std::io::Result<()> {
         ));
     }
 
-    if let Some(parent) = target.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = target.parent()
+        && !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
-    }
     std::fs::write(&target, TEMPLATE)?;
 
     println!("wrote {}", target.display());

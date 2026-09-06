@@ -65,13 +65,12 @@ fn parse_component(input: &ComponentInput) -> async_graphql::Result<Arc<dyn Comp
     let mut json = serde_json::Map::new();
     json.insert("type".into(), serde_json::Value::String(input.kind.clone()));
     json.insert("id".into(), serde_json::Value::String(input.id.clone()));
-    if let Some(cfg) = &input.config {
-        if let Some(cfg_obj) = cfg.as_object() {
+    if let Some(cfg) = &input.config
+        && let Some(cfg_obj) = cfg.as_object() {
             for (k, v) in cfg_obj {
                 json.insert(k.clone(), v.clone());
             }
         }
-    }
     if let Some(inputs) = &input.inputs {
         json.insert(
             "inputs".into(),

@@ -137,8 +137,8 @@ async fn list(host: &str, bearer: &str) -> Result<()> {
 
     let local = store::list_sessions_on_disk()?;
 
-    println!("{:<48}  {:<7}  {:<10}  {:<25}  {}",
-        "session_id", "source", "status", "expires_at", "last_used_at");
+    println!("{:<48}  {:<7}  {:<10}  {:<25}  last_used_at",
+        "session_id", "source", "status", "expires_at");
     println!("{}", "-".repeat(110));
     for s in &remote {
         println!("{:<48}  {:<7}  {:<10}  {:<25}  {}",

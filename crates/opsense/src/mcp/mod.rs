@@ -27,7 +27,7 @@ pub async fn run(endpoint: Option<String>) -> io::Result<()> {
         .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
 
     let client = OpsenseClient::new(&endpoint)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     server::serve(client).await
 }

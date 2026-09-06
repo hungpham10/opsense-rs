@@ -87,7 +87,7 @@ impl Resolver {
         let postgres_user = std::env::var("POSTGRES_USER").unwrap_or_else(|_| "".to_string());
         let postgres_db = std::env::var("POSTGRES_DATABASE").unwrap_or_else(|_| "".to_string());
 
-        let db_dsn = if postgres_host.len() > 0 {
+        let db_dsn = if !postgres_host.is_empty() {
             secret.get("DB_DSN", "/").await.unwrap_or(format!(
                 "postgres://{}:{}@{}:{}/{}",
                 postgres_user, postgres_password, postgres_host, postgres_port, postgres_db,

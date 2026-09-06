@@ -40,11 +40,10 @@ pub async fn wait_for_health(client: &Client, timeout_secs: u64) -> anyhow::Resu
     let url = format!("{}/health", serve_url());
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
-        if let Ok(resp) = client.get(&url).send().await {
-            if resp.status().is_success() {
+        if let Ok(resp) = client.get(&url).send().await
+            && resp.status().is_success() {
                 return Ok(());
             }
-        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!("serve not healthy at {url} after {timeout_secs}s")
@@ -57,11 +56,10 @@ pub async fn wait_for_pipeline(client: &Client, timeout_secs: u64) -> anyhow::Re
     let body = serde_json::json!({"query": "{ status { nodes { id } } }"});
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
-        if let Ok(resp) = client.post(&url).json(&body).send().await {
-            if resp.status().is_success() {
+        if let Ok(resp) = client.post(&url).json(&body).send().await
+            && resp.status().is_success() {
                 return Ok(());
             }
-        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!("pipeline not ready at {url} after {timeout_secs}s")

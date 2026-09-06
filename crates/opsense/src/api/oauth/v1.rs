@@ -180,10 +180,7 @@ fn extract_user_id(headers: &HeaderMap) -> Result<String, Response> {
 /// `POST /api/oauth/v1/device/code` — RFC 8628 §3.1
 /// Body: `{}` (optional client_id). Trả về device_code + user_code.
 async fn device_code(State(state): State<AppState>) -> Response {
-    let tenant_id: i64 = match state.variable("DEFAULT_TENANT_ID").await {
-        Ok(id) => id,
-        Err(_) => 1, // fallback cho dev
-    };
+    let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     // verification_uri: nơi user sẽ mở browser để nhập user_code.
     // Thường là `https://<host>/api/oauth/v1/device` (do Nginx serve form).
@@ -298,10 +295,7 @@ async fn device_token(
             "Expected grant_type=urn:ietf:params:oauth:grant-type:device_code",
         );
     }
-    let tenant_id: i64 = match state.variable("DEFAULT_TENANT_ID").await {
-        Ok(id) => id,
-        Err(_) => 1,
-    };
+    let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     let admin = admin(&state);
     match admin.poll_device_token(tenant_id, &payload.device_code).await {
@@ -336,10 +330,7 @@ async fn token_refresh(
     Json(payload): Json<RefreshRequest>,
 ) -> Response {
 
-    let tenant_id: i64 = match state.variable("DEFAULT_TENANT_ID").await {
-        Ok(id) => id,
-        Err(_) => 1,
-    };
+    let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     let pool = state.connector.database(tenant_id);
     let mut conn = match pool.acquire().await {
@@ -410,10 +401,7 @@ async fn token_revoke(
         Ok(u) => u,
         Err(e) => return e,
     };
-    let tenant_id: i64 = match state.variable("DEFAULT_TENANT_ID").await {
-        Ok(id) => id,
-        Err(_) => 1,
-    };
+    let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     let pool = state.connector.database(tenant_id);
     let mut conn = match pool.acquire().await {
@@ -449,10 +437,7 @@ async fn session_issue(
         Ok(u) => u,
         Err(e) => return e,
     };
-    let tenant_id: i64 = match state.variable("DEFAULT_TENANT_ID").await {
-        Ok(id) => id,
-        Err(_) => 1,
-    };
+    let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     let admin = admin(&state);
     match admin.issue_long_session(tenant_id, &user_id).await {
@@ -482,10 +467,7 @@ async fn session_revoke(
         Ok(u) => u,
         Err(e) => return e,
     };
-    let tenant_id: i64 = match state.variable("DEFAULT_TENANT_ID").await {
-        Ok(id) => id,
-        Err(_) => 1,
-    };
+    let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     let admin = admin(&state);
     match admin.revoke_long_session(tenant_id, &user_id, &payload.session_id).await {
@@ -507,10 +489,7 @@ async fn session_list(
         Ok(u) => u,
         Err(e) => return e,
     };
-    let tenant_id: i64 = match state.variable("DEFAULT_TENANT_ID").await {
-        Ok(id) => id,
-        Err(_) => 1,
-    };
+    let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     let admin = admin(&state);
     match admin.list_long_sessions(tenant_id, &user_id).await {
