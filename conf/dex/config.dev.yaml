@@ -5,12 +5,15 @@
 # Static OIDC client + static password user → test full OIDC flow
 # (browser → Nginx → Dex → UDS → Axum) without external IdP.
 #
-# Issuer: http://opsense-dex:5556/dex
+# Issuer: http://localhost:5556/dex
+# (host-side address, reachable từ CI test process và từ browser qua Nginx.)
+# Compose port-forward 5556 → host:5556 nên localhost work cả trong lẫn
+# ngoài compose network.
 # Client: opsense-test
 # Secret: opsense-dev-shared-secret-32-bytes-min!!
 # User: dev-user@example.com / password
 
-issuer: http://opsense-dex:5556/dex
+issuer: http://localhost:5556/dex
 
 storage:
   type: memory

@@ -23,10 +23,12 @@ VALUES (1, 1, 'dev-service',
 ON CONFLICT (tenant_id, service) DO NOTHING;
 
 -- Dev OIDC config (Dex integration test).
--- Issuer: opsense-dex (compose service) on port 5556.
 -- Client: opsense-test, secret matches Dex staticClients in conf/dex/config.dev.yaml.
 INSERT INTO sys_oidc (id, tenant_id, name, jwt_mode, oidc_issuer, oidc_jwks_url, oidc_client_id, oidc_client_secret, oidc_expected_alg)
-VALUES (1, 1, 'default', 'jwks', 'http://opsense-dex:5556/dex',
+-- oidc_issuer must match Dex's issuer in conf/dex/config.dev.yaml (checked
+-- against the id_token `iss` claim); jwks_url is fetched from inside the
+-- opsense-serve container, so it uses the Docker service name.
+VALUES (1, 1, 'default', 'jwks', 'http://localhost:5556/dex',
         'http://opsense-dex:5556/dex/keys',
         'opsense-test', 2, 'RS256')
 ON CONFLICT (id) DO NOTHING;
@@ -39,3 +41,8 @@ ON CONFLICT (tenant_id, service) DO NOTHING;
 
 -- Map oidc_client_secret (id=2) → token_map row 2.
 UPDATE sys_oidc SET oidc_client_secret = 2 WHERE id = 1;
+
+-- Explicit-id seed rows above don't advance the identity sequence; without
+-- this, the first runtime INSERT reuses id=1 and violates sys_token_map_pkey.
+SELECT setval(pg_get_serial_sequence('sys_token_map', 'id'),
+              (SELECT COALESCE(MAX(id), 1) FROM sys_token_map));

@@ -176,7 +176,7 @@ impl Admin {
             let status:     String    = row.try_get(1)?;
             let expires_at  = parse_dt(Some(row.try_get::<String, _>(2)?))?
                 .ok_or_else(|| AdminError::Other("Missing expires_at".into()))?;
-            let last_used_at = parse_dt(Some(row.try_get::<String, _>(3)?))?;
+            let last_used_at = parse_dt(row.try_get::<Option<String>, _>(3)?)?;
             let created_at  = parse_dt(Some(row.try_get::<String, _>(4)?))?
                 .ok_or_else(|| AdminError::Other("Missing created_at".into()))?;
 

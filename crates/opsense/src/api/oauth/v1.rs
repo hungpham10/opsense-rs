@@ -18,8 +18,7 @@ use axum::routing::{get, post};
 use axum::{Router, http::HeaderMap};
 use serde::{Deserialize, Serialize};
 
-use opsense_model::entities::admin::{sha256_hex, Admin};
-use sqlx::Row;
+use opsense_model::entities::admin::{Admin, Token, sha256_hex};
 
 use crate::api::AppState;
 use crate::api::admin::AdminHeaders;
@@ -332,61 +331,54 @@ async fn token_refresh(
 
     let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
-    let pool = state.connector.database(tenant_id);
-    let mut conn = match pool.acquire().await {
-        Ok(c) => c,
-        Err(e) => return oauth_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            &format!("acquire conn: {e}"),
-        ),
-    };
-
-    let row = sqlx::query(
-        "SELECT user_id, token_id, expires_at, revoked_at \
-         FROM sys_user WHERE token_hash = ?1",
-    )
-    .bind(sha256_hex(payload.refresh_token.as_bytes()))
-    .fetch_optional(&mut *conn)
-    .await
-    .ok()
-    .flatten();
-
-    let Some(row) = row else {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "Refresh token not found");
-    };
-    let revoked: Option<String> = row.try_get(3).ok();
-    if revoked.is_some() {
-        return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "Refresh token revoked");
-    }
-
-    // Sinh access_token mới, update sys_user
+    // Refresh token hash nằm trong `sys_short_sessions` (bảng partition,
+    // được cấp lúc approve device flow) — lookup theo sha256(plaintext).
     let admin = admin(&state);
-    let user_id: String = match row.try_get(0) {
-        Ok(s) => s,
-        Err(e) => return oauth_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            &format!("read user_id: {e}"),
-        ),
+    let (user_id, _session_id) = match admin
+        .lookup_short_session(tenant_id, &payload.refresh_token)
+        .await
+    {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "Refresh token not found")
+        }
+        Err(e) => {
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                &format!("lookup refresh token: {e}"),
+            )
+        }
     };
 
-    let new_access = match admin.insert_short_session(tenant_id, &user_id).await {
-        Ok(s) => s,
+    // Sinh access_token mới cùng hệ `sys_user` / `sys_token_map` (abt_*) —
+    // đúng hệ introspect mà Nginx xác minh.
+    let expires_at_ts = match chrono::Utc::now().checked_add_signed(chrono::Duration::hours(8)) {
+        Some(ts) => ts,
+        None => {
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Timestamp overflow",
+            )
+        }
+    };
+    let new_access = match admin.issue_user_token(tenant_id, &user_id, Some(expires_at_ts)).await {
+        Ok(token) => token,
         Err(e) => return oauth_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "server_error",
-            &format!("issue short session: {e}"),
+            &format!("issue access token: {e}"),
         ),
     };
     state.oauth_metrics.inc_access_token_refreshed();
 
     Json(DeviceTokenResponse {
-        access_token:  new_access.access_token,
+        access_token:  new_access,
         refresh_token: payload.refresh_token, // refresh token reuse (rotation là Phase sau)
         token_type:    "Bearer".to_string(),
-        expires_in:    new_access.expires_in_secs,
-        session_id:    Some(new_access.session_id),
+        expires_in:    8 * 3600,
+        session_id:    None,
     }).into_response()
 }
 

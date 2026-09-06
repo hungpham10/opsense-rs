@@ -84,3 +84,30 @@ pub async fn wait_for_tcp_port(port: u16, timeout_secs: u64) -> anyhow::Result<(
     }
     anyhow::bail!("tcp 127.0.0.1:{port} not listening after {timeout_secs}s")
 }
+
+/// Poll Dex OIDC discovery endpoint. Trả `Err` nếu timeout. Dùng để
+/// skip test gracefully khi compose chưa start đủ (Dex không resolve được
+/// từ host — vd `opsense-dex` DNS chỉ có trong compose network).
+#[allow(dead_code)] // chỉ dùng trong integration_oauth.rs
+pub async fn wait_for_dex(timeout_secs: u64) -> anyhow::Result<()> {
+    let issuer = std::env::var("OPSENSE_DEX_ISSUER")
+        .unwrap_or_else(|_| "http://localhost:5556/dex".into());
+    let url = format!("{}/.well-known/openid-configuration", issuer);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok();
+    let Some(client) = client else {
+        anyhow::bail!("reqwest client build failed");
+    };
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        if let Ok(resp) = client.get(&url).send().await {
+            if resp.status().is_success() {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    anyhow::bail!("Dex not healthy at {url} after {timeout_secs}s")
+}

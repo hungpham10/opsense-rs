@@ -44,14 +44,14 @@ impl Jwt for Admin {
             return Ok(None);
         };
 
-        let revoked_at = parse_dt(row.try_get(3)?)?;
-        if revoked_at.is_some() {
-            return Ok(None);
-        }
-        let expires_at = parse_dt(row.try_get(2)?)?;
+        let expires_at = parse_dt(row.try_get(3)?)?;
         if let Some(expires_at) = expires_at
             && expires_at < chrono::Utc::now()
         {
+            return Ok(None);
+        }
+        let revoked_at = parse_dt(row.try_get(4)?)?;
+        if revoked_at.is_some() {
             return Ok(None);
         }
 

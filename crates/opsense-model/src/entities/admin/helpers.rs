@@ -40,6 +40,14 @@ pub fn parse_dt(s: Option<String>) -> Result<Option<DateTime<Utc>>, AdminError> 
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| Some(dt.with_timezone(&Utc)))
         .or_else(|_| {
+            // Postgres timestamptz text: "YYYY-MM-DD HH:MM:SS[.ffffff]+00"
+            // (offset không có phần phút nên RFC 3339 từ chối; %#z chấp nhận
+            // cả "+00", "+0000" lẫn "+00:00"; %.f bắt phần giây thập phân
+            // nếu có).
+            DateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S%.f%#z")
+                .map(|dt| Some(dt.with_timezone(&Utc)))
+        })
+        .or_else(|_| {
             // Fallback: thử "YYYY-MM-DD HH:MM:SS" (MySQL/SQLite không có TZ)
             chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
                 .map(|ndt| Some(ndt.and_utc()))
@@ -112,6 +120,15 @@ mod tests {
         assert!(r.is_some());
         let r = parse_dt(Some("2026-01-02 03:04:05".into())).unwrap();
         assert!(r.is_some());
+        // Postgres timestamptz text representation (offset without minutes).
+        let r = parse_dt(Some("2026-01-02 03:04:05+00".into())).unwrap();
+        assert_eq!(r.map(|dt| dt.to_rfc3339()), Some("2026-01-02T03:04:05+00:00".into()));
+        // Postgres timestamptz text with fractional seconds.
+        let r = parse_dt(Some("2026-09-06 23:09:22.416527+00".into())).unwrap();
+        assert_eq!(
+            r.map(|dt| dt.to_rfc3339()),
+            Some("2026-09-06T23:09:22.416527+00:00".into())
+        );
         assert!(parse_dt(None).unwrap().is_none());
         assert!(parse_dt(Some(String::new())).unwrap().is_none());
         assert!(parse_dt(Some("not-a-date".into())).is_err());

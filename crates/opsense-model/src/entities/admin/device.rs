@@ -10,6 +10,7 @@ use sqlx::Row;
 
 use crate::entities::admin::errors::AdminError;
 use crate::entities::admin::helpers::{format_dt_for_db, parse_dt, sha256_hex, tz_placeholder};
+use crate::entities::admin::token::Token;
 use crate::entities::admin::Admin;
 
 /// Thông tin device code trả về cho CLI sau khi gọi `/device/code`.
@@ -91,9 +92,10 @@ impl Admin {
     /// Tìm `sys_device_code` theo `user_code`, kiểm tra:
     /// - Còn hiệu lực (chưa expired, status = 'pending')
     ///
-    /// Sau đó phát hành `access_token` + `refresh_token` (lưu vào
-    /// `sys_user` / `sys_token_map`) và cập nhật `sys_device_code` status
-    /// = 'approved'.
+    /// Sau đó phát hành `access_token` qua `issue_user_token` (lưu `sys_user`
+    /// / `sys_token_map`, có prefix `abt_` để Nginx introspect được) và
+    /// `refresh_token` (hash lưu `sys_short_sessions`), rồi cập nhật
+    /// `sys_device_code` status = 'approved'.
     ///
     /// Trả về user_id nếu thành công.
     pub async fn approve_device_code(
@@ -128,53 +130,32 @@ impl Admin {
 
         let record_id: i64 = row.try_get(0)?;
 
-        // 2. Sinh tokens
-        let access_token  = rand_base64(32);
-        let refresh_token = rand_base64(48);
-        // token_hash dùng cho sys_short_sessions (chưa dùng ở đây; access_token
-        // được lưu encrypted trong sys_token_map).
-        let _token_hash = sha256_hex(access_token.as_bytes());
-
-        // 3. Lưu access_token vào sys_token_map
-        let master_key = crate::entities::admin::helpers::get_master_key().await?;
-        let encrypted_token = opsense_libs::sops::encrypt(&master_key, &access_token.to_string())
-            .map_err(|e| AdminError::Other(format!("Encrypt token failed: {e}")))?;
-
+        // 2. Sinh access_token qua `issue_user_token` — token có prefix `abt_`,
+        //    plaintext được mã hóa AES lưu `sys_token_map`, hash lưu `sys_user`
+        //    (đúng hệ introspect mà Nginx dùng để xác minh Bearer).
+        let expires_in_secs = 8 * 3600i64; // 8h
         let expires_at_ts = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::hours(8))
+            .checked_add_signed(chrono::Duration::seconds(expires_in_secs))
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
+        let access_token = self
+            .issue_user_token(tenant_id, user_id, Some(expires_at_ts))
+            .await?;
+        let refresh_token = rand_base64(48);
 
-        let pool = self.dbt(tenant_id);
+        // 3. Lưu refresh_token hash vào `sys_short_sessions` (bảng partition,
+        //    dọn theo TTL + drop partition) — `token_refresh` lookup theo hash.
         let kind = self.kind(tenant_id);
-        let mut conn = pool.acquire().await?;
-
-        let row2 = sqlx::query(
-            "INSERT INTO sys_token_map (tenant_id, service, token) VALUES ($1, $2, $3)",
-        )
-        .bind(tenant_id)
-        .bind(format!("user:{user_id}"))
-        .bind(&encrypted_token)
-        .execute(&mut *conn)
-        .await?;
-
-        let token_id = row2.last_insert_id();
-
-        // 4. Lưu refresh_token hash vào sys_user (hoặc cập nhật nếu đã có)
+        let refresh_session_id = rand_base64(16);
         sqlx::query(&format!(
-            "INSERT INTO sys_user \
-             (tenant_id, user_id, token_hash, token_id, expires_at) \
-             VALUES ($1, $2, $3, $4, {}) \
-             ON CONFLICT (tenant_id, user_id) DO UPDATE SET \
-               token_hash = EXCLUDED.token_hash, \
-               token_id   = EXCLUDED.token_id, \
-               expires_at = EXCLUDED.expires_at, \
-               revoked_at = NULL",
+            "INSERT INTO sys_short_sessions \
+             (tenant_id, user_id, session_id, token_hash, expires_at) \
+             VALUES ($1, $2, $3, $4, {})",
             tz_placeholder(kind, 5),
         ))
         .bind(tenant_id)
         .bind(user_id)
+        .bind(&refresh_session_id)
         .bind(sha256_hex(refresh_token.as_bytes()))
-        .bind(token_id)
         .bind(format_dt_for_db(expires_at_ts))
         .execute(&mut *conn)
         .await?;
