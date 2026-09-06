@@ -96,7 +96,7 @@ impl Admin {
         .bind(user_id)
         .bind(&session_id)
         .bind(&encrypted)
-        .bind(expires_at.to_rfc3339())
+        .bind(expires_at)
         .execute(&mut *conn)
         .await?;
 
@@ -285,7 +285,7 @@ impl Admin {
         .bind(user_id)
         .bind(&session_id)
         .bind(&token_hash)
-        .bind(expires_at.to_rfc3339())
+        .bind(expires_at)
         .execute(&mut *conn)
         .await?;
 

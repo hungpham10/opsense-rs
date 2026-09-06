@@ -71,7 +71,7 @@ impl Admin {
         .bind(&device_code)
         .bind(&user_code)
         .bind(interval_secs)
-        .bind(expires_at.to_rfc3339())
+        .bind(expires_at)
         .execute(&mut *conn)
         .await?;
 
@@ -171,7 +171,7 @@ impl Admin {
         .bind(user_id)
         .bind(sha256_hex(refresh_token.as_bytes()))
         .bind(token_id)
-        .bind(expires_at_ts.to_rfc3339())
+        .bind(expires_at_ts)
         .execute(&mut *conn)
         .await?;
 
