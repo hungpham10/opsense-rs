@@ -3,6 +3,7 @@ use std::env;
 use chrono::{DateTime, Utc};
 
 use crate::entities::admin::errors::AdminError;
+use crate::resolver::DbKind;
 
 /// Sinh key cho `sys_token_map` từ `user_id`.
 /// Service name format: `"user:<user_id>"`.
@@ -52,6 +53,36 @@ pub async fn get_master_key() -> Result<Vec<u8>, AdminError> {
     env::var("MASTER_KEY")
         .map(|s| s.into_bytes())
         .map_err(|_| AdminError::Other("Missing MASTER_KEY".into()))
+}
+
+// =========================================================================
+// TIMESTAMPTZ binding helpers
+// =========================================================================
+//
+// `sqlx::Any` không implement `Encode<Any>` cho `chrono::DateTime<Utc>` —
+// nó chỉ có per-backend impl (`Encode<Postgres>`, `Encode<MySql>`, `Encode<Sqlite>`).
+// Khi bind `String` (RFC 3339) qua `Any`, sqlx convert thành `&str` cho
+// backend thật, và Postgres strict type-checker từ chối implicit cast từ
+// `text` → `timestamptz`.
+//
+// Giải pháp: format thành "YYYY-MM-DD HH:MM:SS+00:00" (common ground cả 3
+// backend đều parse được), rồi dùng `$N::timestamptz` trong SQL cho Postgres.
+// MySQL/SQLite: bind string literal trực tiếp, driver parse thành TIMESTAMP.
+
+/// Format `DateTime<Utc>` thành string mà cả Postgres `TIMESTAMPTZ`, MySQL
+/// `TIMESTAMP`, SQLite `TIMESTAMP` đều parse được.
+pub fn format_dt_for_db(dt: DateTime<Utc>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S+00:00").to_string()
+}
+
+/// Sinh placeholder thích hợp cho từng dialect khi bind DateTime/Option<DateTime>.
+/// - Postgres: `$N::timestamptz` ép kiểu text → timestamptz
+/// - MySQL/SQLite: `$N` bind thẳng, driver parse string → TIMESTAMP
+pub fn tz_placeholder(kind: DbKind, n: usize) -> String {
+    match kind {
+        DbKind::Postgres => format!("${n}::timestamptz"),
+        DbKind::MySql | DbKind::Sqlite | DbKind::Unknown => format!("${n}"),
+    }
 }
 
 #[cfg(test)]

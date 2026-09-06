@@ -5,7 +5,9 @@ use sqlx::Row;
 use opsense_libs::sops::encrypt;
 
 use crate::entities::admin::errors::AdminError;
-use crate::entities::admin::helpers::{get_master_key, sha256_hex, user_token_service};
+use crate::entities::admin::helpers::{
+    format_dt_for_db, get_master_key, sha256_hex, tz_placeholder, user_token_service,
+};
 use crate::entities::admin::Admin;
 
 /// Thông tin base token của một user (không bao giờ chứa plaintext đầy đủ)
@@ -152,31 +154,37 @@ impl Token for Admin {
         let token_id: i64 = row.try_get(0)?;
 
         let upsert_sql = if self.kind(tenant_id).is_mysql() {
-            "INSERT INTO sys_user (tenant_id, user_id, token_hash, token_id, expires_at, revoked_at) \
-             VALUES ($1, $2, $3, $4, $5, NULL) \
-             ON DUPLICATE KEY UPDATE \
-             token_hash = VALUES(token_hash), \
-             token_id = VALUES(token_id), \
-             expires_at = VALUES(expires_at), \
-             revoked_at = NULL, \
-             updated_at = CURRENT_TIMESTAMP"
+            format!(
+                "INSERT INTO sys_user (tenant_id, user_id, token_hash, token_id, expires_at, revoked_at) \
+                 VALUES ($1, $2, $3, $4, {}, NULL) \
+                 ON DUPLICATE KEY UPDATE \
+                 token_hash = VALUES(token_hash), \
+                 token_id = VALUES(token_id), \
+                 expires_at = VALUES(expires_at), \
+                 revoked_at = NULL, \
+                 updated_at = CURRENT_TIMESTAMP",
+                tz_placeholder(self.kind(tenant_id), 5),
+            )
         } else {
-            "INSERT INTO sys_user (tenant_id, user_id, token_hash, token_id, expires_at, revoked_at) \
-             VALUES ($1, $2, $3, $4, $5, NULL) \
-             ON CONFLICT (tenant_id, user_id) DO UPDATE SET \
-             token_hash = EXCLUDED.token_hash, \
-             token_id = EXCLUDED.token_id, \
-             expires_at = EXCLUDED.expires_at, \
-             revoked_at = NULL, \
-             updated_at = CURRENT_TIMESTAMP"
+            format!(
+                "INSERT INTO sys_user (tenant_id, user_id, token_hash, token_id, expires_at, revoked_at) \
+                 VALUES ($1, $2, $3, $4, {}, NULL) \
+                 ON CONFLICT (tenant_id, user_id) DO UPDATE SET \
+                 token_hash = EXCLUDED.token_hash, \
+                 token_id = EXCLUDED.token_id, \
+                 expires_at = EXCLUDED.expires_at, \
+                 revoked_at = NULL, \
+                 updated_at = CURRENT_TIMESTAMP",
+                tz_placeholder(self.kind(tenant_id), 5),
+            )
         };
 
-        sqlx::query(upsert_sql)
+        sqlx::query(&upsert_sql)
             .bind(tenant_id)
             .bind(user_id)
             .bind(sha256_hex(token_plain.as_bytes()))
             .bind(token_id)
-            .bind(expires_at.map(|dt| dt.to_rfc3339()))
+            .bind(expires_at.map(format_dt_for_db))
             .execute(&mut *conn)
             .await?;
 

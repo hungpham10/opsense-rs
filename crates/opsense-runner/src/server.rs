@@ -44,7 +44,6 @@ impl RunnerService {
     #[must_use]
     pub fn new(
         registry: Arc<SessionRegistry>,
-        _cfg: crate::RunnerConfig,
         auth: Option<Arc<dyn Auth>>,
     ) -> Self {
         Self {
@@ -247,7 +246,7 @@ impl RunnerService {
 pub async fn serve(bind: SocketAddr, cfg: RunnerConfig, auth: Option<Arc<dyn Auth>>) -> Result<()> {
     let backend = Arc::new(crate::backend::IpcKernelBackend::from_env());
     let registry = Arc::new(SessionRegistry::new(backend, auth.clone(), cfg.clone()));
-    let service = RunnerService::new(registry, cfg, auth);
+    let service = RunnerService::new(registry, auth);
     let result = tonic::transport::Server::builder()
         .add_service(pb::kernel_runner_server::KernelRunnerServer::new(service))
         .serve_with_shutdown(bind, async {

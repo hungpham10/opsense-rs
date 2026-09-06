@@ -13,7 +13,7 @@ use rand::RngCore;
 use sqlx::Row;
 
 use crate::entities::admin::errors::AdminError;
-use crate::entities::admin::helpers::{parse_dt, sha256_hex};
+use crate::entities::admin::helpers::{format_dt_for_db, parse_dt, sha256_hex, tz_placeholder};
 use crate::entities::admin::Admin;
 
 /// Thông tin long session trả về khi gọi `/session/issue`.
@@ -86,17 +86,19 @@ impl Admin {
         let expires_at = chrono::Utc::now()
             .checked_add_signed(chrono::Duration::seconds(expires_in_secs))
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
+        let kind = self.kind(tenant_id);
 
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO sys_long_sessions \
              (tenant_id, user_id, session_id, private_key_enc, status, expires_at) \
-             VALUES ($1, $2, $3, $4, 'active', $5)",
-        )
+             VALUES ($1, $2, $3, $4, 'active', {})",
+            tz_placeholder(kind, 5),
+        ))
         .bind(tenant_id)
         .bind(user_id)
         .bind(&session_id)
         .bind(&encrypted)
-        .bind(expires_at.to_rfc3339())
+        .bind(format_dt_for_db(expires_at))
         .execute(&mut *conn)
         .await?;
 
@@ -276,16 +278,17 @@ impl Admin {
         let pool = self.dbt(tenant_id);
         let mut conn = pool.acquire().await?;
 
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO sys_short_sessions \
              (tenant_id, user_id, session_id, token_hash, expires_at) \
-             VALUES ($1, $2, $3, $4, $5)",
-        )
+             VALUES ($1, $2, $3, $4, {})",
+            tz_placeholder(self.kind(tenant_id), 5),
+        ))
         .bind(tenant_id)
         .bind(user_id)
         .bind(&session_id)
         .bind(&token_hash)
-        .bind(expires_at.to_rfc3339())
+        .bind(format_dt_for_db(expires_at))
         .execute(&mut *conn)
         .await?;
 

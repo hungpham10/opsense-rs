@@ -9,7 +9,7 @@ use rand::RngCore;
 use sqlx::Row;
 
 use crate::entities::admin::errors::AdminError;
-use crate::entities::admin::helpers::{parse_dt, sha256_hex};
+use crate::entities::admin::helpers::{format_dt_for_db, parse_dt, sha256_hex, tz_placeholder};
 use crate::entities::admin::Admin;
 
 /// Thông tin device code trả về cho CLI sau khi gọi `/device/code`.
@@ -60,18 +60,20 @@ impl Admin {
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
 
         let pool = self.dbt(tenant_id);
+        let kind = self.kind(tenant_id);
         let mut conn = pool.acquire().await?;
 
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO sys_device_code \
              (tenant_id, device_code, user_code, interval_secs, expires_at, status) \
-             VALUES ($1, $2, $3, $4, $5, 'pending')",
-        )
+             VALUES ($1, $2, $3, $4, {}, 'pending')",
+            tz_placeholder(kind, 5),
+        ))
         .bind(tenant_id)
         .bind(&device_code)
         .bind(&user_code)
         .bind(interval_secs)
-        .bind(expires_at.to_rfc3339())
+        .bind(format_dt_for_db(expires_at))
         .execute(&mut *conn)
         .await?;
 
@@ -143,6 +145,7 @@ impl Admin {
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
 
         let pool = self.dbt(tenant_id);
+        let kind = self.kind(tenant_id);
         let mut conn = pool.acquire().await?;
 
         let row2 = sqlx::query(
@@ -157,21 +160,22 @@ impl Admin {
         let token_id = row2.last_insert_id();
 
         // 4. Lưu refresh_token hash vào sys_user (hoặc cập nhật nếu đã có)
-        sqlx::query(
+        sqlx::query(&format!(
             "INSERT INTO sys_user \
              (tenant_id, user_id, token_hash, token_id, expires_at) \
-             VALUES ($1, $2, $3, $4, $5) \
+             VALUES ($1, $2, $3, $4, {}) \
              ON CONFLICT (tenant_id, user_id) DO UPDATE SET \
                token_hash = EXCLUDED.token_hash, \
                token_id   = EXCLUDED.token_id, \
                expires_at = EXCLUDED.expires_at, \
                revoked_at = NULL",
-        )
+            tz_placeholder(kind, 5),
+        ))
         .bind(tenant_id)
         .bind(user_id)
         .bind(sha256_hex(refresh_token.as_bytes()))
         .bind(token_id)
-        .bind(expires_at_ts.to_rfc3339())
+        .bind(format_dt_for_db(expires_at_ts))
         .execute(&mut *conn)
         .await?;
 

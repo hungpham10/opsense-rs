@@ -48,7 +48,7 @@ pub fn kernel_runner_service(
     cfg: RunnerConfig,
     auth: Option<Arc<dyn Auth>>,
 ) -> KernelRunnerServer<RunnerService> {
-    RunnerService::new(registry, cfg, auth).with_limits()
+    RunnerService::new(registry, auth).with_limits()
 }
 
 /// Chọn `Auth` impl dựa trên `cfg`:
