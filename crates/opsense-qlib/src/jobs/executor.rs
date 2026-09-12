@@ -17,18 +17,18 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 
 use crate::playground::SharpeScore;
-use crate::qlib::calendar::{CryptoCalendar, StockCalendar};
-use crate::qlib::data_loader::FromQueryCandleSticks;
-use crate::qlib::fee::SimpleFixedFee;
-use crate::qlib::jobs::protocol::{
+use crate::calendar::{CryptoCalendar, StockCalendar};
+use crate::data_loader::FromQueryCandleSticks;
+use crate::fee::SimpleFixedFee;
+use crate::jobs::protocol::{
     BacktestJobSpec, JobEvent, JobEventKind, JobStatus, is_cancelled, release_user_slot,
     try_acquire_user_slot, write_status,
 };
-use crate::qlib::portfolio::{Order, Report};
-use crate::qlib::{Calendar, DataLoader, Fee, OrderEvent, Portfolio, Score};
-use models::resolver::Resolver;
-use vector_config_macro::transform;
-use vector_runtime::{Component, Event, Identify, Message, Outbound};
+use crate::portfolio::{Order, Report};
+use crate::{Calendar, DataLoader, Fee, OrderEvent, Portfolio, Score};
+use opsense_model::resolver::Resolver;
+use opsense_macros::transform;
+use opsense_libs::vector::runtime::{Component, Event, Identify, Message, Outbound};
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -110,7 +110,7 @@ async fn run_backtest(
         calendar,
         spec.resolution_for_rebuild.clone(),
         spec.resolution_for_test.clone(),
-        crate::qlib::portfolio::DEFAULT_SETTLEMENT_CANDLES,
+        crate::portfolio::DEFAULT_SETTLEMENT_CANDLES,
     )?;
 
     // Thu thập mọi biến cố lệnh qua notify callback → đẩy ra data plane

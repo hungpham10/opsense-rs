@@ -18,6 +18,8 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: opsense-postgres
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_DB: opsense
       POSTGRES_USER: opsense
@@ -37,6 +39,8 @@ services:
   valkey:
     image: valkey/valkey:9-alpine
     container_name: opsense-valkey
+    ports:
+      - "6379:6379"
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
@@ -72,6 +76,8 @@ services:
   opsense-runner:
     image: opsense-runner:${OPSENSE_TAG:-local}
     container_name: opsense-runner
+    ports:
+      - "50051:50051"
     networks: [opsense-net]
     healthcheck:
       test: ["CMD-SHELL", "/app/opsense runner --health-check || exit 1"]
@@ -83,6 +89,8 @@ services:
   opsense-runner-python:
     image: opsense-runner-python:${OPSENSE_TAG:-local}
     container_name: opsense-runner-python
+    ports:
+      - "50052:50051"
     networks: [opsense-net]
     healthcheck:
       test: ["CMD-SHELL", "/app/opsense runner --health-check || exit 1"]
@@ -94,6 +102,8 @@ services:
   opsense-runner-julia:
     image: opsense-runner-julia:${OPSENSE_TAG:-local}
     container_name: opsense-runner-julia
+    ports:
+      - "50053:50051"
     networks: [opsense-net]
     healthcheck:
       test: ["CMD-SHELL", "/app/opsense runner --health-check || exit 1"]

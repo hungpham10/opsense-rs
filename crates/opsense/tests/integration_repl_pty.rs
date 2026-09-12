@@ -3,7 +3,8 @@
 //! Test approach: spawn `opsense repl --runner <endpoint>` trong PTY, verify
 //! echo kernel round-trip end-to-end (multi-line input → block buffer → execute).
 //!
-//! Skip gracefully nếu runner không chạy hoặc binary chưa build.
+//! In integration mode (CI: `CI=true`), any failure panics so the workflow
+//! cannot silently go green. On local dev without compose, skip gracefully.
 
 mod common;
 
@@ -13,8 +14,8 @@ const REPL_PROMPT: &str = "opsense>";
 const ECHO_CONNECTED: &str = "Connected";
 const ECHO_RESULT_PREFIX: &str = "echo:";
 
-fn build_repl_session(bin_path: &str, runner_endpoint: &str) -> Option<rexpect::session::PtySession> {
-    let mut cmd = std::process::Command::new(bin_path);
+fn build_repl_session(runner_endpoint: &str) -> Option<rexpect::session::PtySession> {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_opsense"));
     cmd.args(["repl", "--runner", &format!("http://{runner_endpoint}")]);
     rexpect::session::spawn_command(cmd, Some(30_000)).ok()
 }
@@ -23,26 +24,25 @@ fn build_repl_session(bin_path: &str, runner_endpoint: &str) -> Option<rexpect::
 fn repl_runner_mode_runs_code_and_exits() {
     let runner_endpoint = common::runner_endpoint("echo");
 
-    // Build opsense binary nếu chưa có. Skip nếu không build được.
-    let bin_path = format!("{}/target/debug/opsense", env!("CARGO_MANIFEST_DIR"));
-    if !std::path::Path::new(&bin_path).exists() {
-        eprintln!("skipping: opsense binary not built at {bin_path}");
-        return;
-    }
-
     // Smoke: kiểm tra runner có reachable không trước khi spawn REPL.
     let probe = Command::new("timeout")
         .args(["2", "bash", "-c", &format!("</dev/tcp/{runner_endpoint}")])
         .output();
     if probe.is_err() {
+        if common::integration_mode() {
+            panic!("cannot connect to echo runner at {runner_endpoint} — CI requires it");
+        }
         eprintln!("skipping: cannot connect to runner at {runner_endpoint}");
         return;
     }
 
     // Spawn REPL.
-    let mut p = match build_repl_session(&bin_path, &runner_endpoint) {
+    let mut p = match build_repl_session(&runner_endpoint) {
         Some(p) => p,
         None => {
+            if common::integration_mode() {
+                panic!("failed to spawn repl — CI requires it");
+            }
             eprintln!("skipping: failed to spawn repl");
             return;
         }
@@ -68,22 +68,23 @@ fn repl_runner_mode_runs_code_and_exits() {
 fn repl_block_mode_accumulates_then_executes() {
     let runner_endpoint = common::runner_endpoint("echo");
 
-    let bin_path = format!("{}/target/debug/opsense", env!("CARGO_MANIFEST_DIR"));
-    if !std::path::Path::new(&bin_path).exists() {
-        eprintln!("skipping: opsense binary not built");
-        return;
-    }
     let probe = Command::new("timeout")
         .args(["2", "bash", "-c", &format!("</dev/tcp/{runner_endpoint}")])
         .output();
     if probe.is_err() {
+        if common::integration_mode() {
+            panic!("cannot connect to echo runner at {runner_endpoint} — CI requires it");
+        }
         eprintln!("skipping: runner not reachable");
         return;
     }
 
-    let mut p = match build_repl_session(&bin_path, &runner_endpoint) {
+    let mut p = match build_repl_session(&runner_endpoint) {
         Some(p) => p,
         None => {
+            if common::integration_mode() {
+                panic!("failed to spawn repl — CI requires it");
+            }
             eprintln!("skipping: failed to spawn repl");
             return;
         }

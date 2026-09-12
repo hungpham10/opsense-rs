@@ -9,9 +9,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use analysis::{AnalysisGrid, TradingGrid, TransitionAnalysis};
+use crate::grid::TradingGrid;
+use opsense_libs::grid::AnalysisGrid;
+use opsense_libs::transition::TransitionAnalysis;
 
-use crate::qlib::{FetchFn, ParamFn, Strategy};
+use crate::{FetchFn, ParamFn, Strategy};
 
 const INITIAL_CAPITAL: f64 = 100_000.0;
 

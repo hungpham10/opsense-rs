@@ -5,8 +5,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use vector_config_macro::sink;
-use vector_runtime::{Component, Event, Identify, Message, Outbound};
+use opsense_macros::sink;
+use opsense_libs::vector::runtime::{Component, Event, Identify, Message, Outbound};
 
 use super::redis_source::resolve_connection;
 

@@ -17,10 +17,12 @@ use axum::Extension;
 use opsense_core::TimeseriesStation;
 use opsense_core::Observation;
 use opsense_libs::vector::runtime::Component;
+use opsense_proto::pb::SessionParams;
 use tokio::sync::RwLock;
 
 use super::ReplHeaders;
-use crate::api::{AppState, NodeSummary, Status};
+use crate::api::{AppState, KernelSessionEntry, NodeSummary, Status};
+use crate::client::grpc::RunnerClient;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -91,6 +93,50 @@ fn env_attr_override(name: &str) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Kernel (Tầng 2) types
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(SimpleObject, Clone, Debug)]
+pub struct KernelSession {
+    /// Runner-assigned session id (= Ed25519 public key, base64).
+    pub id: String,
+    /// Backend requested at `kernelStart` (`python` / `julia` / `echo`).
+    pub backend: String,
+}
+
+#[derive(SimpleObject, Clone, Debug)]
+pub struct KernelResult {
+    /// True when execution completed without error or timeout.
+    pub ok: bool,
+    pub stdout: String,
+    pub stderr: String,
+    /// The final `result_value` as text, when the kernel produced one.
+    pub text: Option<String>,
+    /// The final `result_value` as number, when the kernel produced one.
+    pub number: Option<f64>,
+    /// Kernel-reported error message, if any.
+    pub error: Option<String>,
+    /// True when the runner timed out the execution.
+    pub timed_out: bool,
+}
+
+#[derive(SimpleObject, Clone, Debug)]
+pub struct KernelHealth {
+    pub ok: bool,
+    pub kernel_name: String,
+}
+
+/// Resolve the runner gRPC endpoint for a backend name.
+///
+/// Precedence: `OPSENSE_RUNNER_<BACKEND>` (e.g. `OPSENSE_RUNNER_PYTHON`) →
+/// `OPSENSE_RUNNER_GRPC` → compose DNS `opsense-runner-<backend>:50051`.
+fn runner_endpoint(backend: &str) -> String {
+    std::env::var(format!("OPSENSE_RUNNER_{}", backend.to_uppercase()))
+        .or_else(|_| std::env::var("OPSENSE_RUNNER_GRPC"))
+        .unwrap_or_else(|_| format!("opsense-runner-{backend}:50051"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Query root
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -131,6 +177,38 @@ impl QueryRoot {
             tracing::warn!(node = %node, "timeseries cache miss");
             Vec::new()
         }))
+    }
+
+    /// Danh sách kernel session đang sống trong host (Tầng 2).
+    async fn kernel_list_sessions(&self, ctx: &Context<'_>) -> Vec<KernelSession> {
+        state(ctx)
+            .kernel()
+            .ids()
+            .await
+            .into_iter()
+            .map(|(id, backend)| KernelSession { id, backend })
+            .collect()
+    }
+
+    /// Health của runner (Tầng 2). Cần ít nhất 1 kernel session đang sống.
+    async fn kernel_health(&self, ctx: &Context<'_>) -> async_graphql::Result<KernelHealth> {
+        let kernel = state(ctx).kernel();
+        let mut sessions = kernel.lock().await;
+        if sessions.is_empty() {
+            return Err(async_graphql::Error::new(
+                "no active kernel session — call kernelStart first",
+            ));
+        }
+
+        for entry in sessions.values_mut() {
+            match entry.client.health().await {
+                Ok(h) => {
+                    return Ok(KernelHealth { ok: h.ok, kernel_name: h.kernel_name });
+                }
+                Err(e) => tracing::warn!(backend = %entry.backend, "kernel health: {e}"),
+            }
+        }
+        Err(async_graphql::Error::new("no kernel session reachable"))
     }
 }
 
@@ -177,6 +255,93 @@ impl MutationRoot {
     async fn remove_attribute(&self, ctx: &Context<'_>, name: String) -> async_graphql::Result<bool> {
         Ok(state(ctx).remove_attribute(&name).await)
     }
+
+    /// Mở kernel session tới runner của `backend` (`python` / `julia` / `echo`).
+    /// Endpoint resolve theo `runner_endpoint` (env override hoặc compose DNS).
+    async fn kernel_start(
+        &self,
+        ctx: &Context<'_>,
+        backend: String,
+    ) -> async_graphql::Result<KernelSession> {
+        let endpoint = runner_endpoint(&backend);
+        let client = RunnerClient::connect(
+            &endpoint,
+            SessionParams {
+                session_id: format!("graphql-{backend}"),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("kernelStart '{backend}' at {endpoint}: {e}")))?;
+
+        let session = KernelSession { id: client.session_id().to_string(), backend: backend.clone() };
+        state(ctx)
+            .kernel()
+            .insert(session.id.clone(), KernelSessionEntry { client, backend })
+            .await;
+        Ok(session)
+    }
+
+    /// Chạy `code` trong kernel session `id` (multi-line được gửi nguyên xi —
+    /// kernel tự xử lý qua `exec(compile)` / `Meta.parseall()`).
+    async fn kernel_execute(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+        code: String,
+    ) -> async_graphql::Result<KernelResult> {
+        let outcome = {
+            let mut sessions = state(ctx).kernel().lock().await;
+            let entry = sessions
+                .get_mut(&id)
+                .ok_or_else(|| async_graphql::Error::new(format!("unknown kernel session '{id}'")))?;
+            entry.client.execute(&code).await
+        }
+        .map_err(|e| async_graphql::Error::new(format!("kernelExecute: {e}")))?;
+
+        Ok(KernelResult {
+            ok: outcome.ok(),
+            stdout: outcome.stdout(),
+            stderr: outcome.stderr(),
+            text: outcome.text().map(str::to_string),
+            number: outcome.number(),
+            error: outcome.error.map(|e| e.message),
+            timed_out: outcome.timed_out,
+        })
+    }
+
+    /// Huỷ execution đang chạy trong kernel session `id`.
+    async fn kernel_interrupt(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+    ) -> async_graphql::Result<bool> {
+        let mut sessions = state(ctx).kernel().lock().await;
+        let entry = sessions
+            .get_mut(&id)
+            .ok_or_else(|| async_graphql::Error::new(format!("unknown kernel session '{id}'")))?;
+        entry
+            .client
+            .interrupt()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("kernelInterrupt: {e}")))?;
+        Ok(true)
+    }
+
+    /// Đóng kernel session `id` và xoá khỏi registry.
+    async fn kernel_close(&self, ctx: &Context<'_>, id: String) -> async_graphql::Result<bool> {
+        let entry = state(ctx)
+            .kernel()
+            .remove(&id)
+            .await
+            .ok_or_else(|| async_graphql::Error::new(format!("unknown kernel session '{id}'")))?;
+        let mut client = entry.client;
+        client
+            .close()
+            .await
+            .map_err(|e| async_graphql::Error::new(format!("kernelClose: {e}")))?;
+        Ok(true)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -193,4 +358,33 @@ pub async fn graphql(
     req = req.data(app_state);
     req = req.data(Into::<i64>::into(tenant_id));
     schema.execute(req).await.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schema() -> Schema<QueryRoot, MutationRoot, EmptySubscription> {
+        Schema::build(QueryRoot, MutationRoot, EmptySubscription).finish()
+    }
+
+    /// Phase 2 GraphQL bridge: 6 kernel operations phải có trong SDL
+    /// (2 queries + 4 mutations) kèm đúng field của result types.
+    #[tokio::test]
+    async fn kernel_bridge_schema_surface() {
+        let sdl = schema().sdl();
+        for op in [
+            "kernelListSessions",
+            "kernelHealth",
+            "kernelStart",
+            "kernelExecute",
+            "kernelInterrupt",
+            "kernelClose",
+            "type KernelSession",
+            "type KernelResult",
+            "type KernelHealth",
+        ] {
+            assert!(sdl.contains(op), "schema missing `{op}`\n--- SDL ---\n{sdl}");
+        }
+    }
 }

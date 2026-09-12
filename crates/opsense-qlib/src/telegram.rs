@@ -10,8 +10,8 @@ use std::io::Error;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{error, warn};
-use vector_config_macro::sink;
-use vector_runtime::{Component, Identify, Message as VectorMessage, Outbound};
+use opsense_macros::sink;
+use opsense_libs::vector::runtime::{Component, Identify, Message as VectorMessage, Outbound};
 
 /// Telegram message được truyền giữa các components qua Vector runtime.
 /// Component producer (như StrategySandboxies) output message này,

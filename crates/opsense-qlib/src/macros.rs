@@ -357,7 +357,7 @@ macro_rules! onnx_model {
 #[macro_export]
 macro_rules! ema_indicator {
     ($graph:expr, $input:expr, $weight_name:expr, $output:expr, $window_size:expr, $period:expr) => {{
-        let ema_w = $crate::qlib::models::ema_weights($window_size, $period);
+        let ema_w = $crate::models::ema_weights($window_size, $period);
         $graph.initializer.push(onnx_initializer!($weight_name, &ema_w, $window_size as i64, 1));
         $graph.node.push(onnx_node!("MatMul", concat!("ema_", $period), [$input, $weight_name] -> [$output]));
     }};
@@ -376,7 +376,7 @@ macro_rules! atr_indicator {
         window_size: $ws:expr,
         period: $period:expr
     ) => {{
-        let atr_w = $crate::qlib::models::ema_weights($ws, $period);
+        let atr_w = $crate::models::ema_weights($ws, $period);
         $graph.initializer.push(onnx_initializer!($w_name, &atr_w, $ws as i64, 1));
 
         // Sub(highs, lows) -> hl
@@ -411,8 +411,8 @@ macro_rules! rsi_indicator {
         window_size: $ws:expr,
         period: $period:expr
     ) => {{
-        let gain_weights = $crate::qlib::models::rsi_weights($ws, $period);
-        let loss_weights = $crate::qlib::models::rsi_weights($ws, $period);
+        let gain_weights = $crate::models::rsi_weights($ws, $period);
+        let loss_weights = $crate::models::rsi_weights($ws, $period);
 
         $graph.initializer.push(onnx_initializer!($gain_w, &gain_weights, $ws as i64, 1));
         $graph.initializer.push(onnx_initializer!($loss_w, &loss_weights, $ws as i64, 1));

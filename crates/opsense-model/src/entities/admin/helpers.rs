@@ -123,6 +123,8 @@ mod tests {
         // Postgres timestamptz text representation (offset without minutes).
         let r = parse_dt(Some("2026-01-02 03:04:05+00".into())).unwrap();
         assert_eq!(r.map(|dt| dt.to_rfc3339()), Some("2026-01-02T03:04:05+00:00".into()));
+        let r = parse_dt(Some("2026-09-07 23:20:47+00".into())).unwrap();
+        assert_eq!(r.map(|dt| dt.to_rfc3339()), Some("2026-09-07T23:20:47+00:00".into()));
         // Postgres timestamptz text with fractional seconds.
         let r = parse_dt(Some("2026-09-06 23:09:22.416527+00".into())).unwrap();
         assert_eq!(

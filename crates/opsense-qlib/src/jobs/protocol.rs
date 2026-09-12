@@ -10,9 +10,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::qlib::portfolio::{Order, OrderType};
-use crate::qlib::{Calendar, DataLoader, Fee, OrderEvent, Score, Strategy};
-use models::resolver::Resolver;
+use crate::portfolio::{Order, OrderType};
+use crate::{Calendar, DataLoader, Fee, OrderEvent, Score, Strategy};
+use opsense_model::resolver::Resolver;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Redis key layout
@@ -189,7 +189,7 @@ pub enum JobEventKind {
     /// Strategy rebuild plan — snapshot dải giá grid sau rebuild (grid history)
     GridRebuilt {
         ts: u64,
-        grids: Vec<crate::qlib::GridSnapshot>,
+        grids: Vec<crate::GridSnapshot>,
     },
 }
 

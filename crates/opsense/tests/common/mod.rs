@@ -21,6 +21,14 @@ use std::time::{Duration, Instant};
 
 use reqwest::Client;
 
+/// Trả `true` khi chạy trong CI integration (GitHub Actions set `CI=true`).
+/// Ở chế độ này, mọi failure kết nối phải panic thay vì skip — đảm bảo
+/// test thật sự chạy và CI không "xanh giả".
+#[allow(dead_code)]
+pub fn integration_mode() -> bool {
+    std::env::var("CI").is_ok()
+}
+
 pub fn serve_url() -> String {
     // Mặc định dùng `localhost` (không phải `127.0.0.1`) để Host header
     // khớp với `host` trong seed `sql/postgres/dev/50-init-tenant.sql`.

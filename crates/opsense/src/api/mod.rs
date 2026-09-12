@@ -10,6 +10,7 @@ pub mod oauth;
 pub mod repl;
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ use axum::Json;
 use headers::Header;
 use http::{HeaderName, HeaderValue};
 use aws_sdk_s3::Client as S3Client;
+use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, StationKind};
@@ -31,6 +33,56 @@ use crate::api::oauth::OAuthMetrics;
 
 #[derive(Debug)]
 pub struct XTenantId(i64);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kernel registry (Tầng 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A runner session created through the GraphQL bridge.
+pub struct KernelSessionEntry {
+    pub client: crate::client::grpc::RunnerClient,
+    pub backend: String,
+}
+
+/// Registry of live runner sessions, keyed by session id (= Ed25519 public
+/// key assigned by the runner at `Start`).
+///
+/// A `tokio::sync::Mutex` (not std) because resolvers hold the lock across
+/// `.await` while an execute/interrupt RPC is in flight.
+#[derive(Clone, Default)]
+pub struct KernelRegistry {
+    sessions: Arc<Mutex<HashMap<String, KernelSessionEntry>>>,
+}
+
+impl KernelRegistry {
+    pub async fn insert(&self, id: String, entry: KernelSessionEntry) {
+        self.sessions.lock().await.insert(id, entry);
+    }
+
+    pub async fn remove(&self, id: &str) -> Option<KernelSessionEntry> {
+        self.sessions.lock().await.remove(id)
+    }
+
+    pub async fn ids(&self) -> Vec<(String, String)> {
+        self.sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, e)| (id.clone(), e.backend.clone()))
+            .collect()
+    }
+
+    /// Run `f` with mutable access to the session's client.
+    pub async fn lock(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, HashMap<String, KernelSessionEntry>> {
+        self.sessions.lock().await
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.sessions.lock().await.is_empty()
+    }
+}
 
 impl From<XTenantId> for i64 {
     fn from(tenant: XTenantId) -> Self {
@@ -78,6 +130,7 @@ pub struct AppState {
     runtime: Arc<RwLock<Runtime>>,
     admin_entity: Arc<opsense_model::entities::admin::Admin>,
     oauth_metrics: Arc<OAuthMetrics>,
+    kernel: KernelRegistry,
 }
 
 impl AppState {
@@ -117,7 +170,14 @@ impl AppState {
             oauth_metrics,
             secret,
             connector,
+            kernel: KernelRegistry::default(),
         })
+    }
+
+    /// Kernel session registry (Tầng 2 — runner gRPC sessions created via
+    /// GraphQL `kernelStart`).
+    pub fn kernel(&self) -> &KernelRegistry {
+        &self.kernel
     }
 
     pub async fn stop(&self) -> Result<(), Error> {

@@ -9,9 +9,9 @@ use std::io::Error;
 
 use serde::{Deserialize, Serialize};
 
-use schemas::CandleStick;
+use crate::candle::CandleStick;
 
-use crate::qlib::Extractor;
+use crate::Extractor;
 
 /// Extracts `[closes, highs, lows, prev_closes]` from a candle slice.
 ///

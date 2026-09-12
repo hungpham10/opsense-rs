@@ -11,15 +11,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 
-use algorithm::SGDOptimizer;
-use analysis::TradingGrid;
-use schemas::CandleStick;
+use opsense_libs::sgd::SGDOptimizer;
+use crate::grid::TradingGrid;
+use crate::candle::CandleStick;
 
 use super::calendar::to_timestamp_secs;
 use super::{Calendar, DataLoader, Fee, FetchFn, GridSnapshot, NotifyFn, OrderEvent, ParamFn, Score, Strategy};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Caching — weekly-block LRU (dùng algorithm::LruCache)
+// Caching — weekly-block LRU (dùng opsense_libs::lru::LruCache)
 //
 // Pattern từ ohcl.rs: chia time thành weekly blocks, mỗi block track
 // `covered_first`/`covered_last` là actual candle extents. Cache HIT khi
@@ -52,7 +52,7 @@ impl BlockCache {
 }
 
 /// LRU cache cho một cache key (ví dụ "1H:analysis"), keyed by block_id.
-type BlockLru = algorithm::LruCache<i64, BlockCache, 32>;
+type BlockLru = opsense_libs::lru::LruCache<i64, BlockCache, 32>;
 
 // Helper functions.
 // Đây là free functions để tránh borrow-checker issues với self.
@@ -1478,7 +1478,7 @@ impl Portfolio {
             let mut guard = cache.write().await;
             let lru = guard
                 .entry(cache_key.to_string())
-                .or_insert_with(|| algorithm::LruCache::new(1024)); // 256 blocks ~ 5 years
+                .or_insert_with(|| opsense_libs::lru::LruCache::new(1024)); // 256 blocks ~ 5 years
             Self::update_blocks(lru, &candles_full, block_from, block_to, to, now);
         }
 

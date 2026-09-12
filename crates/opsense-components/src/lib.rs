@@ -17,6 +17,7 @@ pub mod signal;
 pub mod station;
 
 pub use station::{
+    AnomalyStationTransform,
     CategoryStationTransform, PatternStationTransform, TimeseriesStationSink,
     TimeseriesStationTransform,
 };

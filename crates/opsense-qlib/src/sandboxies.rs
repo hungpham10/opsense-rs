@@ -15,12 +15,13 @@ use std::sync::Arc;
 use reqwest::Client as HttpClient;
 use reqwest_middleware::ClientBuilder;
 use reqwest_tracing::TracingMiddleware;
-use schemas::{CandleStick, Tick};
+use crate::candle::CandleStick;
+use crate::tick::Tick;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use vector_config_macro::transform;
-use vector_runtime::{Component, Identify, Message};
+use opsense_macros::transform;
+use opsense_libs::vector::runtime::{Component, Identify, Message};
 
 use super::{Calendar, Fee, FromQueryCandleSticks, Order, OrderEvent, Portfolio, Score, Strategy};
 
@@ -106,7 +107,7 @@ impl_tick_2_signals!(
         &self,
         _: usize,
         rx: &mut mpsc::Receiver<Message>,
-        tx: vector_runtime::Outbound,
+        tx: opsense_libs::vector::runtime::Outbound,
     ) -> Result<(), std::io::Error> {
         let tx_streams = tx.streams.clone();
 
@@ -165,7 +166,7 @@ impl_tick_2_signals!(
                         calendar.clone(),
                         sandbox.analysis_resolution.clone(),
                         sandbox.trading_resolution.clone(),
-                        crate::qlib::DEFAULT_SETTLEMENT_CANDLES,
+                        crate::DEFAULT_SETTLEMENT_CANDLES,
                     )?)),
                 };
 

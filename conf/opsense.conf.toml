@@ -41,3 +41,12 @@ mem_usage = 64.0
 # This filter simply iterates an array under `.data`.
 # jq_filter = ".data[]"
 # metrics = ["cpu_usage", "mem_usage"]
+
+# Anomaly detection (RCF + capacity breach). Uncomment and wire `inputs` to
+# a node emitting `{"observations": [...]}` payloads (http_source, ingest, ...).
+#
+# [[pipeline.components]]
+# type = "anomaly_station_transform"
+# id = "anomaly"
+# inputs = ["clock"]
+# threshold = 3.0

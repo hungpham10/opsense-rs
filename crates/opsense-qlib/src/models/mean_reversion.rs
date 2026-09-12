@@ -8,8 +8,8 @@
 //! Output 2: `sma` [1, 1]  (diagnostic)
 
 use super::{NUM_GRID_PARAMS, ema_weights, rsi_weights, sma_weights};
-use crate::qlib::Extractor;
-use crate::qlib::extractors::OhlcvExtractor;
+use crate::Extractor;
+use crate::extractors::OhlcvExtractor;
 
 /// Sigmoid inverse: given a target probability p in (0,1), returns the bias
 /// value b such that sigmoid(b) ≈ p (with zero weights).

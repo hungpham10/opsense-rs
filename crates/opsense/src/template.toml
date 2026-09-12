@@ -169,3 +169,33 @@ data_dir = ".opsense/lakehouse"
 # url = "http://127.0.0.1:8686"
 # jq_filter = ".data[]"
 # metrics = ["cpu_usage", "mem_usage"]
+
+# ------------------------------------------------------------------
+# C) Anomaly detection — RCF streaming + capacity breach.
+#    `anomaly_station_transform` scores each metric with Random Cut Forest
+#    and flags observations whose value breaches `[capacity]` maxima.
+#    Flagged observations (severity = error, labels.anomaly = true) are
+#    stored in this node's own timeseries station, queryable via
+#    `opsense_query({ source = "anomaly" })`.
+# ------------------------------------------------------------------
+# [[pipeline.components]]
+# type = "anomaly_station_transform"
+# id = "anomaly"
+# inputs = ["prom"]
+# threshold = 3.0                      # RCF score > 3.0 ⇒ abnormal (normal ~1.0)
+# num_trees = 50
+# sample_size = 256
+# shingle_size = 1                     # >1 to detect shape anomalies
+
+# ------------------------------------------------------------------
+# D) Financial backtest (opsense-qlib) — Redis-driven job executor.
+#    Requires the runtime context to hold `opsense_model::resolver::Resolver`
+#    (redis shards + S3). Jobs arrive as `backtest_jobs` payloads on the
+#    stream; events/status stream back out through `redis_sink` (JOB_STREAM_KEY).
+# ------------------------------------------------------------------
+# [[pipeline.components]]
+# type = "backtest_executor"
+# id = "backtest"
+# inputs = ["ingest"]
+# max_workers = 4
+# guard_ttl_secs = 3600

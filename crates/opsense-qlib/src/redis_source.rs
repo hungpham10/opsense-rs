@@ -6,9 +6,9 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use models::resolver::Resolver;
-use vector_config_macro::source;
-use vector_runtime::{Component, Context, Event, Identify, Message as VectorMessage, Outbound};
+use opsense_model::resolver::Resolver;
+use opsense_macros::source;
+use opsense_libs::vector::runtime::{Component, Context, Event, Identify, Message as VectorMessage, Outbound};
 
 /// Chế độ đọc của RedisSource.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

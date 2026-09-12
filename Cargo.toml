@@ -11,7 +11,8 @@ members = [
 	"crates/opsense-kernel-echo",
 	"crates/opsense-runner",
 	"crates/opsense-kernel-python",
-	"crates/opsense-kernel-julia"
+	"crates/opsense-kernel-julia",
+	"crates/opsense-qlib"
 ]
 
 [workspace.package]

@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 
 use opsense_model::secret::Secret;
 
-use crate::config::Config;
+use crate::config::{CapacityMap, Config};
 use crate::station::{Station, StationKind};
 
 pub type Stations = Arc<RwLock<HashMap<String, Station>>>;
@@ -20,6 +20,10 @@ pub struct Context {
     /// Resolved `[attributes]` (TOML + `OPSENSE_ATTR_*` env overrides) for
     /// template rendering in fetch nodes. Mutable via GraphQL `setAttribute`.
     attributes: Arc<RwLock<BTreeMap<String, String>>>,
+
+    /// `[capacity]` map (metric -> maximum). Anomaly/capacity transforms read
+    /// this to flag observations whose value breaches the metric's maximum.
+    capacity: CapacityMap,
 
     /// Registry of stations this process manages, keyed by component id
     /// (`Station::Category` / `Station::Pattern` / `Station::Timeseries`).
@@ -34,9 +38,16 @@ impl Context {
 
         Self {
             attributes,
+            capacity: cfg.capacity.clone(),
             secret,
             stations: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Maximum configured capacity for `metric`, if any.
+    #[must_use]
+    pub fn capacity(&self, metric: &str) -> Option<f64> {
+        self.capacity.get(metric).copied()
     }
 
     /// Snapshot of every attribute. Used by `Query.attributes` to expose the

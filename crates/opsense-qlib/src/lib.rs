@@ -1,21 +1,34 @@
+mod candle;
 mod calendar;
 mod data_loader;
 mod extractors;
 mod fee;
 mod graph;
+mod grid;
 mod jobs;
 mod macros;
 mod models;
+mod ohcl;
 mod opt_cache;
+mod playground;
 mod portfolio;
 mod redis_sink;
 mod redis_source;
+mod reload;
 mod sandboxies;
 mod strategies;
 mod telegram;
+mod tick;
 
+pub use candle::CandleStick;
 pub use calendar::{CryptoCalendar, ForexCalendar, StockCalendar};
 pub use data_loader::{FromCsv, FromQueryCandleSticks};
+pub use grid::TradingGrid;
+pub use opsense_libs::grid::{AnalysisGrid, SieveConfig};
+pub use opsense_libs::transition::TransitionAnalysis;
+pub use ohcl::QueryCandleSticks;
+pub use reload::Reload;
+pub use tick::Tick;
 /// Genotype DAG: `ops` = DNA alphabet, `nodes` = wiring. Compile sang ONNX
 /// reusable làm Genotype cho ML/neuroevolution.
 pub use extractors::OhlcvExtractor;
@@ -40,15 +53,19 @@ pub use redis_source::{RedisSource, RedisSourceMode};
 pub use strategies::{GridStrategy, VolatilityAdaptiveGridStrategy};
 pub use telegram::{TelegramMessage, TelegramSink};
 
+/// Re-export runtime duoi `crate::vector::runtime` de macro `#[source]`/`#[sink]`/`#[transform]`
+/// cua opsense-macros mo rong dung URL nhu trong opsense-components.
+pub mod vector {
+    pub use opsense_libs::vector::runtime;
+}
+pub use playground::SharpeScore;
+
 use std::fmt::Debug;
 use std::io::Error;
 use std::pin::Pin;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-
-use analysis::TradingGrid;
-use schemas::CandleStick;
 
 pub type FetchFn<'a> = &'a mut (
             dyn FnMut(

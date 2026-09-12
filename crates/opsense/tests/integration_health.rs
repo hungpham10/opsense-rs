@@ -1,16 +1,41 @@
 //! Smoke test Tầng 1: HTTP `/health` + GraphQL `Query.status`.
 //!
 //! Verify rằng `opsense-serve` đáp ứng cơ bản sau khi `docker compose up`.
-//! Skip gracefully nếu serve không chạy (dev chạy `cargo test` trước khi
-//! compose up vẫn pass).
+//! In integration mode (`CI=true`), failure panics so the workflow
+//! cannot silently go green. On local dev without compose, skip gracefully.
 
 mod common;
+
+async fn ensure_health(client: &reqwest::Client) -> bool {
+    match common::wait_for_health(client, 30).await {
+        Ok(()) => true,
+        Err(_) if common::integration_mode() => {
+            panic!("serve not reachable — CI requires `docker compose up`")
+        }
+        Err(_) => {
+            eprintln!("skipping: serve not reachable — run `docker compose up` first");
+            false
+        }
+    }
+}
+
+async fn ensure_pipeline(client: &reqwest::Client) -> bool {
+    match common::wait_for_pipeline(client, 30).await {
+        Ok(()) => true,
+        Err(_) if common::integration_mode() => {
+            panic!("pipeline not ready — CI requires `docker compose up`")
+        }
+        Err(_) => {
+            eprintln!("skipping: pipeline not ready — run `docker compose up` first");
+            false
+        }
+    }
+}
 
 #[tokio::test]
 async fn health_endpoint_returns_ok() {
     let client = reqwest::Client::new();
-    if common::wait_for_health(&client, 30).await.is_err() {
-        eprintln!("skipping: serve not reachable — run `docker compose up` first");
+    if !ensure_health(&client).await {
         return;
     }
     let resp = client
@@ -26,8 +51,7 @@ async fn health_endpoint_returns_ok() {
 #[tokio::test]
 async fn graphql_status_returns_nodes_and_stations() {
     let client = reqwest::Client::new();
-    if common::wait_for_pipeline(&client, 30).await.is_err() {
-        eprintln!("skipping: pipeline not ready — run `docker compose up` first");
+    if !ensure_pipeline(&client).await {
         return;
     }
     let resp = client

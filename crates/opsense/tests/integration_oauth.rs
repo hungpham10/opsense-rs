@@ -9,7 +9,8 @@
 //! `id_token`, sau đó đi qua device flow thật. Cover toàn bộ Nginx →
 //! lua-resty-openidc → UDS → Axum chain.
 //!
-//! Skip gracefully nếu compose chưa chạy.
+//! In integration mode (`CI=true`), failure panics so the workflow
+//! cannot silently go green. On local dev without compose, skip gracefully.
 
 mod common;
 
@@ -23,6 +24,51 @@ const DEX_USER: &str = "dev-user@example.com";
 const DEX_PASSWORD: &str = "password";
 const DEX_CLIENT_ID: &str = "opsense-test";
 const DEX_CLIENT_SECRET: &str = "opsense-dev-shared-secret-32-bytes-min!!";
+
+/// Wait for serve to be healthy. Returns `true` if ready, `false` to skip.
+async fn ensure_serve(client: &reqwest::Client) -> bool {
+    match common::wait_for_health(client, 10).await {
+        Ok(()) => true,
+        Err(_) if common::integration_mode() => {
+            panic!("serve not reachable — CI requires `docker compose up`")
+        }
+        Err(_) => {
+            eprintln!("skipping: serve not reachable — run `docker compose up` first");
+            false
+        }
+    }
+}
+
+/// Wait for Dex to be reachable. Returns `true` if ready, `false` to skip.
+async fn ensure_dex() -> bool {
+    match common::wait_for_dex(5).await {
+        Ok(()) => true,
+        Err(_) if common::integration_mode() => {
+            panic!("Dex not reachable — CI requires `docker compose up`")
+        }
+        Err(_) => {
+            eprintln!("skipping: Dex not reachable — check OPSENSE_DEX_ISSUER or run `docker compose up` first");
+            false
+        }
+    }
+}
+
+/// Wait for DB to be reachable. Returns `true` if ready, `false` to skip.
+async fn ensure_db() -> bool {
+    let db_dsn = std::env::var("DB_DSN").unwrap_or_else(|_| {
+        "postgres://opsense:opsense123@localhost:5432/opsense".into()
+    });
+    match sqlx::PgPool::connect(&db_dsn).await {
+        Ok(_) => true,
+        Err(e) if common::integration_mode() => {
+            panic!("cannot connect to postgres — CI requires DB: {e}")
+        }
+        Err(e) => {
+            eprintln!("skipping: cannot connect to postgres: {e}");
+            false
+        }
+    }
+}
 
 // =========================================================================
 // Response types
@@ -370,15 +416,10 @@ async fn oauth_full_flow_dex_nginx_axum() {
         .expect("reqwest client");
 
     // Skip gracefully nếu compose chưa chạy.
-    if common::wait_for_health(&client, 10).await.is_err() {
-        eprintln!("skipping: serve not reachable — run `docker compose up` first");
+    if !ensure_serve(&client).await {
         return;
     }
-
-    // Skip gracefully nếu Dex không reachable từ host (DNS `opsense-dex` chỉ
-    // resolve trong compose network — trên host phải dùng localhost:5556).
-    if common::wait_for_dex(5).await.is_err() {
-        eprintln!("skipping: Dex not reachable — check OPSENSE_DEX_ISSUER or run `docker compose up` first");
+    if !ensure_dex().await {
         return;
     }
 
@@ -506,8 +547,10 @@ async fn oauth_full_flow_dex_nginx_axum() {
 #[tokio::test]
 async fn oauth_db_row_persisted() {
     let client = reqwest::Client::new();
-    if common::wait_for_health(&client, 10).await.is_err() {
-        eprintln!("skipping: serve not reachable");
+    if !ensure_serve(&client).await {
+        return;
+    }
+    if !ensure_db().await {
         return;
     }
 
@@ -515,13 +558,7 @@ async fn oauth_db_row_persisted() {
         "postgres://opsense:opsense123@localhost:5432/opsense".into()
     });
 
-    let pool = match sqlx::PgPool::connect(&db_dsn).await {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("skipping: cannot connect to postgres: {e}");
-            return;
-        }
-    };
+    let pool = sqlx::PgPool::connect(&db_dsn).await.expect("connect pool");
 
     let row: Option<(i64,)> = sqlx::query_as(
         "SELECT COUNT(*) FROM sys_user WHERE tenant_id = 1 AND user_id = 'dev-user'",

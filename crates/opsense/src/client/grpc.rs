@@ -174,6 +174,11 @@ impl RunnerClient {
         Ok(health)
     }
 
+    /// Session ID assigned by the runner (= Ed25519 public key, base64).
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     /// Decrypt a challenge ciphertext received from the runner.
     ///
     /// Usage:

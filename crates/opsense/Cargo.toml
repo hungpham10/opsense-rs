@@ -60,6 +60,7 @@ tokio-util = "0.7"
 opsense-model = { path = "../opsense-model" }
 opsense-core = { path = "../opsense-core" }
 opsense-components = { path = "../opsense-components" }
+opsense-qlib = { path = "../opsense-qlib" }
 opsense-proto = { path = "../opsense-proto" }
 opsense-libs = { path = "../opsense-libs" }
 opsense-runner = { path = "../opsense-runner" }
