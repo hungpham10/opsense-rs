@@ -12,12 +12,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use opsense_components::vector::runtime::{Component, Event, Runtime};
 use opsense_components::{
-    new_station_registry, ClockSource, CollectorSink, IngestSource, OpsenseContext,
+    ClockSource, CollectorSink, IngestSource, OpsenseContext, new_station_registry,
 };
+use opsense_core::Context;
 use opsense_core::collector::Collector;
 use opsense_core::registry;
 use opsense_core::source::{SourceError, TelemetrySource};
-use opsense_core::Context;
 use opsense_core::{Stage, Watermarks};
 use opsense_model::{Observation, Signal, TelemetryKind};
 use opsense_rhai::{RhaiTransform, ScriptSource};
@@ -250,14 +250,16 @@ async fn rhai_script_receives_params_and_attributes() {
     // An invalid param name is rejected before the script ever runs.
     let mut params = std::collections::BTreeMap::new();
     params.insert("bad name".to_string(), serde_json::json!(1));
-    assert!(opsense_rhai::call_process_with(
-        ScriptSource::Inline("fn process(o) { o }".into()),
-        serde_json::json!([]),
-        params,
-        std::collections::BTreeMap::new(),
-    )
-    .await
-    .is_err());
+    assert!(
+        opsense_rhai::call_process_with(
+            ScriptSource::Inline("fn process(o) { o }".into()),
+            serde_json::json!([]),
+            params,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+        .is_err()
+    );
 
     // Without params the legacy two-arg entry point still works unchanged.
     let out = opsense_rhai::call_process(

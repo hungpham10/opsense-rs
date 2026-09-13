@@ -1,6 +1,6 @@
 //! Executes `scripts/disk_grid_report.rhai` through the Rhai runtime.
 
-use opsense_rhai::{call_process, ScriptSource};
+use opsense_rhai::{ScriptSource, call_process};
 use std::path::Path;
 
 fn script() -> ScriptSource {
@@ -34,7 +34,10 @@ async fn disk_grid_report_flow() {
     // 12k điểm là biên trên — vượt ~13k sẽ chạm max_map_size toàn cục của Rhai
     // khi đọc labels từng observation (giới hạn động cơ, không phải script).
     let mut big: Vec<serde_json::Value> = Vec::new();
-    let n: i64 = std::env::var("GRID_N").ok().and_then(|v| v.parse().ok()).unwrap_or(12_000);
+    let n: i64 = std::env::var("GRID_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12_000);
     for i in 0..n {
         big.push(point(now - (n - i) * 60, "/", 35.0 + (i % 7) as f64));
     }
@@ -46,7 +49,12 @@ async fn disk_grid_report_flow() {
     let out = call_process(script(), input).await.expect("script runs");
     eprintln!("out = {out:?}");
     assert_eq!(out.len(), 5); // 4 đĩa + 1 summary
-    assert!(out[0]["metric_id"].as_str().unwrap().starts_with("disk_grid_band:"));
+    assert!(
+        out[0]["metric_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("disk_grid_band:")
+    );
     assert!(out[0]["labels"]["band"].is_string());
     assert_eq!(out[4]["metric_id"], serde_json::json!("disk_grid_summary"));
 }

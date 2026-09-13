@@ -13,6 +13,7 @@ use tokio_util::codec::{Decoder, Encoder};
 
 /// CONTROL: protobuf `Envelope`.
 pub const TAG_CONTROL: u8 = 0x01;
+
 /// ARROW: one Arrow IPC stream segment.
 pub const TAG_ARROW: u8 = 0x02;
 
@@ -137,8 +138,8 @@ impl Decoder for FrameCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pb::{envelope, Envelope, Hello, Welcome};
     use crate::PROTOCOL_VERSION;
+    use crate::pb::{Envelope, Hello, Welcome, envelope};
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::duplex;
     use tokio_util::codec::{FramedRead, FramedWrite};

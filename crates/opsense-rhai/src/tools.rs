@@ -202,8 +202,8 @@ fn register_time(eng: &mut rhai::Engine) {
 /// The Rhai engine runs on a blocking thread, so these bridge into the async
 /// registry/station API via the current tokio runtime handle.
 fn register_station_lookups(eng: &mut rhai::Engine) {
-    use opsense_core::registry;
     use opsense_core::Stage;
+    use opsense_core::registry;
     use tokio::runtime::Handle;
 
     fn resolve_stage(name: &str) -> Stage {

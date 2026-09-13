@@ -147,6 +147,7 @@ class LiveStdout(io.TextIOBase):
 
 
 def probe_packages(names):
+    import importlib.metadata as importlib_metadata
     infos = []
     for name in names:
         spec = importlib.util.find_spec(name)
@@ -154,8 +155,7 @@ def probe_packages(names):
         available = spec is not None
         if available:
             try:
-                import importlib.metadata
-                version = importlib.metadata.version(
+                version = importlib_metadata.version(
                     "protobuf" if name == "google.protobuf" else name)
             except Exception:
                 pass

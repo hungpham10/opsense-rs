@@ -28,11 +28,6 @@ use tokio::sync::RwLock;
 use crate::radix::{self, Element, OnMatchCallback, Radix, SearchMatcher};
 use crate::storage::{CategoryStorage, EMPTY, InMemoryStorage};
 
-// ==================== Constants ====================
-
-/// Giới hạn cứng số kết quả trả về.
-const MAX_RESULTS: usize = 5000;
-
 // ==================== Error ====================
 
 #[derive(Debug)]
@@ -393,6 +388,10 @@ impl<T: Element> Search<T> {
     /// - `depth` — số hop tối đa: chỉ trả key dài ≤ `depth + 1` phần tử
     ///   (VD: `depth = 1` → chỉ edge `[A, B]`, không trả path dài hơn).
     ///   `None` = không giới hạn độ dài key.
+    /// - `offset` — skip candidate node có `node_id < offset`.
+    ///   `None` = không lọc (dò tất cả candidates).
+    /// - `limit` — giới hạn số results trả về.
+    ///   `None` = không giới hạn (dùng `MAX_RESULTS` làm cap cứng).
     /// - Trả về `(record_idx, metadata)` — metadata `None` nếu key insert
     ///   không kèm meta. Dedup theo record.
     ///
@@ -401,6 +400,8 @@ impl<T: Element> Search<T> {
         &self,
         pattern: &[T],
         depth: Option<usize>,
+        offset: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<Vec<(usize, Option<Vec<u8>>)>> {
         if pattern.is_empty() {
             return Err(Error::NotFound);
@@ -427,7 +428,15 @@ impl<T: Element> Search<T> {
         let mut seen = HashSet::new();
         let mut record_ids = Vec::new();
         for &node_id in &candidates {
-            if record_ids.len() >= MAX_RESULTS {
+            // Apply offset filter: only consider nodes with node_id >= offset
+            if let Some(offset_val) = offset
+                && node_id < offset_val
+            {
+                continue;
+            }
+            if let Some(limit) = limit
+                && record_ids.len() >= limit
+            {
                 break;
             }
             for rid in self
@@ -438,7 +447,9 @@ impl<T: Element> Search<T> {
             {
                 if seen.insert(rid) {
                     record_ids.push(rid);
-                    if record_ids.len() >= MAX_RESULTS {
+                    if let Some(limit) = limit
+                        && record_ids.len() >= limit
+                    {
                         break;
                     }
                 }
@@ -464,7 +475,9 @@ impl<T: Element> Search<T> {
                 }
                 let meta = storage.get_meta(rid).await?;
                 results.push((rid, meta));
-                if results.len() >= MAX_RESULTS {
+                if let Some(limit) = limit
+                    && results.len() >= limit
+                {
                     break;
                 }
             }
@@ -485,7 +498,7 @@ impl<T: Element> Search<T> {
     /// Chain model không còn dùng prefix match (callers = substring search, callees
     /// = đọc chain stream) — giữ làm API search đầy đủ cho tầng trên dùng sau.
     #[allow(dead_code)]
-    pub async fn search_prefix(&self, prefix: &[T]) -> Result<Vec<(Vec<T>, usize)>> {
+    pub async fn start_with(&self, prefix: &[T]) -> Result<Vec<(Vec<T>, usize)>> {
         if prefix.is_empty() {
             return Ok(Vec::new());
         }
@@ -555,11 +568,11 @@ mod tests {
         idx.insert_chain(3, b"help", &no_metas(4)).await.unwrap();
 
         // Prefix "hel" khớp cả hello + help.
-        let hits = idx.search(b"hel", None).await.unwrap();
+        let hits = idx.search(b"hel", None, None, None).await.unwrap();
         assert_eq!(hits.len(), 2);
         // Substring "llo" NẰM GIỮA key "hello" — radix::search_prefix không
         // khớp được, KMP + DFS phải dò xuống nhánh.
-        let hits = idx.search(b"llo", None).await.unwrap();
+        let hits = idx.search(b"llo", None, None, None).await.unwrap();
         assert_eq!(hits.len(), 1, "substring 'llo' chỉ có trong 'hello'");
         assert_eq!(hits[0].0, 1);
 
@@ -580,7 +593,7 @@ mod tests {
         idx.insert_chain(2, b"help", &no_metas(4)).await.unwrap();
         idx.insert_chain(3, b"held", &no_metas(4)).await.unwrap();
 
-        let hits = idx.search(b"llo", None).await.unwrap();
+        let hits = idx.search(b"llo", None, None, None).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, 1, "record 'hello' phải được tìm thấy sau split");
     }
@@ -593,14 +606,14 @@ mod tests {
         idx.insert_chain(2, &[1, 2, 3], &no_metas(3)).await.unwrap();
 
         // depth = 1 hop → chỉ key dài ≤ 2 ([1,2]).
-        let d1 = idx.search(&[1], Some(1)).await.unwrap();
+        let d1 = idx.search(&[1], Some(1), None, None).await.unwrap();
         assert_eq!(d1.len(), 1);
         assert_eq!(d1[0].0, 1);
         // depth = 2 hop → cả [1,2] và [1,2,3].
-        let d2 = idx.search(&[1], Some(2)).await.unwrap();
+        let d2 = idx.search(&[1], Some(2), None, None).await.unwrap();
         assert_eq!(d2.len(), 2);
         // Không giới hạn depth → cả 2.
-        let all = idx.search(&[1], None).await.unwrap();
+        let all = idx.search(&[1], None, None, None).await.unwrap();
         assert_eq!(all.len(), 2);
     }
 
@@ -614,7 +627,7 @@ mod tests {
             "duplicate phải báo lỗi"
         );
 
-        let hits = idx.search(b"abc", None).await.unwrap();
+        let hits = idx.search(b"abc", None, None, None).await.unwrap();
         assert_eq!(hits.len(), 1, "duplicate key không tạo record mới");
         assert_eq!(hits[0].0, 1, "record giữ bản đầu tiên");
     }
@@ -623,13 +636,13 @@ mod tests {
     async fn test_search_not_found() {
         // Index rỗng.
         let idx = Search::in_memory(4);
-        assert!(idx.search(b"nope", None).await.is_err());
+        assert!(idx.search(b"nope", None, None, None).await.is_err());
         // Có dữ liệu nhưng pattern không tồn tại.
         let mut idx = Search::in_memory(4);
         idx.insert_chain(1, b"hello", &no_metas(5)).await.unwrap();
-        assert!(idx.search(b"xyz", None).await.is_err());
+        assert!(idx.search(b"xyz", None, None, None).await.is_err());
         // Pattern rỗng.
-        assert!(idx.search(b"", None).await.is_err());
+        assert!(idx.search(b"", None, None, None).await.is_err());
     }
 
     #[tokio::test]
@@ -664,7 +677,7 @@ mod tests {
         assert!(idx.get_chain(1).await.unwrap().is_some());
 
         idx.clear().await.unwrap();
-        assert!(idx.search(b"hello", None).await.is_err());
+        assert!(idx.search(b"hello", None, None, None).await.is_err());
         assert_eq!(idx.get_node_meta(104).await.unwrap(), None);
         assert_eq!(idx.get_chain(1).await.unwrap(), None);
     }
@@ -681,13 +694,13 @@ mod tests {
                 .await
                 .unwrap();
             idx.insert_chain(2, b"world", &no_metas(5)).await.unwrap();
-            let hits = idx.search(b"llo", None).await.unwrap();
+            let hits = idx.search(b"llo", None, None, None).await.unwrap();
             assert_eq!(hits.len(), 1);
             assert_eq!(hits[0].0, 1);
         }
         // Reopen: dữ liệu + node meta + chains sống trên đĩa.
         let mut idx = Search::sqlite(4, path).await.unwrap();
-        let hits = idx.search(b"wor", None).await.unwrap();
+        let hits = idx.search(b"wor", None, None, None).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(
             idx.get_node_meta(b'h' as usize).await.unwrap().as_deref(),
@@ -695,9 +708,50 @@ mod tests {
         );
         assert_eq!(idx.get_chain(1).await.unwrap(), Some(b"hello".to_vec()));
         // Depth filter dùng key_len persist: "world" dài 5 > 2 → bị loại.
-        assert!(idx.search(b"wor", Some(1)).await.is_err());
+        assert!(idx.search(b"wor", Some(1), None, None).await.is_err());
         // Clear → index rỗng, search báo NotFound.
         idx.clear().await.unwrap();
-        assert!(idx.search(b"wor", None).await.is_err());
+        assert!(idx.search(b"wor", None, None, None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_search_offset_by_node_id() {
+        let mut idx = Search::in_memory(4);
+        idx.insert_chain(1, b"hello", &no_metas(5)).await.unwrap();
+        idx.insert_chain(2, b"help", &no_metas(4)).await.unwrap();
+        idx.insert_chain(3, b"held", &no_metas(4)).await.unwrap();
+        idx.insert_chain(4, b"world", &no_metas(5)).await.unwrap();
+
+        // Không có offset → tìm thấy tất cả (4 records).
+        let all = idx.search(b"he", None, None, None).await.unwrap();
+        assert_eq!(all.len(), 3, "hel* phải khớp hello + help + held");
+
+        // offset = None → tương đương không có offset.
+        let none_offset = idx.search(b"he", None, None, None).await.unwrap();
+        assert_eq!(none_offset.len(), all.len());
+
+        // Lấy node_id của candidate chứa element 'h' để dùng làm offset.
+        // Các candidate là node từ shortcut index của shard 'h'.
+        // Khi offset >= max node_id → không kết quả.
+        let storage = idx.storage.read().await;
+        let candidates = storage
+            .get_shortcut_nodes(radix::shard_of(b'h', 4), &b'h'.encode())
+            .await
+            .unwrap();
+        drop(storage);
+
+        if !candidates.is_empty() {
+            let max_node_id = *candidates.iter().max().unwrap();
+            // offset = max_node_id + 1 → không candidate nào thỏa → NotFound.
+            assert!(
+                idx.search(b"he", None, Some(max_node_id + 1), None)
+                    .await
+                    .is_err()
+            );
+
+            // offset = 0 → tất cả candidate đều được dò (giống None).
+            let offset_zero = idx.search(b"he", None, Some(0), None).await.unwrap();
+            assert_eq!(offset_zero.len(), all.len());
+        }
     }
 }

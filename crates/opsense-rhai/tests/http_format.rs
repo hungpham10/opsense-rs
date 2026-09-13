@@ -10,10 +10,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use opsense_components::vector::runtime::{Component, Message, Outbound};
-use opsense_components::{new_station_registry, signal, OpsenseContext};
+use opsense_components::{OpsenseContext, new_station_registry, signal};
+use opsense_core::Context;
 use opsense_core::collector::Collector;
 use opsense_core::registry;
-use opsense_core::Context;
 use opsense_core::{Stage, Watermarks};
 
 /// Serve a canned Prometheus matrix response and record request lines.

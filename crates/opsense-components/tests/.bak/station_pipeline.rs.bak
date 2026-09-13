@@ -1,0 +1,174 @@
+//! The timeseries station end-to-end under the station-only storage model:
+//! `station_sink` reads its window from the UPSTREAM node's station
+//! (resolved through the signal's `src` tag), snapshots it into its own
+//! cache, publishes the handle in the global registry, and serves
+//! Prometheus-shaped history over HTTP.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use opsense_components::vector::runtime::{Component, Message, Outbound};
+use opsense_components::{OpsenseContext, new_station_registry, signal};
+use opsense_core::Context;
+use opsense_core::collector::Collector;
+use opsense_core::registry;
+use opsense_core::{Stage, Station, Watermarks};
+use opsense_model::{Observation, Signal, TelemetryKind};
+use tokio::sync::RwLock;
+
+fn obs(ts: i64, metric: &str, value: f64) -> Observation {
+    Observation::new(
+        ts,
+        metric.into(),
+        TelemetryKind::Metric,
+        Signal::Utilization,
+        value,
+    )
+}
+
+/// Grab a probably-free localhost port (bind-and-release; fine for tests).
+async fn free_port() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    port
+}
+
+#[tokio::test]
+async fn station_snapshots_upstream_and_serves_prometheus_shaped_history() {
+    let id = format!("tsdb-it-{}", std::process::id());
+    let upstream_id = format!("processor-it-{}", std::process::id());
+    let port = free_port().await;
+
+    // Upstream node's OWN station holds the produced data.
+    let upstream = Arc::new(RwLock::new(Station::timeseries(1024)));
+    upstream
+        .write()
+        .await
+        .append(
+            Stage::Processed,
+            &[
+                obs(100, "cpu", 30.0),
+                obs(200, "cpu", 40.0),
+                obs(200, "mem", 7.5),
+            ],
+        )
+        .await;
+    assert!(registry::register_station(&upstream_id, upstream).await);
+
+    let ctx = Arc::new(OpsenseContext::new(
+        Arc::new(Collector::new(vec![])),
+        Watermarks::new(),
+        Arc::new(BTreeMap::new()),
+        new_station_registry(),
+    ));
+    let watermarks = ctx.watermarks().clone();
+
+    let component: Box<dyn Component> = serde_json::from_value(serde_json::json!({
+        "type": "timeseries_station_sink",
+        "id": id,
+        "inputs": [upstream_id],
+        "bind": format!("127.0.0.1:{port}"),
+    }))
+    .expect("station node must deserialize");
+
+    // One processed(ts) cycle sourced from the upstream station, then close.
+    let (tx_in, mut rx) = tokio::sync::mpsc::channel::<Message>(4);
+    tx_in
+        .send(signal::tagged(signal::processed(300), &upstream_id))
+        .await
+        .expect("send");
+    drop(tx_in);
+
+    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move { while ev_rx.recv().await.is_some() {} });
+
+    component
+        .run(
+            0,
+            &mut rx,
+            Outbound {
+                streams: vec![],
+                broadcast: None,
+                event: ev_tx,
+                ctx: Some(ctx),
+            },
+        )
+        .await
+        .expect("cycle must succeed");
+
+    // Cursor advanced; the snapshot landed in the global registry too.
+    assert_eq!(watermarks.get_node(&id), 300);
+    let published = registry::station(&id).await.expect("station registered");
+    assert_eq!(
+        published
+            .read()
+            .await
+            .query(Stage::Processed, "cpu", 0, i64::MAX)
+            .await
+            .len(),
+        2
+    );
+
+    // Give the detached axum task a beat to accept connections.
+    let base = format!("http://127.0.0.1:{port}");
+    let mut deadline = 50;
+    let health = loop {
+        if let Ok(resp) = reqwest::get(format!("{base}/health")).await {
+            break resp.text().await.unwrap();
+        }
+        deadline -= 1;
+        assert!(deadline > 0, "station http never came up");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(health, "OK");
+
+    // query_range speaks Prometheus: matrix envelope, __name__, string values.
+    let matrix: serde_json::Value = reqwest::get(format!(
+        "{base}/api/v1/query_range?query=cpu&start=0&end=999"
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(matrix["status"], "success");
+    assert_eq!(matrix["data"]["resultType"], "matrix");
+    assert_eq!(matrix["data"]["result"][0]["metric"]["__name__"], "cpu");
+    let values = matrix["data"]["result"][0]["values"].as_array().unwrap();
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0][0], serde_json::json!(100.0));
+    // Prometheus encodes values as strings; parse rather than compare text.
+    assert_eq!(values[0][1].as_str().unwrap().parse::<f64>().unwrap(), 30.0);
+
+    // Label equality matchers filter series.
+    let instant: serde_json::Value = reqwest::get(format!(
+        "{base}/api/v1/query?query=mem&time=250&lookback=250"
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(instant["data"]["resultType"], "vector");
+    assert_eq!(
+        instant["data"]["result"][0]["value"][1]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap(),
+        7.5
+    );
+
+    // Native debug route returns plain observation JSON.
+    let native: Vec<Observation> = reqwest::get(format!(
+        "{base}/observations?metric=cpu&from_ts=0&to_ts=999"
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(native.len(), 2);
+    assert_eq!(native[1].value, 40.0);
+}

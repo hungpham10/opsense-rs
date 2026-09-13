@@ -1,0 +1,112 @@
+name: Integration
+
+# Trigger:
+#   - push to main        → build + test (gate trước deploy)
+#   - PR to main          → build + test (gate trước merge)
+#   - tag v*              → build + test (gate trước release image publish)
+#
+# Test approach: full prod flow (Nginx + UDS + OIDC provider Dex + Axum).
+# Build 4 images qua Earthly, compose up 5 services (postgres, valkey,
+# opsense-dex, opsense-serve, 3 runners), chạy 4 integration test files.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  OPSENSE_TAG: ci-${{ github.sha }}
+  COMPOSE_PROJECT_NAME: opsense-it-${{ github.run_id }}
+
+jobs:
+  integration:
+    name: Build + Compose + Integration Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # Postgres + valkey chạy trong compose (xem docker-compose.yml).
+    # GitHub Actions runner đã có Docker sẵn, không cần Docker-in-Docker.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install protoc
+        # opsense-proto/build.rs invokes tonic-prost-build, which shells
+        # out to `protoc`.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.94'
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration
+
+      - name: Setup Earthly
+        uses: earthly/actions-setup@v1
+
+      - name: Build 4 images via Earthly
+        # Earthly build serve + 3 runners với tag :ci-$SHA, không push registry.
+        # Dex không build (dùng image ghcr.io/dexidp/dex:v2.41.1 trực tiếp).
+        run: earthly +all-local
+
+      - name: Tag :ci aliases cho compose
+        run: |
+          docker tag opsense-runner:local opsense-runner:${{ env.OPSENSE_TAG }}
+          docker tag opsense-runner-python:local opsense-runner-python:${{ env.OPSENSE_TAG }}
+          docker tag opsense-runner-julia:local opsense-runner-julia:${{ env.OPSENSE_TAG }}
+
+      - name: Compose up 7 services (4 opsense + postgres + valkey + dex)
+        # 7 services: postgres, valkey, opsense-dex, opsense-serve,
+        # opsense-runner, opsense-runner-python, opsense-runner-julia.
+        run: OPSENSE_TAG=${{ env.OPSENSE_TAG }} docker compose up -d --wait --wait-timeout 240
+
+      - name: Verify all services healthy
+        run: |
+          OPSENSE_TAG=${{ env.OPSENSE_TAG }} docker compose ps --format json \
+            | jq -s -r '.[] | "\(.Service): \(.Health)"' \
+            | tee compose-health.txt
+          grep -q "healthy" compose-health.txt || (echo "FAIL: not all services healthy" && exit 1)
+
+      - name: Build test binaries (no run yet)
+        run: cargo build --workspace --all-targets
+
+      - name: Run integration test suite (full prod flow)
+        env:
+          OPSENSE_SERVE_URL: http://localhost:8080
+          OPSENSE_RUNNER_ECHO: 127.0.0.1:50051
+          OPSENSE_RUNNER_PYTHON: 127.0.0.1:50052
+          OPSENSE_RUNNER_JULIA: 127.0.0.1:50053
+          DB_DSN: postgres://opsense:opsense123@127.0.0.1:5432/opsense
+        run: |
+          cargo test --workspace \
+            --test integration_health \
+            --test integration_oauth \
+            --test integration_runner_grpc \
+            --test integration_repl_pty \
+            -- --test-threads=1 --nocapture
+
+      - name: Dump compose logs (on failure)
+        if: failure()
+        run: |
+          OPSENSE_TAG=${{ env.OPSENSE_TAG }} docker compose logs --no-color --tail=300 > compose-failure.log
+          cat compose-failure.log
+
+      - name: Upload compose logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-logs
+          path: compose-failure.log
+
+      - name: Cleanup (always)
+        if: always()
+        run: OPSENSE_TAG=${{ env.OPSENSE_TAG }} docker compose down -v

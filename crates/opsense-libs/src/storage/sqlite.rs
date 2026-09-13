@@ -306,21 +306,6 @@ impl EdgeDataStorage for SqliteStorage {
             .map_err(db_err)?;
         Ok(())
     }
-
-    async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        let mut conn = self.pool.acquire().await.map_err(db_err)?;
-        let rows: Vec<(i64, Vec<u8>)> = sqlx::query_as("SELECT id, data FROM rt_edges ORDER BY id")
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(db_err)?;
-        for (id, data) in rows {
-            f(id as usize, &data)?;
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]

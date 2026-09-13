@@ -323,22 +323,6 @@ impl EdgeDataStorage for RedisStorage {
             .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
         Ok(())
     }
-
-    async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        let mut conn = self.lock().await;
-        let items: Vec<(i64, Vec<u8>)> = cmd("HGETALL")
-            .arg(self.kb.key("edgedata"))
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e: redis::RedisError| StorageError::Internal(e.to_string()))?;
-        for (id, data) in items {
-            f(id as usize, &data)?;
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]

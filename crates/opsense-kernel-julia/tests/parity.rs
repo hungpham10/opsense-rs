@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::Result;
 use opsense_proto::host::KernelConnection;
-use opsense_proto::pb::{value, CodeRequest, SessionParams};
+use opsense_proto::pb::{CodeRequest, SessionParams, value};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 

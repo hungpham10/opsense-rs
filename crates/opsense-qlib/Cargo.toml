@@ -1,0 +1,42 @@
+[package]
+name = "opsense-qlib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+opsense-libs = { path = "../opsense-libs" }
+opsense-model = { path = "../opsense-model" }
+opsense-macros = { path = "../opsense-macros" }
+
+# Financial data / market plumbing
+redis = { workspace = true }
+itertools = "0.14"
+reqwest = { workspace = true }
+reqwest-middleware = { version = "0.5", features = ["json"] }
+reqwest-tracing = "0.7"
+lmdb = "0.8"
+
+# ONNX genotype compilation
+tract-onnx = "0.23.2"
+
+# Backtest job result dump
+aws-sdk-s3 = "1.126.0"
+
+# Runtime / serialization
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+typetag = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+csv = "1.3"
+prost = { workspace = true }
+futures-util = { workspace = true }
+utoipa = { workspace = true }
+
+[lints.rust]
+warnings = "deny"
