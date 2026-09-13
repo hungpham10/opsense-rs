@@ -86,6 +86,9 @@ jobs:
           OPSENSE_RUNNER_PYTHON: 127.0.0.1:50052
           OPSENSE_RUNNER_JULIA: 127.0.0.1:50053
           DB_DSN: postgres://opsense:opsense123@127.0.0.1:5432/opsense
+          # Bật strict mode: connection failure → panic thay vì skip.
+          # Chỉ workflow này có compose stack (xem tests/common/mod.rs).
+          OPSENSE_INTEGRATION: 'true'
         run: |
           cargo test --workspace \
             --test integration_health \

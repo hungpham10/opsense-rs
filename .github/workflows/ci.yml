@@ -93,4 +93,8 @@ jobs:
         run: cargo build --workspace --all-targets
 
       - name: Run unit tests
+        # --all-targets chạy cả test files (kernel parity, rhai suites...).
+        # 4 test files `crates/opsense/tests/integration_*` cần compose stack;
+        # khi không có `OPSENSE_INTEGRATION=1` chúng tự skip (xem
+        # tests/common/mod.rs::integration_mode), nên CI này vẫn xanh.
         run: cargo test --workspace --all-targets

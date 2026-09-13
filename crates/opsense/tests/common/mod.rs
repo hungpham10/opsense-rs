@@ -17,16 +17,22 @@
 //! chạy `cargo test --test integration_health` trước khi `docker compose up`
 //! mà không panic khó hiểu.
 
+pub mod dex;
+
 use std::time::{Duration, Instant};
 
 use reqwest::Client;
 
-/// Trả `true` khi chạy trong CI integration (GitHub Actions set `CI=true`).
-/// Ở chế độ này, mọi failure kết nối phải panic thay vì skip — đảm bảo
-/// test thật sự chạy và CI không "xanh giả".
+/// Trả `true` khi chạy trong CI integration — được export tường minh trong
+/// `integration.yml` (step test) vì workflow đó có `docker compose up`.
+///
+/// Lưu ý: KHÔNG check `CI=true` ở đây. Workflow `ci.yml` cũng set `CI=true`
+/// nhưng không có compose stack — nếu check `CI` thì 4 test files
+/// `integration_*.rs` sẽ panic thay vì skip, làm `cargo test --all-targets`
+/// trong CI fail oan.
 #[allow(dead_code)]
 pub fn integration_mode() -> bool {
-    std::env::var("CI").is_ok()
+    std::env::var("OPSENSE_INTEGRATION").is_ok()
 }
 
 pub fn serve_url() -> String {
@@ -58,13 +64,24 @@ pub async fn wait_for_health(client: &Client, timeout_secs: u64) -> anyhow::Resu
 }
 
 /// Poll `POST /api/repl/graphql { status { nodes { id } } }` đến khi 200 hoặc timeout.
+/// Nginx yêu cầu Bearer JWT (`$jwt_required = 2`) nên phải truyền `bearer`
+/// (id_token từ Dex login, xem `common::dex`).
 #[allow(dead_code)] // dùng trong integration_*.rs
-pub async fn wait_for_pipeline(client: &Client, timeout_secs: u64) -> anyhow::Result<()> {
+pub async fn wait_for_pipeline(
+    client: &Client,
+    timeout_secs: u64,
+    bearer: &str,
+) -> anyhow::Result<()> {
     let url = format!("{}/api/repl/graphql", serve_url());
     let body = serde_json::json!({"query": "{ status { nodes { id } } }"});
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
-        if let Ok(resp) = client.post(&url).json(&body).send().await
+        if let Ok(resp) = client
+            .post(&url)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
             && resp.status().is_success() {
                 return Ok(());
             }

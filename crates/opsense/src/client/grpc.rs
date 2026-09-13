@@ -48,8 +48,13 @@ impl RunnerClient {
 
         let mut client = KernelRunnerClient::new(channel);
 
-        // Generate fresh Ed25519 keypair for this session.
+        // Generate fresh Ed25519 keypair for this session. The runner echoes
+        // params.session_id back and later verifies signatures against it
+        // decoded as a base64 public key, so it must carry our pubkey — not
+        // the caller's placeholder id.
         let (session_id, signing_key_bytes) = generate_keypair()?;
+        let mut params = params;
+        params.session_id = session_id.clone();
         let signing_key = SigningKey::from_bytes(
             signing_key_bytes
                 .as_slice()

@@ -70,6 +70,8 @@ opsense-runner = { path = "../opsense-runner" }
 # /health + GraphQL, OAuth Device/Session flow qua reqwest, REPL qua
 # rexpect (PTY). Đọc env: OPSENSE_SERVE_URL, OPSENSE_RUNNER_ECHO/PYTHON/JULIA.
 rexpect = { workspace = true }
+# Same major as rexpect's nix so `WaitStatus` matches `PtyProcess::status()`.
+nix = "0.14"
 tokio = { workspace = true, features = ["full", "test-util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

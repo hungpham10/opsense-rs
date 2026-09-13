@@ -11,9 +11,11 @@
 //! Julia uses `Meta.parseall()`), so the client just sends the joined buffer
 //! as one `CodeRequest.code` string.
 
+use std::io::{BufRead as _, IsTerminal as _, Write as _};
+
 use anyhow::{Context as _, Result};
 use opsense_proto::pb::SessionParams;
-use reedline::{DefaultPrompt, Reedline, Signal};
+use reedline::{Reedline, Signal};
 
 use crate::client::RunnerClient;
 
@@ -54,10 +56,22 @@ impl KernelRepl {
         println!("opsense kernel REPL  →  {}", self.endpoint);
         println!("type :py to start a Python session, :jl for Julia, :exit to quit\n");
 
+        if plain_mode() {
+            self.run_plain().await?;
+        } else {
+            self.run_reedline().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Full line editor (history, key bindings). Requires a real terminal:
+    /// reedline sends a cursor-position query that needs a responding tty.
+    async fn run_reedline(&mut self) -> Result<()> {
         let mut rl = Reedline::create();
+        let prompt = OpsensePrompt;
 
         loop {
-            let prompt = DefaultPrompt::default();
             match rl.read_line(&prompt) {
                 Ok(Signal::Success(line)) => {
                     if let Err(e) = self.handle_line(&line).await {
@@ -76,6 +90,26 @@ impl KernelRepl {
                     eprintln!("readline error: {e}");
                     break;
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Plain line reader for PTY harnesses (rexpect), pipes, and
+    /// `TERM=dumb` environments that cannot answer reedline's cursor query.
+    async fn run_plain(&mut self) -> Result<()> {
+        let mut stdin = std::io::stdin().lock();
+        loop {
+            print!("{PROMPT_STR}");
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            if stdin.read_line(&mut line)? == 0 {
+                self.shutdown().await;
+                break;
+            }
+            if let Err(e) = self.handle_line(&line).await {
+                eprintln!("error: {e:#}");
             }
         }
 
@@ -300,6 +334,48 @@ fn uuid_v4_simple() -> String {
     let mut bytes = [0u8; 8];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+const PROMPT_STR: &str = "opsense> ";
+
+/// Use a plain stdin reader instead of reedline: for PTY harnesses (rexpect)
+/// that can't answer reedline's cursor-position query, for piped input, and
+/// for `TERM=dumb`.
+fn plain_mode() -> bool {
+    std::env::var("OPSENSE_REPL_PLAIN").is_ok_and(|v| v == "1")
+        || !std::io::stdout().is_terminal()
+        || matches!(std::env::var("TERM").as_deref(), Ok("dumb") | Err(_))
+}
+
+/// Custom prompt so interactive mode shows the same string as plain mode.
+struct OpsensePrompt;
+
+impl reedline::Prompt for OpsensePrompt {
+    fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
+        PROMPT_STR.into()
+    }
+
+    fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
+        "".into()
+    }
+
+    fn render_prompt_indicator(
+        &self,
+        _prompt_mode: reedline::PromptEditMode,
+    ) -> std::borrow::Cow<'_, str> {
+        PROMPT_STR.into()
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
+        "... ".into()
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        _history_search: reedline::PromptHistorySearch,
+    ) -> std::borrow::Cow<'_, str> {
+        "(search) ".into()
+    }
 }
 
 const HELP_TEXT: &str = r#"opsense kernel REPL — direct gRPC to a running runner

@@ -55,10 +55,16 @@ async fn python_runner_executes() {
         None => return,
     };
 
-    let outcome = client.execute("1 + 1").await.expect("execute");
+    // The python kernel exec's code (no REPL echo) — bind `result` to
+    // capture a value, or `print` to emit stdout.
+    let outcome = client
+        .execute("print(1 + 1)\nresult = 1 + 1")
+        .await
+        .expect("execute");
     assert!(outcome.ok(), "python kernel should succeed: {outcome:?}");
-    let text = outcome.text().unwrap_or("");
-    assert!(text.contains('2'), "python '1+1' should produce '2', got: {text}");
+    assert!(outcome.stdout().contains('2'), "python stdout missing '2': {}", outcome.stdout());
+    // The kernel classifies scalars as repr text (`repr(value)`), not numbers.
+    assert_eq!(outcome.text(), Some("2"), "python should capture `result`");
 
     client.close().await.expect("close");
 }
