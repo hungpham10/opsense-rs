@@ -58,18 +58,16 @@ artifact trước khi chạy compose.
 **Thời gian dự kiến**: lần đầu 25-40 phút (do cargo-chef build 1 lần);
 lần sau 3-5 phút (cache hit).
 
-### Bước A1 — Smoke build binary target
+### Bước A1 — Smoke build binary artifacts
 
 ```bash
-earthly +opsense
-earthly +kernel-echo
-earthly +kernel-python
-earthly +kernel-julia
+earthly +binaries
 ```
 
 **Verify**:
 - Không có error `error: recipe ... not found`.
-- Artifact `target/release/opsense` (~30MB) sinh ra.
+- Earthly xây dựng cả 4 binary trong một target chia sẻ cargo-chef.
+- Runtime image nhận artifact từ `+binaries`; không rebuild Rust trong image.
 - Earthly in `--> exporting ... ` rồi `Earthfile target completed`.
 
 **Expected fail & fix** (đã biết từ PLAN.MD §10.8):

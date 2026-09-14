@@ -40,7 +40,7 @@ services:
     image: valkey/valkey:9-alpine
     container_name: opsense-valkey
     ports:
-      - "6379:6379"
+      - "${VALKEY_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
@@ -113,7 +113,7 @@ services:
       start_period: 15s
 
   opsense-serve:
-    image: opsense-serve:local
+    image: opsense-serve:${OPSENSE_TAG:-local}
     container_name: opsense-serve
     ports:
       - "8080:8080"

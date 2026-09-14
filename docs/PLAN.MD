@@ -869,10 +869,7 @@ opsense-rs/
 |---|---|---|
 | `+builder` | Image | `rust:bookworm` + `pkg-config` + `protobuf-compiler` (chia sẻ) |
 | `+recipe` | Artifact | `cargo chef prepare` → `recipe.json` |
-| `+opsense` | Artifact | Build `opsense` binary |
-| `+kernel-echo` | Artifact | Build `opsense-kernel-echo` (default) |
-| `+kernel-python` | Artifact | Build `opsense-kernel-python` |
-| `+kernel-julia` | Artifact | Build `opsense-kernel-julia` |
+| `+binaries` | Artifact | Build `opsense` + 3 kernel binaries trong một target |
 | `+serve` | Image | OpenResty + lua modules + alloy + opsense binary |
 | `+runner` | Image | debian-slim + opsense + echo kernel (default) |
 | `+runner-python` | Image | python:3.12-slim + opsense + python kernel |
@@ -1221,6 +1218,6 @@ make test-integration   # build 4 images + compose up + cargo test --test-thread
 make test-integration-down
 ```
 
-CI: `.github/workflows/integration.yml` chạy cùng flow trên
+CI: `.github/workflows/ci.yml` chạy unit test, build image, Compose smoke và integration test trong một pipeline thống nhất.
 `ubuntu-latest`, `timeout-minutes: 30`, cache cargo qua `Swatinem/rust-cache`,
 upload compose logs nếu fail.

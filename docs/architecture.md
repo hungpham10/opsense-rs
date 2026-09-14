@@ -877,15 +877,12 @@ validate HS256/JWKS, inject `X-User-Id` + `X-Tenant-Id` header.
    ↓
 +recipe (cargo chef prepare → recipe.json)  ← cache share
    ↓
-   ├── +opsense  ──────────────┐
-   ├── +kernel-echo  ──────────┤
-   ├── +kernel-python ─────────┤── parallel, cùng đọc recipe.json
-   └── +kernel-julia  ─────────┘
+   └── +binaries ──────────────┤── build 4 artifact cùng dùng recipe.json
        ↓
-       ├── +serve  (openresty base + lua modules + alloy + copy +opsense)
-       ├── +runner (debian-slim + copy +opsense + copy +kernel-echo)
-       ├── +runner-python (python:3.12-slim + copy +opsense + copy +kernel-python)
-       └── +runner-julia (julia:1.10-bookworm + copy +opsense + copy +kernel-julia)
+       ├── +serve  (openresty base + lua modules + alloy + copy artifact)
+       ├── +runner (debian-slim + copy artifact)
+       ├── +runner-python (python:3.12-slim + copy artifact)
+       └── +runner-julia (julia:1.10-bookworm + copy artifact)
 ```
 
 ### 10.3 4 image output
@@ -904,7 +901,7 @@ Mặc định `REGISTRY=ghcr.io`, `IMAGE_PREFIX=lap02921/opsense`, `VERSION=late
 
 **Local dev:**
 ```bash
-earthly +all-local       # build 4 image với tag `local`
+earthly +all-local       # build 4 image; CI dùng tag này rồi tag lại runner theo SHA
 docker compose up -d      # chạy stack
 curl http://localhost:8080/health
 ```

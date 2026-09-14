@@ -127,11 +127,10 @@ pub async fn wait_for_dex(timeout_secs: u64) -> anyhow::Result<()> {
     };
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
-        if let Ok(resp) = client.get(&url).send().await {
-            if resp.status().is_success() {
+        if let Ok(resp) = client.get(&url).send().await
+            && resp.status().is_success() {
                 return Ok(());
             }
-        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!("Dex not healthy at {url} after {timeout_secs}s")

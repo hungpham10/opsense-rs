@@ -232,7 +232,7 @@ async fn open_station_store(
         Some(s3) => DuckS3Storage::open_with_s3(&db_path, s3, 4096).await,
         None => DuckS3Storage::open(&db_path).await,
     }
-    .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
+    .map_err(|e| Error::other(e.to_string()))?;
     Ok(store)
 }
 
@@ -340,7 +340,7 @@ impl PatternStation {
             let store = open_station_store(id, cfg).await?;
             let automaton = RwLock::new(AhoCorasick::new());
             for p in store.get_all().await.map_err(|e| {
-                Error::new(ErrorKind::Other, format!("load patterns: {e}"))
+                Error::other(format!("load patterns: {e}"))
             })? {
                 automaton.write().await.add(p);
             }

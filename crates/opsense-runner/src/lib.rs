@@ -45,7 +45,6 @@ use opsense_proto::pb::kernel_runner_server::KernelRunnerServer;
 #[must_use]
 pub fn kernel_runner_service(
     registry: Arc<SessionRegistry>,
-    cfg: RunnerConfig,
     auth: Option<Arc<dyn Auth>>,
 ) -> KernelRunnerServer<RunnerService> {
     RunnerService::new(registry, auth).with_limits()

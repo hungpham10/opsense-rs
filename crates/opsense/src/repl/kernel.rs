@@ -344,7 +344,7 @@ fn write_arrow_ipc(ipc: &[u8], path: &str) -> Result<()> {
         for batch in &batches {
             writer.write(batch)?;
         }
-        writer.flush()?;
+        writer.into_inner().flush()?;
     } else if lower.ends_with(".parquet") {
         let file = std::fs::File::create(path)?;
         let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None)?;

@@ -3,16 +3,28 @@
 //! Test approach: spawn `opsense repl --runner <endpoint>` trong PTY, verify
 //! echo kernel round-trip end-to-end (multi-line input → block buffer → execute).
 //!
-//! In integration mode (CI: `CI=true`), any failure panics so the workflow
-//! cannot silently go green. On local dev without compose, skip gracefully.
+//! In integration mode (`OPSENSE_INTEGRATION`), any failure panics so the
+//! workflow cannot silently go green. On local dev without compose, skip.
 
 mod common;
 
-use std::process::Command;
+use std::net::TcpStream;
+use std::time::Duration;
 
 const REPL_PROMPT: &str = "opsense>";
 const ECHO_CONNECTED: &str = "session ready";
 const ECHO_RESULT_PREFIX: &str = "echo:";
+
+/// True when a TCP connect to `host:port` succeeds within 2s.
+///
+/// Do not use bash `</dev/tcp/…>`: that opens the socket for reading and
+/// waits for EOF, so a live gRPC server can look down (timeout 124).
+fn runner_reachable(endpoint: &str) -> bool {
+    let Ok(addr) = endpoint.parse() else {
+        return false;
+    };
+    TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok()
+}
 
 fn build_repl_session(runner_endpoint: &str) -> Option<rexpect::session::PtySession> {
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_opsense"));
@@ -51,13 +63,7 @@ fn wait_clean_exit(p: &rexpect::session::PtySession) -> Result<(), String> {
 fn repl_runner_mode_runs_code_and_exits() {
     let runner_endpoint = common::runner_endpoint("echo");
 
-    // Smoke: kiểm tra runner có reachable không trước khi spawn REPL.
-    let probe = Command::new("timeout")
-        .args(["2", "bash", "-c", &format!("</dev/tcp/{runner_endpoint}")])
-        .output();
-    // DNS/connection failure vẫn chạy bash đến khi exit code != 0, nên phải
-    // check status chứ không phải is_err() (chỉ bắt spawn failure).
-    if !probe.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+    if !runner_reachable(&runner_endpoint) {
         if common::integration_mode() {
             panic!("cannot connect to echo runner at {runner_endpoint} — CI requires it");
         }
@@ -97,10 +103,7 @@ fn repl_runner_mode_runs_code_and_exits() {
 fn repl_block_mode_accumulates_then_executes() {
     let runner_endpoint = common::runner_endpoint("echo");
 
-    let probe = Command::new("timeout")
-        .args(["2", "bash", "-c", &format!("</dev/tcp/{runner_endpoint}")])
-        .output();
-    if !probe.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+    if !runner_reachable(&runner_endpoint) {
         if common::integration_mode() {
             panic!("cannot connect to echo runner at {runner_endpoint} — CI requires it");
         }

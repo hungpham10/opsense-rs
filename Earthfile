@@ -24,11 +24,23 @@ builder:
     SAVE IMAGE --cache-hint
 
 # -----------------------------------------------------------------------
-# recipe — cargo-chef recipe.json. Built once, shared by every binary.
+# chef — install cargo-chef once; this layer is reused by every recipe.
 # -----------------------------------------------------------------------
-recipe:
+chef:
     FROM +builder
     RUN cargo install cargo-chef --locked
+    WORKDIR /app
+    SAVE IMAGE --cache-hint
+
+# -----------------------------------------------------------------------
+# recipe — cargo-chef recipe.json. cargo chef prepare runs `cargo metadata`,
+# which requires real targets (src/lib.rs, src/main.rs) on disk, so the full
+# source tree is needed here (subject to .earthignore). recipe.json stays
+# byte-identical unless a Cargo.toml/Cargo.lock changes, so +recipe and the
+# `cargo chef cook` layer in +binaries remain cacheable.
+# -----------------------------------------------------------------------
+recipe:
+    FROM +chef
     COPY . .
     RUN cargo chef prepare --recipe-path recipe.json
     SAVE ARTIFACT recipe.json
@@ -41,11 +53,11 @@ binaries:
     FROM +recipe
     RUN cargo chef cook --release --recipe-path recipe.json
     COPY . .
-    RUN cargo build --release
-    SAVE ARTIFACT target/release/opsense               AS LOCAL opsense
-    SAVE ARTIFACT target/release/opsense-kernel-echo  AS LOCAL opsense-kernel-echo
-    SAVE ARTIFACT target/release/opsense-kernel-python AS LOCAL opsense-kernel-python
-    SAVE ARTIFACT target/release/opsense-kernel-julia  AS LOCAL opsense-kernel-julia
+    RUN cargo build --release --locked
+    SAVE ARTIFACT target/release/opsense
+    SAVE ARTIFACT target/release/opsense-kernel-echo
+    SAVE ARTIFACT target/release/opsense-kernel-python
+    SAVE ARTIFACT target/release/opsense-kernel-julia
 
 # -----------------------------------------------------------------------
 # serve — Tầng 1 host: OpenResty reverse proxy + opsense + alloy
@@ -183,6 +195,8 @@ runner-julia:
     COPY (+binaries/opsense)             /app/opsense
     COPY (+binaries/opsense-kernel-julia) /app/opsense-kernel-julia
 
+    RUN julia -e 'import Pkg; Pkg.add(["Arrow", "DataFrames", "CSV", "Plots"])'
+
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-julia
 
@@ -190,16 +204,6 @@ runner-julia:
     ENTRYPOINT ["/app/opsense", "runner"]
     SAVE IMAGE --push ${REGISTRY}/${IMAGE_PREFIX}-runner-julia:${VERSION}
     SAVE IMAGE opsense-runner-julia:${VERSION}
-
-# -----------------------------------------------------------------------
-# all-local — build all 4 images with tag `local` (no push). Dev workflow.
-#   earthly +all-local && docker compose up -d
-# -----------------------------------------------------------------------
-all-local:
-    BUILD --build-arg VERSION=local +serve
-    BUILD --build-arg VERSION=local +runner
-    BUILD --build-arg VERSION=local +runner-python
-    BUILD --build-arg VERSION=local +runner-julia
 
 # -----------------------------------------------------------------------
 # all — build & push all 4 images. CI workflow (`earthly --push +all`).
@@ -212,13 +216,13 @@ all:
     BUILD +runner-julia
 
 # -----------------------------------------------------------------------
-# integration-images — build 4 images (serve + 3 runners) with a CI-friendly
-# tag (no registry push). Used by `.github/workflows/integration.yml` for
-# smoke tests: `earthly +integration-images` then tag :ci aliases for
-# `docker compose up`.
+# integration-images — build 4 images locally (no registry push).
+# Tag via --build-arg VERSION (CI: ci-${{ github.sha }}; local default: local).
+# Compose reads OPSENSE_TAG, defaulting to `local`.
 # -----------------------------------------------------------------------
 integration-images:
-    BUILD --build-arg VERSION=ci-${GITHUB_SHA:-local} +serve
-    BUILD --build-arg VERSION=ci-${GITHUB_SHA:-local} +runner
-    BUILD --build-arg VERSION=ci-${GITHUB_SHA:-local} +runner-python
-    BUILD --build-arg VERSION=ci-${GITHUB_SHA:-local} +runner-julia
+    ARG VERSION=local
+    BUILD --build-arg VERSION=${VERSION} +serve
+    BUILD --build-arg VERSION=${VERSION} +runner
+    BUILD --build-arg VERSION=${VERSION} +runner-python
+    BUILD --build-arg VERSION=${VERSION} +runner-julia
