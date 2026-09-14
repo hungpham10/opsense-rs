@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 
 use opsense_model::secret::Secret;
 
-use crate::config::{CapacityMap, Config};
+use crate::config::{CapacityMap, Config, StorageConfig};
 use crate::station::{Station, StationKind};
 
 pub type Stations = Arc<RwLock<HashMap<String, Station>>>;
@@ -29,6 +29,9 @@ pub struct Context {
     /// (`Station::Category` / `Station::Pattern` / `Station::Timeseries`).
     /// Transforms publish here; `AppState` (HTTP/MCP/Rhai) reads from here.
     stations: Stations,
+
+    /// `[storage]` config — quyết định backend của station mới.
+    storage: StorageConfig,
 }
 
 impl Context {
@@ -41,6 +44,7 @@ impl Context {
             capacity: cfg.capacity.clone(),
             secret,
             stations: Arc::new(RwLock::new(HashMap::new())),
+            storage: cfg.storage.clone(),
         }
     }
 
@@ -73,6 +77,11 @@ impl Context {
             .iter()
             .map(|(id, st)| (id.clone(), st.kind()))
             .collect()
+    }
+
+    /// `[storage]` config — components đọc để dựng station theo backend.
+    pub fn storage(&self) -> &StorageConfig {
+        &self.storage
     }
 
     pub async fn variable<T>(&self, name: &str) -> Result<T, Error>

@@ -156,7 +156,10 @@ impl KernelRepl {
 
     /// Dispatch a `:` command.
     async fn handle_command(&mut self, line: &str) -> Result<()> {
-        let (cmd, _rest) = split_first_word(line);
+        let (cmd, rest) = split_first_word(line);
+        if cmd == ":export" {
+            return self.export(rest).await;
+        }
         match cmd {
             ":py" | ":python" => self.start_kernel("python").await,
             ":jl" | ":julia" => self.start_kernel("julia").await,
@@ -187,11 +190,17 @@ impl KernelRepl {
         self.buffer.clear();
 
         let session_id = format!("repl-{}", uuid_v4_simple());
+        // Forward OPSENSE_* env cho kernel (S3 creds/base, serve URL,
+        // block_secs...) — opsense.store đọc từ đây.
+        let env: std::collections::HashMap<String, String> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("OPSENSE_"))
+            .collect();
         let params = SessionParams {
             session_id,
-            env: Default::default(),
+            env,
             allow_fs: false,
-            allow_net: false,
+            // Python kernel cần network để đọc parquet từ S3 / gọi serve.
+            allow_net: kind == "python",
             max_memory_mb: 0,
             packages: vec![],
             require_challenge: false,
@@ -269,6 +278,84 @@ impl KernelRepl {
         }
         println!("Goodbye.");
     }
+
+    /// `:export [var] <file.parquet|.csv>` — ghi giá trị `result` (hoặc biến
+    /// `var`) phía client. Kernel chỉ trả Arrow IPC trong `Value.dataframe`;
+    /// host decode và ghi parquet/CSV bằng arrow/parquet crate.
+    async fn export(&mut self, rest: &str) -> Result<()> {
+        let rest = rest.trim();
+        let Some(path) = rest.split_whitespace().next_back() else {
+            anyhow::bail!("usage: :export [var] <file.parquet|.csv>");
+        };
+        let var = rest
+            .strip_suffix(path)
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let Some(client) = self.client.as_mut() else {
+            println!("no kernel session; type :py or :jl first");
+            return Ok(());
+        };
+
+        // Lấy giá trị cần export: `result` mặc định, hoặc gán `result = <var>`.
+        let code = match var {
+            Some(v) => format!("result = {v}\nresult"),
+            None => "result".to_string(),
+        };
+        let outcome = client.execute(&code).await.context("execute failed")?;
+        print_outcome(&outcome);
+        if outcome.error.is_some() {
+            anyhow::bail!("cannot read value to export");
+        }
+
+        use opsense_proto::pb::value::Kind as K;
+        match outcome.value.as_ref().and_then(|v| v.kind.as_ref()) {
+            Some(K::Dataframe(df)) => {
+                write_arrow_ipc(&df.arrow_ipc, path)?;
+                println!("exported DataFrame → {path}");
+            }
+            Some(K::Artifact(a)) => {
+                std::fs::write(path, &a.data)?;
+                println!("exported artifact {} → {path}", a.name);
+            }
+            _ => anyhow::bail!("value is not exportable (need DataFrame or artifact)"),
+        }
+        Ok(())
+    }
+}
+
+/// Ghi Arrow IPC stream ra `.parquet` hoặc `.csv` theo phần mở rộng.
+fn write_arrow_ipc(ipc: &[u8], path: &str) -> Result<()> {
+    use arrow::ipc::reader::StreamReader;
+    let cursor = std::io::Cursor::new(ipc);
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| anyhow::anyhow!("decode arrow ipc: {e}"))?;
+    let batches: Vec<_> = reader
+        .map(|b| b.map_err(|e| anyhow::anyhow!("arrow batch: {e}")))
+        .collect::<std::result::Result<_, _>>()?;
+    let schema = batches
+        .first()
+        .map(|b| b.schema().clone())
+        .ok_or_else(|| anyhow::anyhow!("empty dataframe"))?;
+
+    let lower = path.to_lowercase();
+    if lower.ends_with(".csv") {
+        let file = std::fs::File::create(path)?;
+        let mut writer = arrow::csv::writer::Writer::new(file);
+        for batch in &batches {
+            writer.write(batch)?;
+        }
+        writer.flush()?;
+    } else if lower.ends_with(".parquet") {
+        let file = std::fs::File::create(path)?;
+        let mut writer = parquet::arrow::ArrowWriter::try_new(file, schema, None)?;
+        for batch in &batches {
+            writer.write(batch)?;
+        }
+        writer.close()?;
+    } else {
+        anyhow::bail!("unsupported extension (use .parquet or .csv)");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

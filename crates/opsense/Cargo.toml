@@ -28,6 +28,8 @@ anyhow = { workspace = true }
 rmcp = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
 sqlx = { workspace = true }
 subtle = { workspace = true }
 chrono = { workspace = true }
@@ -58,7 +60,7 @@ aws-sdk-s3 = "1.122.0"
 tokio-util = "0.7"
 
 opsense-model = { path = "../opsense-model" }
-opsense-core = { path = "../opsense-core" }
+opsense-core = { path = "../opsense-core", features = ["duckdb"] }
 opsense-components = { path = "../opsense-components" }
 opsense-qlib = { path = "../opsense-qlib" }
 opsense-proto = { path = "../opsense-proto" }

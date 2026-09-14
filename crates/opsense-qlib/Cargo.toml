@@ -12,7 +12,6 @@ opsense-model = { path = "../opsense-model" }
 opsense-macros = { path = "../opsense-macros" }
 
 # Financial data / market plumbing
-redis = { workspace = true }
 itertools = "0.14"
 reqwest = { workspace = true }
 reqwest-middleware = { version = "0.5", features = ["json"] }
@@ -21,9 +20,6 @@ lmdb = "0.8"
 
 # ONNX genotype compilation
 tract-onnx = "0.23.2"
-
-# Backtest job result dump
-aws-sdk-s3 = "1.126.0"
 
 # Runtime / serialization
 tokio = { workspace = true }

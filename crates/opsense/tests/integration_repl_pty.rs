@@ -55,7 +55,9 @@ fn repl_runner_mode_runs_code_and_exits() {
     let probe = Command::new("timeout")
         .args(["2", "bash", "-c", &format!("</dev/tcp/{runner_endpoint}")])
         .output();
-    if probe.is_err() {
+    // DNS/connection failure vẫn chạy bash đến khi exit code != 0, nên phải
+    // check status chứ không phải is_err() (chỉ bắt spawn failure).
+    if !probe.as_ref().map(|o| o.status.success()).unwrap_or(false) {
         if common::integration_mode() {
             panic!("cannot connect to echo runner at {runner_endpoint} — CI requires it");
         }
@@ -98,7 +100,7 @@ fn repl_block_mode_accumulates_then_executes() {
     let probe = Command::new("timeout")
         .args(["2", "bash", "-c", &format!("</dev/tcp/{runner_endpoint}")])
         .output();
-    if probe.is_err() {
+    if !probe.as_ref().map(|o| o.status.success()).unwrap_or(false) {
         if common::integration_mode() {
             panic!("cannot connect to echo runner at {runner_endpoint} — CI requires it");
         }

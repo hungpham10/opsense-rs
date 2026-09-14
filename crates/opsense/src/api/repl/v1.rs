@@ -173,10 +173,13 @@ impl QueryRoot {
         let to = to_ts.unwrap_or(i64::MAX);
 
         let mut station = station.write().await;
-        Ok(station.query_range(from, to).unwrap_or_else(|| {
-            tracing::warn!(node = %node, "timeseries cache miss");
-            Vec::new()
-        }))
+        Ok(station
+            .query_range(from, to)
+            .await
+            .unwrap_or_else(|| {
+                tracing::warn!(node = %node, "timeseries cache miss");
+                Vec::new()
+            }))
     }
 
     /// Danh sách kernel session đang sống trong host (Tầng 2).

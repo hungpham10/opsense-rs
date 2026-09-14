@@ -173,6 +173,10 @@ class Session:
         self.setup(params)
 
     def setup(self, params):
+        # Inject env vars từ host (opsense_store đọc OPSENSE_S3_BASE, ...).
+        for k, v in params.env.items():
+            os.environ[k] = v
+
         # Heavy imports BEFORE restrictions (they read their own data files).
         for name in ["numpy", "pandas", "pyarrow"]:
             importlib.import_module(name)

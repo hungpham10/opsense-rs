@@ -8,7 +8,6 @@ use opsense_libs::lru::LruCache;
 use itertools::izip;
 use reqwest_middleware::ClientWithMiddleware;
 use crate::candle::CandleStick;
-use crate::reload::Reload;
 use serde_json::Value;
 use tracing::{debug, info};
 
@@ -68,22 +67,6 @@ pub struct QueryCandleSticks {
 struct CompiledProfile {
     queries: [JsonQuery; 6],
     url_template: String,
-}
-
-impl Reload for QueryCandleSticks {
-    fn reload(&self) -> Result<(), Error> {
-        let mut mapping = self.mapping.write().map_err(|error| {
-            Error::other(format!("Fail to request to write to `mapping`: {}", error))
-        })?;
-        let mapping_str = std::env::var("CANDLESTICK_MAPPING").unwrap_or_else(|_| "{}".to_string());
-
-        *mapping = serde_json::from_str(&mapping_str).unwrap_or_default();
-        Ok(())
-    }
-
-    fn keys(&self) -> Vec<&str> {
-        vec!["CANDLESTICK_MAPPING"]
-    }
 }
 
 impl QueryCandleSticks {

@@ -226,10 +226,11 @@ impl_http_source!(
         // Register the station eagerly so reads before the first cycle still
         // resolve to an empty timeseries rather than a `NotFound` error.
         if self.station {
+            let station = TimeseriesStation::from_storage(&self.id, ctx.storage()).await?;
             ctx.registry(
                 &self.id,
                 Station::Timeseries(std::sync::Arc::new(tokio::sync::RwLock::new(
-                    TimeseriesStation::default(),
+                    station,
                 ))),
             )
             .await

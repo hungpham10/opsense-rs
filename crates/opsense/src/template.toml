@@ -186,16 +186,3 @@ data_dir = ".opsense/lakehouse"
 # num_trees = 50
 # sample_size = 256
 # shingle_size = 1                     # >1 to detect shape anomalies
-
-# ------------------------------------------------------------------
-# D) Financial backtest (opsense-qlib) — Redis-driven job executor.
-#    Requires the runtime context to hold `opsense_model::resolver::Resolver`
-#    (redis shards + S3). Jobs arrive as `backtest_jobs` payloads on the
-#    stream; events/status stream back out through `redis_sink` (JOB_STREAM_KEY).
-# ------------------------------------------------------------------
-# [[pipeline.components]]
-# type = "backtest_executor"
-# id = "backtest"
-# inputs = ["ingest"]
-# max_workers = 4
-# guard_ttl_secs = 3600

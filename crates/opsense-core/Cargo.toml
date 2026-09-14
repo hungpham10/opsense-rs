@@ -12,6 +12,7 @@ warnings = "deny"
 default = []
 arrow = ["dep:arrow"]
 arrow-deps = ["arrow"]
+duckdb = ["opsense-libs/duckdb"]
 
 [dependencies]
 serde = { workspace = true }
@@ -31,3 +32,6 @@ tracing = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 arrow = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"

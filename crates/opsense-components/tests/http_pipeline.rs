@@ -138,6 +138,7 @@ async fn http_fetch_writes_observations_into_own_station() {
         .write()
         .await
         .query_range(1700000001, 1700000001)
+        .await
         .unwrap_or_default();
     assert_eq!(rows.len(), 1, "parsed observation must be stored");
     assert_eq!(rows[0].value, 42.0);
