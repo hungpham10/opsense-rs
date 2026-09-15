@@ -1,0 +1,5 @@
+-- Vector source configuration for production environment.
+-- Point to the production Vector/Alloy scrape endpoint.
+--
+-- Example:
+--   url = "http://alloy-prod:9080"

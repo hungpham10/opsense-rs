@@ -8,13 +8,19 @@
 //!   formerly split into the separate `vector_components`/`vector_runtime` crates.
 
 pub mod ahocorasick;
+pub mod binarysearch;
 pub mod bloom;
 pub mod cast;
 pub mod grid;
 pub mod jq;
 pub mod lru;
 pub mod radix;
+pub mod rcf;
 pub mod search;
+pub mod snowflake_id;
+pub mod sgd;
+pub mod sops;
+pub mod transition;
 pub mod vector;
 
 // Plan §1: public so external crates (opsense-store, opsense-components) can

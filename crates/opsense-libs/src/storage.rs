@@ -18,9 +18,12 @@ mod sqlite;
 mod redis;
 
 #[cfg(feature = "duckdb")]
-mod duckdb;
+pub mod duckdb;
 
 mod in_memory;
+
+#[cfg(feature = "duckdb")]
+pub use duckdb::DuckS3Storage;
 
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;
@@ -327,16 +330,6 @@ pub trait EdgeDataStorage: Send + Sync {
 
     /// Xoá toàn bộ edge stream (dùng khi rebuild index). Mặc định: no-op.
     async fn clear_edges(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Duyệt toàn bộ edge data `(edge_id, meta)` theo thứ tự bất kỳ — dùng để
-    /// rebuild edge registry khi reopen (CallEdgeMeta chứa from/to). Mặc định:
-    /// không có edge nào.
-    async fn for_each_edge_data(
-        &self,
-        _f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
         Ok(())
     }
 }

@@ -1,0 +1,9 @@
+-- Vector source configuration for dev environment.
+--
+-- The [sources.vector] section in opsense.conf.toml is commented out by default.
+-- To enable metrics ingestion in dev:
+--   1. Uncomment and point `url` to a real Vector/Alloy HTTP endpoint.
+--   2. Mount the updated opsense.conf.toml into the opsense-serve container.
+--
+-- For local dev with Grafana Alloy as Vector-compatible agent:
+--   url = "http://alloy:9080"

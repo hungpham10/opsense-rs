@@ -55,10 +55,32 @@ message SessionParams {
   uint64 max_memory_mb = 5;
   // Packages to probe and report in HealthStatus.
   repeated string packages = 6;
+  // Ask the runner to issue a challenge before granting any elevated role.
+  bool require_challenge = 7;
+  // Role the caller wants to be granted after a successful challenge
+  // (e.g. "admin", "pipeline-controller"). Empty = no upgrade requested.
+  string requested_role = 8;
 }
 
 message SessionHandle {
   string session_id = 1;
+  // Ciphertext the client must decrypt and return via `Verify` to prove
+  // possession of the runner master key. Empty when require_challenge=false.
+  bytes challenge = 2;
+}
+
+message VerifyRequest {
+  string session_id = 1;
+  // Plaintext the client obtained by decrypting `SessionHandle.challenge`.
+  bytes response = 2;
+}
+
+message VerifyResponse {
+  bool ok = 1;
+  // Role granted on success; empty if no upgrade was requested or the
+  // challenge failed.
+  string role = 2;
+  string error = 3;
 }
 
 message CloseRequest {
@@ -81,8 +103,7 @@ message CodeRequest {
   string request_id = 1;
   string session_id = 2;
   string code = 3;
-  // Dataset names pre-loaded into the namespace via SendDataset before this
-  // request runs.
+  // Dataset names pre-loaded into the namespace (load mechanism deferred).
   repeated string input_names = 4;
   uint64 timeout_ms = 5;
 }
@@ -135,36 +156,15 @@ message ExecEvent {
   }
 }
 
-// ---------- dataset transfer ----------
+// ---------- keepalive ----------
 
-// Local path: host streams N ARROW frames, then sends CONTROL(DatasetHeader)
-// as the transfer terminator; the kernel answers with CONTROL(DatasetAck).
-// `dataset_ref` ties them together and becomes the variable name inside the
-// kernel. Data-before-header lets a sequential kernel consume the frames
-// without knowing the chunk count up front.
-message DatasetHeader {
+message PingRequest {
   string session_id = 1;
-  string dataset_ref = 2;
-  int64 rows = 3;
-  int64 cols = 4;
-  repeated string columns = 5;
 }
 
-message DatasetAck {
-  string dataset_ref = 1;
-  int64 rows = 2;
-  bool ok = 3;
-  string error = 4;
-}
-
-// gRPC-only wrapper for serve <-> runner streaming; the runner re-frames
-// these into DatasetHeader + ARROW frames toward the kernel.
-message DatasetChunk {
-  string session_id = 1;
-  string dataset_ref = 2;
-  uint64 seq = 3;
-  bool last = 4;
-  bytes arrow_ipc = 5;
+message Pong {
+  bool alive = 1;
+  int64 server_time = 2;
 }
 
 // ---------- framed control envelope ----------
@@ -183,22 +183,22 @@ message Envelope {
     Ack ack = 7;
     CodeRequest code_request = 8;
     ExecEvent exec_event = 9;
-    DatasetHeader dataset_header = 10;
-    DatasetAck dataset_ack = 11;
-    HealthRequest health_request = 12;
-    HealthStatus health_status = 13;
-    Value value = 14;
-    Shutdown shutdown = 15;
+    HealthRequest health_request = 10;
+    HealthStatus health_status = 11;
+    Value value = 12;
+    Shutdown shutdown = 13;
   }
 }
 
 // ---------- runner service (serve <-> runner boundary) ----------
 
 service KernelRunner {
-  rpc StartSession(SessionParams) returns (SessionHandle);
+  rpc Start(SessionParams) returns (SessionHandle);
   rpc Execute(CodeRequest) returns (stream ExecEvent);
-  rpc SendDataset(stream DatasetChunk) returns (DatasetAck);
   rpc Interrupt(InterruptRequest) returns (Ack);
-  rpc CloseSession(CloseRequest) returns (Ack);
+  rpc Close(CloseRequest) returns (Ack);
+  rpc Ping(PingRequest) returns (Pong);
   rpc Health(HealthRequest) returns (HealthStatus);
+  // Submit the plaintext response to a challenge issued by `Start`.
+  rpc Verify(VerifyRequest) returns (VerifyResponse);
 }

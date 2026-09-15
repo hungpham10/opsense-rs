@@ -7,17 +7,16 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use bytes::Bytes;
+use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::frame::{Frame, FrameCodec};
-use crate::pb::{envelope, exec_event};
 use crate::pb::{
-    Ack, CodeRequest, DatasetAck, DatasetHeader, Envelope, ExecEvent, HealthRequest, HealthStatus,
+    Ack, CodeRequest, Envelope, ExecEvent, HealthRequest, HealthStatus,
     Hello, InterruptRequest, SessionHandle, SessionParams, Shutdown, Welcome,
 };
+use crate::pb::{envelope, exec_event};
 
 /// Driver for one kernel connection (typically a spawned process's stdio).
 pub struct KernelConnection<R, W> {
@@ -229,32 +228,6 @@ impl<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin> KernelCo
                 session_id: session_id.to_string(),
                 request_id: request_id.to_string(),
             })),
-        })
-        .await
-    }
-
-    /// Push a dataset: N ARROW frames (one per chunk) followed by a
-    /// `DatasetHeader` terminator, then wait for the kernel's `DatasetAck`.
-    /// Chunks must already be complete Arrow IPC stream segments.
-    ///
-    /// # Errors
-    /// Transport failures or a negative ack.
-    pub async fn send_dataset(
-        &mut self,
-        header: DatasetHeader,
-        chunks: Vec<Bytes>,
-    ) -> Result<DatasetAck> {
-        anyhow::ensure!(!chunks.is_empty(), "send_dataset requires >= 1 chunk");
-        for chunk in chunks {
-            self.sink.send(Frame::arrow(chunk)).await?;
-        }
-        self.send(&Envelope {
-            msg: Some(envelope::Msg::DatasetHeader(header)),
-        })
-        .await?;
-        self.expect("dataset ack", |msg| match msg {
-            envelope::Msg::DatasetAck(ack) => Some(ack),
-            _ => None,
         })
         .await
     }

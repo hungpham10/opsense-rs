@@ -27,11 +27,10 @@ pub fn run(path: Option<&Path>, force: bool) -> std::io::Result<()> {
         ));
     }
 
-    if let Some(parent) = target.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = target.parent()
+        && !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
-    }
     std::fs::write(&target, TEMPLATE)?;
 
     println!("wrote {}", target.display());
@@ -67,7 +66,7 @@ mod tests {
         run(Some(&path), true).expect("force rewrites");
 
         // The generated file must load cleanly and expose the attribute.
-        let cfg = opsense_core::config::Config::load(&path).expect("template parses as config");
+        let cfg = opsense_core::Config::load(&path).expect("template parses as config");
         assert!(cfg.attributes.contains_key("prom_url"));
         // Everything under [pipeline] is commented out by default.
         assert!(cfg.pipeline.is_none());

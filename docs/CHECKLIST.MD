@@ -32,7 +32,7 @@ Chú giải trạng thái: ✅ xong · ⚠️ một phần / thiếu góc · ❌
 | 14 | Schema / metadata discovery (`describe`) | ✅ | `opsense_describe`/`opsense_list_stations` + `GET /describe`. |
 | 15 | Metrics nội bộ của store (`StoreMetrics`) | ✅ | atomic counters, `snapshot()` skip số 0. |
 | 16 | Lineage / invalidation tức thì (`invalidate_from`) | ✅ | RAM/LMDB ngay; duckdb/s3 trả `Err` (chỉ qua retention). |
-| 17 | Capacity engine (ngưỡng dung lượng) | ⚠️ | `capacity` map + `CapacityMap` có, nhưng wiring đánh giá ngưỡng còn mỏng — việc của sóng sau. |
+| 17 | Capacity engine (ngưỡng dung lượng) | ✅ | `capacity` map + `CapacityMap`; breach ngưỡng được đánh giá trong `anomaly_station_transform` (2026-09-12). |
 
 Kết luận Part A: 16/17 ✅, 1 ⚠️. 6 gap chặn DoD đã đóng.
 
@@ -57,7 +57,7 @@ Kết luận Part A: 16/17 ✅, 1 ⚠️. 6 gap chặn DoD đã đóng.
 | 9 | Windowing / resampling | ✅ | `ts_resample(points, bucket_secs, agg)`. |
 | 10 | Join giữa các series | ❌ | |
 | 11 | Baseline so sánh hiện tại / lịch sử | ✅ | `ts_mean` baseline trong `fn process`. |
-| 12 | Anomaly / threshold (capacity engine) | ⚠️ | capacity map sẵn; logic đánh giá ngưỡng thiếu (xem #17 Part A). |
+| 12 | Anomaly / threshold (capacity engine) | ✅ | `anomaly_station_transform` (RCF + capacity breach, 2026-09-12); RCF scoring còn 1 test parked — xem PLAN.MD Session 2026-09-12. |
 | 13 | Scripting (Rhai) | ✅ | `register_fn` + `fn process(...)`. |
 | 14 | Sandbox an toàn (max ops / timeout) | ✅ | max_ops 1M + `OPSENSE_RHAI_TIMEOUT_SECS`. |
 | 15 | Visualization (biểu đồ) | ❌ | |

@@ -7,13 +7,8 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use arrow::array::{Float64Array, Int64Array};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::writer::StreamWriter;
-use arrow::record_batch::RecordBatch;
-use bytes::Bytes;
 use opsense_proto::host::KernelConnection;
-use opsense_proto::pb::{envelope, CodeRequest, DatasetHeader, Envelope, SessionParams};
+use opsense_proto::pb::{CodeRequest, Envelope, SessionParams, envelope};
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
@@ -57,29 +52,6 @@ fn code_req(session: &str, request: &str, code: &str) -> CodeRequest {
         input_names: vec![],
         timeout_ms: 10_000,
     }
-}
-
-/// One 3-row RecordBatch encoded as a complete Arrow IPC stream segment.
-fn sample_segment() -> (Bytes, RecordBatch) {
-    let schema = std::sync::Arc::new(Schema::new(vec![
-        Field::new("ts", DataType::Int64, false),
-        Field::new("value", DataType::Float64, true),
-    ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            std::sync::Arc::new(Int64Array::from(vec![1, 2, 3])),
-            std::sync::Arc::new(Float64Array::from(vec![Some(0.5), None, Some(2.5)])),
-        ],
-    )
-    .unwrap();
-    let mut buf = Vec::new();
-    {
-        let mut writer = StreamWriter::try_new(&mut buf, &schema).unwrap();
-        writer.write(&batch).unwrap();
-        writer.finish().unwrap();
-    }
-    (Bytes::from(buf), batch)
 }
 
 async fn start_session(conn: &mut Conn, id: &str) -> Result<()> {
@@ -154,67 +126,6 @@ async fn execute_print_text_and_error_directives() {
     let err = failed.error.expect("error event");
     assert_eq!(err.kind, "python_exception");
     assert_eq!(err.message, "boom");
-
-    k.conn.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn dataset_roundtrip_through_arrow_frames() {
-    let mut k = spawn_kernel().await;
-    k.conn.handshake().await.unwrap();
-    start_session(&mut k.conn, "s1").await.unwrap();
-
-    let (segment, batch) = sample_segment();
-    let ack = k
-        .conn
-        .send_dataset(
-            DatasetHeader {
-                session_id: "s1".into(),
-                dataset_ref: "@1".into(),
-                rows: batch.num_rows() as i64,
-                cols: batch.num_columns() as i64,
-                columns: vec!["ts".into(), "value".into()],
-            },
-            vec![segment],
-        )
-        .await
-        .expect("send dataset");
-    assert!(ack.ok, "{}", ack.error);
-    assert_eq!(ack.rows, 3);
-
-    let back = k
-        .conn
-        .execute(code_req("s1", "r1", "df"))
-        .await
-        .expect("df directive");
-    assert!(back.ok(), "{back:?}");
-    let df = back.value.expect("dataframe value");
-    match df.kind {
-        Some(opsense_proto::pb::value::Kind::Dataframe(frame)) => {
-            assert_eq!(frame.rows, 3);
-            assert_eq!(frame.cols, 2);
-            assert_eq!(frame.columns, vec!["ts", "value"]);
-        }
-        other => panic!("unexpected value {other:?}"),
-    }
-
-    // A second dataset replaces the "last dataset" the df directive echoes.
-    let (segment2, _) = sample_segment();
-    let ack = k
-        .conn
-        .send_dataset(
-            DatasetHeader {
-                dataset_ref: "@2".into(),
-                rows: 3,
-                cols: 2,
-                columns: vec!["ts".into(), "value".into()],
-                session_id: "s1".into(),
-            },
-            vec![segment2],
-        )
-        .await
-        .expect("second dataset");
-    assert_eq!(ack.rows, 3);
 
     k.conn.shutdown().await.unwrap();
 }

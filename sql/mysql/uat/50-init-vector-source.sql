@@ -1,0 +1,5 @@
+-- Vector source configuration for UAT environment.
+-- Point to the UAT Vector/Alloy scrape endpoint.
+--
+-- Example:
+--   url = "http://alloy-uat:9080"

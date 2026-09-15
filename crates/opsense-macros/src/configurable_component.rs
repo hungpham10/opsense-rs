@@ -88,8 +88,7 @@ pub fn configurable_component_impl(
                 && let syn::Expr::Lit(expr_lit) = &nv.value
                 && let syn::Lit::Str(lit) = &expr_lit.lit
             {
-                terminal_field =
-                    Some(syn::Ident::new(&lit.value(), lit.span()));
+                terminal_field = Some(syn::Ident::new(&lit.value(), lit.span()));
             } else if meta.path().is_ident("sea_orm") {
                 // Opt-in via attribute (e.g. `#[sink(sea_orm)]`) rather than a
                 // macro-crate feature flag: a `cfg!(feature = ...)` inside a

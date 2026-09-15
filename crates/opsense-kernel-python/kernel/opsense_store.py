@@ -1,44 +1,160 @@
 """
 opsense.store - Query observations from Opsense stations.
 
-This module provides the Python interface to query data from Opsense stores.
-All functions return pandas DataFrames with a DatetimeIndex (UTC).
+Lazy reads trực tiếp qua DuckDB trên Parquet lakehouse của station (S3) khi
+session có env `OPSENSE_S3_BASE` (+ credentials `OPSENSE_S3_*`); ngược lại
+fallback gọi GraphQL của serve (`OPSENSE_SERVE_URL`).
+
+Layout parquet (do `DuckS3Storage` flush): `<base>/<station>/ts_points/*.parquet`
+với cột `id, series BLOB ('blk:<block_id>'), ts BIGINT, value BLOB (JSON của
+Block)`. Filter theo block_id trong SQL → chỉ row groups liên quan được đọc.
+
+Các hàm trả pandas DataFrame với cột: ts (int64 unix sec), metric_id, value,
+labels (JSON string), kind, signal.
 """
 
-import pandas as pd
-import numpy as np
-from typing import Optional, List, Dict, Any
-import pyarrow as pa
+import json
+import os
+import time
+import urllib.request
+from typing import Any, Dict, List, Optional
 
-# These will be injected by the Rust host at runtime
-_session_manager = None
-_current_session_id = None
+_DF_COLUMNS = ["ts", "metric_id", "value", "labels", "kind", "signal"]
 
-
-def _get_store():
-    """Get the store from the current session."""
-    global _session_manager, _current_session_id
-    if _session_manager is None:
-        raise RuntimeError("Session manager not initialized")
-    if _current_session_id is None:
-        raise RuntimeError("No active session")
-    
-    session = _session_manager.get_session(_current_session_id)
-    if session is None:
-        raise RuntimeError(f"Session {_current_session_id} not found")
-    
-    return session.store
+# Env được host inject vào os.environ (Session.setup) — không cần session manager.
 
 
-def _resolve_station(station: Optional[str]) -> str:
-    """Resolve station name, using current station if not specified."""
-    if station is not None:
-        return station
-    global _session_manager, _current_session_id
-    session = _session_manager.get_session(_current_session_id)
-    if session and session.state.current_station:
-        return session.state.current_station
-    raise ValueError("No station specified and no current station set")
+def _env(name: str, default: Optional[str] = None) -> Optional[str]:
+    return os.environ.get(name, default)
+
+
+def _serve_url() -> Optional[str]:
+    return _env("OPSENSE_SERVE_URL")
+
+
+def _block_secs() -> int:
+    return int(_env("OPSENSE_BLOCK_SECS", "604800") or 604800)
+
+
+def _graphql(query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    url = _serve_url()
+    if not url:
+        raise RuntimeError(
+            "no store backend: set OPSENSE_S3_BASE (parquet lakehouse) "
+            "or OPSENSE_SERVE_URL (GraphQL fallback)"
+        )
+    endpoint = url.rstrip("/")
+    if not endpoint.endswith("/graphql"):
+        endpoint += "/graphql"
+    body = json.dumps({"query": query, "variables": variables or {}}).encode()
+    req = urllib.request.Request(
+        endpoint, data=body, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read())
+    if payload.get("errors"):
+        raise RuntimeError(f"graphql error: {payload['errors']}")
+    return payload.get("data", {})
+
+
+def _station_glob(station: str) -> Optional[str]:
+    base = _env("OPSENSE_S3_BASE")
+    if not base:
+        return None
+    return f"{base.rstrip('/')}/{station}/ts_points/*.parquet"
+
+
+def _configure_s3(con) -> None:
+    endpoint = _env("OPSENSE_S3_ENDPOINT")
+    key = _env("OPSENSE_S3_ACCESS_KEY_ID")
+    secret = _env("OPSENSE_S3_SECRET_ACCESS_KEY")
+    con.execute("INSTALL httpfs; LOAD httpfs;")
+    if endpoint and key and secret:
+        region = _env("OPSENSE_S3_REGION", "us-east-1")
+        token = _env("OPSENSE_S3_SESSION_TOKEN")
+        sql = (
+            f"CREATE OR REPLACE SECRET opsense_s3 (TYPE S3, ENDPOINT '{endpoint}', "
+            f"REGION '{region}', KEY_ID '{key}', SECRET '{secret}'"
+        )
+        if token:
+            sql += f", SESSION_TOKEN '{token}'"
+        sql += ")"
+        con.execute(sql)
+        con.execute("SET s3_url_style 'path';")
+
+
+def _query_parquet(
+    station: str, metric: str, from_ts: int, to_ts: int
+):
+    """Đọc observation từ Parquet lakehouse qua DuckDB, filter theo block."""
+    import duckdb  # lazy: chỉ import khi thật sự query
+
+    glob = _station_glob(station)
+    if not glob:
+        return None
+
+    bs = _block_secs()
+    first, last = from_ts // bs, to_ts // bs
+    # Chặn số block query một lần để tránh SQL khổng lồ.
+    if last - first > 10_000:
+        raise ValueError("time range quá lớn cho một query (hơn 10k block)")
+    block_list = ", ".join(f"'blk:{b}'" for b in range(first, last + 1))
+
+    metric_clause = "AND metric_id = ?" if metric else ""
+    con = duckdb.connect()
+    try:
+        _configure_s3(con)
+        sql = f"""
+        WITH blocks AS (
+            SELECT convert_from(value, 'utf8') AS blk
+            FROM read_parquet('{glob}', union_by_name = true)
+            WHERE decode(series) IN ({block_list})
+        ), items AS (
+            SELECT unnest(CAST(json_extract(blk, '$.items') AS JSON[])) AS j
+            FROM blocks
+        )
+        SELECT
+            CAST(json_extract_string(j, '$.ts') AS BIGINT)   AS ts,
+            json_extract_string(j, '$.metric_id')            AS metric_id,
+            CAST(json_extract_string(j, '$.value') AS DOUBLE) AS value,
+            json_extract(j, '$.labels')                      AS labels,
+            json_extract_string(j, '$.kind')                 AS kind,
+            json_extract_string(j, '$.signal')               AS signal
+        FROM items
+        WHERE CAST(json_extract_string(j, '$.ts') AS BIGINT) > ? 
+          AND CAST(json_extract_string(j, '$.ts') AS BIGINT) <= ?
+          {metric_clause}
+        ORDER BY ts ASC
+        """
+        params = [from_ts, to_ts] + ([metric] if metric else [])
+        return con.execute(sql, params).df()
+    finally:
+        con.close()
+
+
+def _query_graphql(station: str, metric: str, from_ts: int, to_ts: int):
+    data = _graphql(
+        "query($node: String!, $from: BigInt, $to: BigInt) {"
+        " queryTimeseries(node: $node, fromTs: $from, toTs: $to) {"
+        " ts metric_id value labels kind signal } }",
+        {"node": station, "from": from_ts, "to": to_ts},
+    )
+    rows = data.get("queryTimeseries") or []
+    if metric:
+        rows = [r for r in rows if r.get("metric_id") == metric]
+    return rows
+
+
+def _to_dataframe(rows) -> "pd.DataFrame":
+    import pandas as pd
+
+    if not rows:
+        return pd.DataFrame(columns=_DF_COLUMNS)
+    df = pd.DataFrame(rows)
+    for col in _DF_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+    return df[_DF_COLUMNS]
 
 
 def query(
@@ -46,51 +162,26 @@ def query(
     stage: str = "processed",
     metric: str = "",
     from_ts: int = 0,
-    to_ts: int = 2**63 - 1,
-) -> pd.DataFrame:
+    to_ts: Optional[int] = None,
+):
     """
-    Query observations from a station.
-    
+    Query observations từ một station.
+
     Args:
-        station: Station ID (e.g., "tsdb")
-        stage: "raw" or "processed" (default: "processed")
-        metric: Metric ID to filter (empty = all metrics)
-        from_ts: Start timestamp (Unix seconds, exclusive)
-        to_ts: End timestamp (Unix seconds, inclusive)
-    
+        station: Station ID (vd "prom-explore")
+        stage: "raw" hoặc "processed" (mặc định; hiện chỉ processed có dữ liệu)
+        metric: Lọc theo metric_id ("" = tất cả)
+        from_ts: Unix seconds (exclusive)
+        to_ts: Unix seconds (inclusive); None = hiện tại
+
     Returns:
-        DataFrame with columns: ts, metric_id, value, labels (JSON), kind, signal
-        Index: DatetimeIndex (UTC)
+        pandas DataFrame: ts, metric_id, value, labels, kind, signal
     """
-    store = _get_store()
-    station_id = _resolve_station(station)
-    
-    # Call Rust store query
-    if metric:
-        observations = store.query(stage, metric, from_ts, to_ts)
-    else:
-        observations = store.query_all(stage, from_ts, to_ts)
-    
-    # Convert to DataFrame
-    if not observations:
-        return pd.DataFrame(
-            columns=["ts", "metric_id", "value", "labels", "kind", "signal"]
-        ).set_index(pd.DatetimeIndex([], tz="UTC", name="ts"))
-    
-    data = []
-    for obs in observations:
-        data.append({
-            "ts": pd.Timestamp(obs.ts, unit="s", tz="UTC"),
-            "metric_id": obs.metric_id,
-            "value": obs.value,
-            "labels": obs.labels,
-            "kind": obs.kind,
-            "signal": obs.signal,
-        })
-    
-    df = pd.DataFrame(data)
-    df = df.set_index("ts")
-    df.index.name = "ts"
+    if to_ts is None:
+        to_ts = now()
+    df = _query_parquet(station, metric, from_ts, to_ts)
+    if df is None:
+        df = _to_dataframe(_query_graphql(station, metric, from_ts, to_ts))
     return df
 
 
@@ -98,113 +189,101 @@ def query_all(
     station: str,
     stage: str = "processed",
     from_ts: int = 0,
-    to_ts: int = 2**63 - 1,
-) -> pd.DataFrame:
-    """
-    Query all observations from a station (all metrics).
-    
-    Args:
-        station: Station ID
-        stage: "raw" or "processed"
-        from_ts: Start timestamp (Unix seconds)
-        to_ts: End timestamp (Unix seconds)
-    
-    Returns:
-        DataFrame with all metrics
-    """
+    to_ts: Optional[int] = None,
+):
+    """Query tất cả metrics của station."""
     return query(station, stage, "", from_ts, to_ts)
 
 
-def latest(
-    station: str,
-    stage: str = "processed",
-    metric: str = "",
-) -> Optional[float]:
+def scan(station: str):
     """
-    Get the latest value for a metric.
-    
-    Args:
-        station: Station ID
-        stage: "raw" or "processed"
-        metric: Metric ID
-    
-    Returns:
-        Latest value or None if no data
+    Lazy relation của station (chỉ ở chế độ Parquet lakehouse). Trả về
+    DuckDB relation — caller tự `.filter()` / `.df()` khi cần; DuckDB chỉ
+    đọc row groups thật sự cần.
     """
-    store = _get_store()
-    station_id = _resolve_station(station)
-    
+    import duckdb
+
+    glob = _station_glob(station)
+    if not glob:
+        raise RuntimeError("scan() requires OPSENSE_S3_BASE (parquet lakehouse)")
+    con = duckdb.connect()
+    _configure_s3(con)
+    rel = con.sql(
+        f"SELECT decode(series) AS block_id, ts, value "
+        f"FROM read_parquet('{glob}', union_by_name = true)"
+    )
+    return rel
+
+
+def latest(station: str, stage: str = "processed", metric: str = "") -> Optional[float]:
+    """Giá trị mới nhất của một metric (hoặc None)."""
     if not metric:
         raise ValueError("metric is required for latest()")
-    
-    obs_list = store.query(stage, metric, 0, 2**63 - 1)
-    if not obs_list:
+    df = query(station, stage, metric, 0, now())
+    if df.empty:
         return None
-    
-    return obs_list[-1].value
+    return float(df.iloc[-1]["value"])
 
 
 def list_metrics(station: str, stage: str = "processed") -> List[str]:
-    """
-    List all metric IDs in a station.
-    
-    Args:
-        station: Station ID
-        stage: "raw" or "processed"
-    
-    Returns:
-        List of metric IDs
-    """
-    store = _get_store()
-    station_id = _resolve_station(station)
-    
-    # Query all and extract unique metrics
-    observations = store.query_all(stage, 0, 2**63 - 1)
-    metrics = sorted(set(obs.metric_id for obs in observations))
-    return metrics
+    """Danh sách metric_id có trong station."""
+    df = query(station, stage, "", 0, now())
+    return sorted(df["metric_id"].dropna().unique().tolist())
+
+
+def station_ids() -> List[str]:
+    """Danh sách station đã đăng ký (qua serve GraphQL)."""
+    data = _graphql("{ status { stations { id } } }")
+    stations = (data.get("status") or {}).get("stations") or []
+    return [s["id"] for s in stations]
 
 
 # Time range helpers
 def now() -> int:
     """Current Unix timestamp in seconds."""
-    import time
     return int(time.time())
 
 
 def parse_duration(s: str) -> int:
     """
     Parse duration string to seconds.
-    
+
     Examples: "1h", "30m", "7d", "2w", "1h30m"
     """
     import re
-    pattern = r'(?:(\d+)w)?(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?'
+
+    pattern = r"(?:(\d+)w)?(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?"
     match = re.fullmatch(pattern, s.strip())
     if not match:
-        raise ValueError(f"Invalid duration: {s}")
-    
+        raise ValueError(f"Invalid duration string: {s}")
+
     weeks, days, hours, minutes, seconds = match.groups()
     total = 0
-    if weeks: total += int(weeks) * 7 * 86400
-    if days: total += int(days) * 86400
-    if hours: total += int(hours) * 3600
-    if minutes: total += int(minutes) * 60
-    if seconds: total += int(seconds)
+    if weeks:
+        total += int(weeks) * 86400 * 7
+    if days:
+        total += int(days) * 86400
+    if hours:
+        total += int(hours) * 3600
+    if minutes:
+        total += int(minutes) * 60
+    if seconds:
+        total += int(seconds)
     return total
 
 
 def time_range(preset: str) -> tuple:
     """
     Get (from_ts, to_ts) for common presets.
-    
+
     Presets: "1h", "6h", "24h", "7d", "30d", "1h_ago", etc.
     """
     to_ts = now()
-    
+
     if preset.endswith("_ago"):
         duration = preset[:-4]
         from_ts = to_ts - parse_duration(duration)
     else:
         from_ts = to_ts - parse_duration(preset)
-    
+
     return (from_ts, to_ts)

@@ -338,10 +338,10 @@ impl Config {
         let mut out: BTreeMap<String, String> = self.attributes.clone().into_iter().collect();
         const PREFIX: &str = "OPSENSE_ATTR_";
         for (env_key, value) in std::env::vars() {
-            if let Some(name) = env_key.strip_prefix(PREFIX) {
-                if !value.is_empty() {
-                    out.insert(name.to_ascii_lowercase(), value);
-                }
+            if let Some(name) = env_key.strip_prefix(PREFIX)
+                && !value.is_empty()
+            {
+                out.insert(name.to_ascii_lowercase(), value);
             }
         }
         out
@@ -425,8 +425,10 @@ url = "http://vector:8686"
 
     #[test]
     fn attributes_resolve_with_env_override() {
-        std::env::set_var("OPSENSE_ATTR_DC", "hn");
-        std::env::set_var("OPSENSE_ATTR_TOKEN", "s3cret");
+        unsafe {
+            std::env::set_var("OPSENSE_ATTR_DC", "hn");
+            std::env::set_var("OPSENSE_ATTR_TOKEN", "s3cret");
+        }
         let cfg = sample();
 
         let attrs = cfg.resolved_attributes();
@@ -436,7 +438,9 @@ url = "http://vector:8686"
         assert_eq!(attrs.get("token").map(String::as_str), Some("s3cret"));
         assert_eq!(attrs.get("env_name").map(String::as_str), Some("prod"));
 
-        std::env::remove_var("OPSENSE_ATTR_DC");
-        std::env::remove_var("OPSENSE_ATTR_TOKEN");
+        unsafe {
+            std::env::remove_var("OPSENSE_ATTR_DC");
+            std::env::remove_var("OPSENSE_ATTR_TOKEN");
+        }
     }
 }

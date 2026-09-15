@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
-use crate::cast::{cast_value, CastType};
+use crate::cast::{CastType, cast_value};
 use crate::jq::{JsonQuery, Operator};
 use crate::vector::runtime::{Component, Identify, Message, Outbound};
 use opsense_macros::transform;
