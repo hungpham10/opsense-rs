@@ -298,26 +298,6 @@ impl EdgeDataStorage for InMemoryStorage {
         d.edges.clear();
         Ok(())
     }
-
-    async fn for_each_edge_data(
-        &self,
-        f: &mut (dyn for<'a> FnMut(usize, &'a [u8]) -> Result<()> + Send),
-    ) -> Result<()> {
-        let items: Vec<(usize, Vec<u8>)> = {
-            let d = self
-                .data
-                .read()
-                .map_err(|_| StorageError::Internal("poison".into()))?;
-            d.edges
-                .iter()
-                .map(|(&id, data)| (id, data.clone()))
-                .collect()
-        };
-        for (id, data) in items {
-            f(id, &data)?;
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]

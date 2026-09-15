@@ -2,7 +2,7 @@
 //! Rhai engine (`ts_rate`, `ts_moving_avg`, `ts_resample`, `ts_quantile`,
 //! `ts_p95`, `ts_p99`, `ts_delta`, `ts_pct_change`).
 
-use opsense_rhai::{call_process, ScriptSource};
+use opsense_rhai::{ScriptSource, call_process};
 
 fn obs(ts: i64, val: f64) -> serde_json::Value {
     serde_json::json!({

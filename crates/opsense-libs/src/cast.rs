@@ -126,7 +126,10 @@ mod tests {
     #[test]
     fn casts_between_common_types() {
         assert_eq!(cast_value(json!("32.5"), &CastType::F64), Some(json!(32.5)));
-        assert_eq!(cast_value(json!("1700000000"), &CastType::I64).unwrap(), json!(1_700_000_000i64));
+        assert_eq!(
+            cast_value(json!("1700000000"), &CastType::I64).unwrap(),
+            json!(1_700_000_000i64)
+        );
         assert_eq!(cast_value(json!(1), &CastType::String), Some(json!("1")));
         assert_eq!(cast_value(json!("yes"), &CastType::Bool), Some(json!(true)));
         assert_eq!(cast_value(json!(null), &CastType::F64), None);

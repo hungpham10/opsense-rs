@@ -27,7 +27,7 @@ mod runtime;
 mod tools;
 mod transform;
 
-pub use runtime::{call_process, call_process_with, ScriptSource};
+pub use runtime::{ScriptSource, call_process, call_process_with};
 pub use transform::RhaiTransform;
 
 use std::sync::Arc;

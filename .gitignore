@@ -14,8 +14,7 @@ target/
 **/target/
 
 # Rust-specific
-Cargo.lock
-**/Cargo.lock
+# Cargo.lock is committed: workspace builds are reproducible (CI runs --locked).
 *.rs.bk
 *.rlib
 

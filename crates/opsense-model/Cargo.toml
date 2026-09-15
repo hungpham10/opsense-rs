@@ -9,4 +9,35 @@ license.workspace = true
 warnings = "deny"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+opsense-libs = { path = "../opsense-libs" }
+
+# GraphQL — derive Enum/SimpleObject trên các type shared (TelemetryKind, Signal,
+# LogLevel, Observation) để dùng trực tiếp ở `crates/opsense/src/api/repl/v1.rs`
+# thay vì duplicate adapter.
+async-graphql = { workspace = true }
+
+# Trivial libraries
+regex = "1.12.3"
+rand = "0.8.5"
+sha2 = "0.10.9"
+subtle = "2.6"
+aes-gcm = "0.10.3"
+url = "2.5.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
+thiserror = { workspace = true }
+chrono = { workspace = true }
+async-trait = "0.1"
+log = { workspace = true }
+tracing = { workspace = true }
+
+# JSON
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Integrate
+redis = { version = "1.0.3", features = ["tokio-comp", "connection-manager"] }
+aws-sdk-s3 = "1.122.0"
+aws-config = "1.8.13"
+reqwest = { workspace = true }
+sqlx = { workspace = true }
