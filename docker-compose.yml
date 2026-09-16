@@ -11,8 +11,8 @@ name: opsense
 #   - runner*     : 3 image variants of the analysis runner (echo/python/julia)
 #   - opsense-serve: the main HTTP/gRPC server (opsense + nginx + alloy under supervisor)
 #
-# The opsense-serve image is built by Earthly: `earthly +all-local` first, then
-# `docker compose up`. See Makefile shortcuts.
+# The Opsense images are built locally with `earthly +integration-images`,
+# then `docker compose up`. See Makefile shortcuts.
 
 services:
   postgres:
@@ -74,7 +74,7 @@ services:
   # Required for `docker compose up opsense-serve` end-to-end smoke (was missing
   # in earlier compose revisions; PLAN.MD §10.5 known gap).
   opsense-runner:
-    image: opsense-runner:${OPSENSE_TAG:-local}
+    image: ${OPSENSE_RUNNER_IMAGE:-opsense-runner:${OPSENSE_TAG:-local}}
     container_name: opsense-runner
     ports:
       - "50051:50051"
@@ -87,7 +87,7 @@ services:
       start_period: 15s
 
   opsense-runner-python:
-    image: opsense-runner-python:${OPSENSE_TAG:-local}
+    image: ${OPSENSE_RUNNER_PY_IMAGE:-opsense-runner-python:${OPSENSE_TAG:-local}}
     container_name: opsense-runner-python
     ports:
       - "50052:50051"
@@ -100,7 +100,7 @@ services:
       start_period: 15s
 
   opsense-runner-julia:
-    image: opsense-runner-julia:${OPSENSE_TAG:-local}
+    image: ${OPSENSE_RUNNER_JL_IMAGE:-opsense-runner-julia:${OPSENSE_TAG:-local}}
     container_name: opsense-runner-julia
     ports:
       - "50053:50051"
@@ -113,7 +113,7 @@ services:
       start_period: 15s
 
   opsense-serve:
-    image: opsense-serve:${OPSENSE_TAG:-local}
+    image: ${OPSENSE_SERVE_IMAGE:-opsense-serve:${OPSENSE_TAG:-local}}
     container_name: opsense-serve
     ports:
       - "8080:8080"

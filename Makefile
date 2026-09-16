@@ -1,75 +1,86 @@
 SHELL := /bin/bash
 APP_ENV ?= dev
 VERSION ?= local
+OPSENSE_TAG ?= $(VERSION)
 REGISTRY ?= ghcr.io
 IMAGE_PREFIX ?= lap02921/opsense
 COMPOSE := docker compose
 EARTHLY := earthly
 
-# Tên image đầy đủ (registry + prefix + suffix). Dùng chung cho cả build và push.
+# VERSION is the image tag shared by all four Opsense images.
 IMG_SERVE      := $(REGISTRY)/$(IMAGE_PREFIX)-serve:$(VERSION)
 IMG_RUNNER     := $(REGISTRY)/$(IMAGE_PREFIX)-runner:$(VERSION)
 IMG_RUNNER_PY  := $(REGISTRY)/$(IMAGE_PREFIX)-runner-python:$(VERSION)
 IMG_RUNNER_JL  := $(REGISTRY)/$(IMAGE_PREFIX)-runner-julia:$(VERSION)
 
-# Alias :local để docker-compose tham chiếu (chỉ cần khi VERSION=local).
-ifeq ($(VERSION),local)
-  ALIAS_SERVE      := opsense-serve:local
-  ALIAS_RUNNER     := opsense-runner:local
-  ALIAS_RUNNER_PY  := opsense-runner-python:local
-  ALIAS_RUNNER_JL  := opsense-runner-julia:local
-endif
-
-.PHONY: help build-local build-cloud up down logs ps restart shell encrypt decrypt sql-clean test-integration test-integration-down
+.PHONY: help build-local release build-cloud up up-cloud down down-v logs ps restart shell encrypt decrypt sql-clean test-integration test-integration-down
 
 help:
 	@echo "Opsense dev shortcuts:"
-	@echo "  make build-local   - Build + tag :local aliases (dùng cho docker-compose). VERSION mặc định = local."
-	@echo "  make build-cloud  - Build & push lên cloud registry. Bắt buộc VERSION=... (vd: 1.2.3)."
-	@echo "  make up            - docker compose up -d (APP_ENV=$(APP_ENV))"
-	@echo "  make down          - docker compose down (KHÔNG xoá volume; dùng 'down-v' để xoá)"
-	@echo "  make down-v        - docker compose down -v (DESTRUCTIVE: xoá volume)"
-	@echo "  make ps            - docker compose ps"
-	@echo "  make logs          - docker compose logs -f --tail=100"
-	@echo "  make restart SVC=x - restart một service (vd: make restart SVC=opsense-serve)"
-	@echo "  make shell SVC=x   - bash vào service (vd: make shell SVC=opsense-serve)"
+	@echo "  make build-local           - Build all 4 images locally with tag VERSION (default: local)."
+	@echo "  make release               - Build & push all 4 images with VERSION as their tag."
+	@echo "  make build-cloud           - Alias for release."
+	@echo "  make up                    - docker compose up -d using local image tag VERSION."
+	@echo "  make up-cloud              - docker compose up -d using released registry images."
+	@echo "  make down                  - docker compose down (KHÔNG xoá volume; dùng 'down-v' để xoá)"
+	@echo "  make down-v                - docker compose down -v (DESTRUCTIVE: xoá volume)"
+	@echo "  make ps                    - docker compose ps"
+	@echo "  make logs                  - docker compose logs -f --tail=100"
+	@echo "  make restart SVC=x         - restart một service (vd: make restart SVC=opsense-serve)"
+	@echo "  make shell SVC=x           - bash vào service (vd: make shell SVC=opsense-serve)"
 	@echo "  make encrypt F=env/secrets.dev.yaml      - sops -e một secrets file"
 	@echo "  make decrypt F=env/secrets.dev.enc.yaml  - sops -d một secrets file"
-	@echo "  make sql-clean     - xoá *.sql files sinh ra sau init"
-	@echo "  make test-integration         - Build + compose up + run full integration suite (Nginx + UDS + Dex)"
-	@echo "  make test-integration-down    - Cleanup compose (down -v)"
+	@echo "  make sql-clean             - xoá *.sql files sinh ra sau init"
+	@echo "  make test-integration      - Build + compose up + run full integration suite (Nginx + UDS + Dex)"
+	@echo "  make test-integration-down - Cleanup compose (down -v)"
 	@echo ""
 	@echo "Biến override:"
-	@echo "  VERSION=1.2.3 REGISTRY=... IMAGE_PREFIX=... make build-local  (build cloud tag)"
-	@echo "  VERSION=1.2.3 make build-cloud                             (build + push)"
+	@echo "  VERSION=v1.0.0 make build-local          (build local tags)"
+	@echo "  VERSION=v1.0.0 make release              (build + push registry tags)"
+	@echo "  VERSION=v1.0.0 make up-cloud             (run released registry images)"
 	@echo "  APP_ENV=uat make up"
 
-# Build 4 images cho local docker daemon + tag :local aliases
-# để docker-compose có thể tham chiếu.
+# Build all 4 local images. Compose uses the same image names and VERSION tag.
 build-local:
-	$(EARTHLY) +all-local
-	@if [ "$(VERSION)" != "local" ]; then \
-		echo "NOTE: VERSION=$(VERSION) khác 'local' — bỏ qua tag :local aliases."; \
-	else \
-		docker tag $(IMG_SERVE)     $(ALIAS_SERVE); \
-		docker tag $(IMG_RUNNER)    $(ALIAS_RUNNER); \
-		docker tag $(IMG_RUNNER_PY) $(ALIAS_RUNNER_PY); \
-		docker tag $(IMG_RUNNER_JL) $(ALIAS_RUNNER_JL); \
-		echo "Tagged: $(ALIAS_SERVE), $(ALIAS_RUNNER), $(ALIAS_RUNNER_PY), $(ALIAS_RUNNER_JL)"; \
-	fi
+	@test -n "$(VERSION)" || (echo "ERROR: VERSION is required." && exit 1)
+	$(EARTHLY) --build-arg VERSION="$(VERSION)" +integration-images
+	@echo "Built local tags: opsense-serve:$(VERSION), opsense-runner:$(VERSION), opsense-runner-python:$(VERSION), opsense-runner-julia:$(VERSION)"
 
-# Build & push 4 images lên cloud registry.
-# Ví dụ: VERSION=1.2.3 make build-cloud
-#         VERSION=$$(git rev-parse --short HEAD) make build-cloud
-build-cloud:
-	@test -n "$(VERSION)" || (echo "ERROR: VERSION is required (vd: VERSION=1.2.3)" && exit 1)
+# Build & push all 4 registry images. VERSION is used verbatim as every image tag.
+release:
+	@test -n "$(VERSION)" || (echo "ERROR: VERSION is required (vd: VERSION=v1.0.0)." && exit 1)
 	@if [ "$(VERSION)" = "local" ]; then \
 		echo "ERROR: VERSION=local không được push lên registry."; exit 1; \
 	fi
-	$(EARTHLY) --push +all
+	$(EARTHLY) --push \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg REGISTRY="$(REGISTRY)" \
+		--build-arg IMAGE_PREFIX="$(IMAGE_PREFIX)" \
+		+all
+	@echo "Pushed $(IMG_SERVE), $(IMG_RUNNER), $(IMG_RUNNER_PY), $(IMG_RUNNER_JL)"
+
+build-cloud: release
 
 up:
-	APP_ENV=$(APP_ENV) $(COMPOSE) up -d
+	APP_ENV=$(APP_ENV) OPSENSE_TAG=$(OPSENSE_TAG) $(COMPOSE) up -d
+
+up-cloud:
+	@test -n "$(VERSION)" || (echo "ERROR: VERSION is required (vd: VERSION=v1.0.0)." && exit 1)
+	@if [ "$(VERSION)" = "local" ]; then \
+		echo "ERROR: VERSION=local không được dùng cho up-cloud."; exit 1; \
+	fi
+	APP_ENV=$(APP_ENV) OPSENSE_TAG=$(VERSION) \
+		OPSENSE_SERVE_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)-serve \
+		OPSENSE_RUNNER_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)-runner \
+		OPSENSE_RUNNER_PY_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)-runner-python \
+		OPSENSE_RUNNER_JL_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)-runner-julia \
+		$(COMPOSE) pull
+	APP_ENV=$(APP_ENV) OPSENSE_TAG=$(VERSION) \
+		OPSENSE_SERVE_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)-serve \
+		OPSENSE_RUNNER_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)-runner \
+		OPSENSE_RUNNER_PY_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)-runner-python \
+		OPSENSE_RUNNER_JL_IMAGE=$(REGISTRY)/$(IMAGE_PREFIX)-runner-julia \
+		$(COMPOSE) up -d
 
 down:
 	$(COMPOSE) down
@@ -102,21 +113,12 @@ decrypt:
 sql-clean:
 	find ./sql -name '*.sql' -newer ./Makefile -print -delete
 
-# Integration test: build images + compose up + run integration test suite.
-# Test approach: full prod flow (Nginx + UDS + OIDC provider Dex + Axum).
-# Skip prerequisites (build, compose up) nếu images đã có sẵn.
+# Integration tests use local image names so they never depend on a registry.
 test-integration:
 	@echo ">>> Building 4 images (serve + runner + python + julia) via Earthly"
-	$(EARTHLY) +all-local
-	@echo ">>> Tag :local aliases cho compose"
-	@if [ "$(VERSION)" = "local" ]; then \
-		docker tag $(REGISTRY)/$(IMAGE_PREFIX)-serve:local     $(ALIAS_SERVE); \
-		docker tag $(REGISTRY)/$(IMAGE_PREFIX)-runner:local    $(ALIAS_RUNNER); \
-		docker tag $(REGISTRY)/$(IMAGE_PREFIX)-runner-python:local $(ALIAS_RUNNER_PY); \
-		docker tag $(REGISTRY)/$(IMAGE_PREFIX)-runner-julia:local  $(ALIAS_RUNNER_JL); \
-	fi
+	$(EARTHLY) --build-arg VERSION="$(OPSENSE_TAG)" +integration-images
 	@echo ">>> Compose up + wait for healthy"
-	APP_ENV=$(APP_ENV) OPSENSE_TAG=$(VERSION) $(COMPOSE) up -d --wait --wait-timeout 180
+	APP_ENV=$(APP_ENV) OPSENSE_TAG=$(OPSENSE_TAG) $(COMPOSE) up -d --wait --wait-timeout 180
 	@echo ">>> Run integration test suite (Nginx + UDS + Dex + Axum)"
 	APP_ENV=$(APP_ENV) OPSENSE_SERVE_URL=http://127.0.0.1:8080 \
 	OPSENSE_DEX_ISSUER=http://127.0.0.1:5556/dex \

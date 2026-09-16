@@ -4,13 +4,11 @@ mod data_loader;
 mod extractors;
 mod fee;
 mod graph;
-mod grid;
-mod macros;
-mod models;
 mod ohcl;
-mod opt_cache;
-mod playground;
+
+
 mod portfolio;
+mod grid;
 mod strategies;
 mod tick;
 
@@ -28,22 +26,18 @@ pub use extractors::OhlcvExtractor;
 pub use fee::{
     DerivativeFee, MbsDerivativeFee, SimpleFixedFee, SsiDerivativeFee, VpsDerivativeFee,
 };
-pub use graph::{Graph, Graph as GraphV2, In, Node, Op};
-pub use models::{
-    NUM_GRID_PARAMS, build_mean_reversion_onnx_bytes, build_mean_reversion_onnx_default,
-    build_momentum_breakout_onnx_bytes, build_momentum_breakout_onnx_default,
-    build_trend_follower_onnx_bytes, build_trend_follower_onnx_default,
-};
-pub use opt_cache::{OptCache, OptResult, default_opt_cache_path};
+pub use graph::{Graph, In, Node};
+pub use graph::ops::*;
+
+
 pub use portfolio::{DEFAULT_SETTLEMENT_CANDLES, Order, OrderType, Portfolio, Report};
 pub use strategies::{GridStrategy, VolatilityAdaptiveGridStrategy};
 
-/// Re-export runtime duoi `crate::vector::runtime` de macro `#[source]`/`#[sink]`/`#[transform]`
-/// cua opsense-macros mo rong dung URL nhu trong opsense-components.
+/// Re-export runtime dưới `crate::vector::runtime` để macro `#[source]`/`#[sink]`/`#[transform]`
+/// của opsense-macros mở rộng dùng URL như trong opsense-components.
 pub mod vector {
     pub use opsense_libs::vector::runtime;
 }
-pub use playground::SharpeScore;
 
 use std::fmt::Debug;
 use std::io::Error;
@@ -101,25 +95,9 @@ pub trait DataLoader: Sync + Send {
 }
 
 /// Transforms candle data into one or more feature vectors.
-///
-/// Each extractor produces one or more `Vec<f64>` arrays from the same candle
-/// slice.  Models compose a list of extractors and feed their concatenated
-/// outputs (plus any learned weights) to the ONNX predictor.
-///
-/// # Padding
-///
-/// Extractors are responsible for producing fixed-size arrays when the model
-/// requires them (e.g. [`OhlcvExtractor`] pads to its `window`).  Downstream
-/// code simply collects whatever each extractor returns.
 #[typetag::serde(tag = "type")]
 pub trait Extractor: Debug + Send + Sync {
-    /// Human-readable name (for debugging / logging).
     fn name(&self) -> &str;
-
-    /// Extract feature vectors from a candle slice.
-    ///
-    /// Returns one or more `Vec<f64>` arrays.  The caller appends them to the
-    /// full feature vector in order.
     fn extract(&self, candles: &[CandleStick]) -> Result<Vec<Vec<f64>>, Error>;
 }
 
@@ -150,9 +128,6 @@ pub trait Score: Send + Sync {
 #[typetag::serde(tag = "type")]
 pub trait Calendar: Send + Sync {
     fn next(&self, current_ts: u64, resolution: &str) -> u64;
-
-    /// Số cây nến phải chờ trước khi được phép đóng lệnh (T+N) theo loại thị trường.
-    /// Mặc định 0 (T+0, không khóa) — chỉ thị trường chứng khoán (StockCalendar) trả 3 (T+3).
     fn settlement_candles(&self) -> u64 {
         0
     }
