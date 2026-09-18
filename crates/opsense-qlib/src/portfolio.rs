@@ -859,7 +859,7 @@ impl Portfolio {
     /// Trả về các biến cố (Placed/Rejected) để vòng forward notify ra ngoài.
     #[inline]
     #[allow(clippy::too_many_arguments)]
-    fn evaluate_grid_entries(
+    pub(crate) fn evaluate_grid_entries(
         id: usize,
         candle: &CandleStick,
         plan: &[TradingGrid],
@@ -950,7 +950,7 @@ impl Portfolio {
     }
 
     #[inline]
-    fn check_order_exit(
+    pub(crate) fn check_order_exit(
         order: &Order,
         candle: &CandleStick,
         fee_rate: f64,

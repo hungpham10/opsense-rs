@@ -178,4 +178,8 @@ jobs:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           VERSION: ${{ github.ref_name }}
-        run: earthly --push --build-arg VERSION=$VERSION +all
+        run: earthly --push \
+          --build-arg VERSION="$VERSION" \
+          --build-arg REGISTRY=ghcr.io \
+          --build-arg IMAGE_PREFIX=lap02921/opsense \
+          +all

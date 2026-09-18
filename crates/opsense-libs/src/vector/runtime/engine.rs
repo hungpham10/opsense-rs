@@ -543,10 +543,10 @@ impl Runtime {
                 )
             })?;
 
-            if inputs.contains(idx) {
+            if !inputs.contains(idx) {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
-                    format!("Node {id} must be a source node"),
+                    format!("Node {id} must be an input/source node"),
                 ));
             }
 
