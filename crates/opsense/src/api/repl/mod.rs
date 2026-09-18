@@ -66,12 +66,7 @@ pub struct ReplHeaders {
 }
 
 pub fn routes(state: AppState) -> Router<AppState> {
-    let schema = Arc::new(Schema::build(
-        QueryRoot,
-        MutationRoot,
-        EmptySubscription,
-    )
-    .finish());
+    let schema = Arc::new(Schema::build(QueryRoot, MutationRoot, EmptySubscription).finish());
     Router::new()
         .route("/graphql", post(v1::graphql))
         .layer(Extension(schema))

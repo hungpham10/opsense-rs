@@ -157,7 +157,7 @@ async fn candle_stream_drives_paper_trading_events() {
     assert!(!payloads.is_empty(), "engine phải phát OrderEvent");
     let events = payloads
         .iter()
-        .map(|payload| assert_trade_event(payload))
+        .map(assert_trade_event)
         .collect::<Vec<_>>();
     assert!(
         events

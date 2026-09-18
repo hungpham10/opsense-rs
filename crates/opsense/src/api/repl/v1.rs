@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use async_graphql::{Context, EmptySubscription, InputObject, Object, Schema, SimpleObject};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
-use axum::extract::State;
 use axum::Extension;
-use opsense_core::TimeseriesStation;
+use axum::extract::State;
 use opsense_core::Observation;
+use opsense_core::TimeseriesStation;
 use opsense_libs::vector::runtime::Component;
 use opsense_proto::pb::SessionParams;
 use tokio::sync::RwLock;
@@ -68,11 +68,12 @@ fn parse_component(input: &ComponentInput) -> async_graphql::Result<Arc<dyn Comp
     json.insert("type".into(), serde_json::Value::String(input.kind.clone()));
     json.insert("id".into(), serde_json::Value::String(input.id.clone()));
     if let Some(cfg) = &input.config
-        && let Some(cfg_obj) = cfg.as_object() {
-            for (k, v) in cfg_obj {
-                json.insert(k.clone(), v.clone());
-            }
+        && let Some(cfg_obj) = cfg.as_object()
+    {
+        for (k, v) in cfg_obj {
+            json.insert(k.clone(), v.clone());
         }
+    }
     if let Some(inputs) = &input.inputs {
         json.insert(
             "inputs".into(),
@@ -167,19 +168,18 @@ impl QueryRoot {
             .context
             .station::<Arc<RwLock<TimeseriesStation>>>(&node)
             .await
-            .map_err(|e| async_graphql::Error::new(format!("station '{node}' is not a timeseries: {e}")))?;
+            .map_err(|e| {
+                async_graphql::Error::new(format!("station '{node}' is not a timeseries: {e}"))
+            })?;
 
         let from = from_ts.unwrap_or(i64::MIN);
         let to = to_ts.unwrap_or(i64::MAX);
 
         let mut station = station.write().await;
-        Ok(station
-            .query_range(from, to)
-            .await
-            .unwrap_or_else(|| {
-                tracing::warn!(node = %node, "timeseries cache miss");
-                Vec::new()
-            }))
+        Ok(station.query_range(from, to).await.unwrap_or_else(|| {
+            tracing::warn!(node = %node, "timeseries cache miss");
+            Vec::new()
+        }))
     }
 
     /// Danh sách kernel session đang sống trong host (Tầng 2).
@@ -206,7 +206,10 @@ impl QueryRoot {
         for entry in sessions.values_mut() {
             match entry.client.health().await {
                 Ok(h) => {
-                    return Ok(KernelHealth { ok: h.ok, kernel_name: h.kernel_name });
+                    return Ok(KernelHealth {
+                        ok: h.ok,
+                        kernel_name: h.kernel_name,
+                    });
                 }
                 Err(e) => tracing::warn!(backend = %entry.backend, "kernel health: {e}"),
             }
@@ -231,8 +234,10 @@ impl MutationRoot {
         components: Vec<ComponentInput>,
     ) -> async_graphql::Result<EditResult> {
         let s = state(ctx);
-        let parsed: Vec<Arc<dyn Component>> =
-            components.iter().map(parse_component).collect::<async_graphql::Result<Vec<_>>>()?;
+        let parsed: Vec<Arc<dyn Component>> = components
+            .iter()
+            .map(parse_component)
+            .collect::<async_graphql::Result<Vec<_>>>()?;
 
         let runtime = s.runtime.write().await;
         runtime
@@ -241,7 +246,10 @@ impl MutationRoot {
 
         drop(runtime);
         let nodes = s.status().await.nodes;
-        Ok(EditResult { reloaded: true, nodes })
+        Ok(EditResult {
+            reloaded: true,
+            nodes,
+        })
     }
 
     async fn set_attribute(
@@ -252,10 +260,17 @@ impl MutationRoot {
     ) -> async_graphql::Result<SetAttributeResult> {
         let s = state(ctx);
         s.set_attribute(name.clone(), value).await;
-        Ok(SetAttributeResult { ok: true, env_override_active: env_attr_override(&name) })
+        Ok(SetAttributeResult {
+            ok: true,
+            env_override_active: env_attr_override(&name),
+        })
     }
 
-    async fn remove_attribute(&self, ctx: &Context<'_>, name: String) -> async_graphql::Result<bool> {
+    async fn remove_attribute(
+        &self,
+        ctx: &Context<'_>,
+        name: String,
+    ) -> async_graphql::Result<bool> {
         Ok(state(ctx).remove_attribute(&name).await)
     }
 
@@ -275,9 +290,14 @@ impl MutationRoot {
             },
         )
         .await
-        .map_err(|e| async_graphql::Error::new(format!("kernelStart '{backend}' at {endpoint}: {e}")))?;
+        .map_err(|e| {
+            async_graphql::Error::new(format!("kernelStart '{backend}' at {endpoint}: {e}"))
+        })?;
 
-        let session = KernelSession { id: client.session_id().to_string(), backend: backend.clone() };
+        let session = KernelSession {
+            id: client.session_id().to_string(),
+            backend: backend.clone(),
+        };
         state(ctx)
             .kernel()
             .insert(session.id.clone(), KernelSessionEntry { client, backend })
@@ -295,9 +315,9 @@ impl MutationRoot {
     ) -> async_graphql::Result<KernelResult> {
         let outcome = {
             let mut sessions = state(ctx).kernel().lock().await;
-            let entry = sessions
-                .get_mut(&id)
-                .ok_or_else(|| async_graphql::Error::new(format!("unknown kernel session '{id}'")))?;
+            let entry = sessions.get_mut(&id).ok_or_else(|| {
+                async_graphql::Error::new(format!("unknown kernel session '{id}'"))
+            })?;
             entry.client.execute(&code).await
         }
         .map_err(|e| async_graphql::Error::new(format!("kernelExecute: {e}")))?;
@@ -314,11 +334,7 @@ impl MutationRoot {
     }
 
     /// Huỷ execution đang chạy trong kernel session `id`.
-    async fn kernel_interrupt(
-        &self,
-        ctx: &Context<'_>,
-        id: String,
-    ) -> async_graphql::Result<bool> {
+    async fn kernel_interrupt(&self, ctx: &Context<'_>, id: String) -> async_graphql::Result<bool> {
         let mut sessions = state(ctx).kernel().lock().await;
         let entry = sessions
             .get_mut(&id)
@@ -333,11 +349,10 @@ impl MutationRoot {
 
     /// Đóng kernel session `id` và xoá khỏi registry.
     async fn kernel_close(&self, ctx: &Context<'_>, id: String) -> async_graphql::Result<bool> {
-        let entry = state(ctx)
-            .kernel()
-            .remove(&id)
-            .await
-            .ok_or_else(|| async_graphql::Error::new(format!("unknown kernel session '{id}'")))?;
+        let entry =
+            state(ctx).kernel().remove(&id).await.ok_or_else(|| {
+                async_graphql::Error::new(format!("unknown kernel session '{id}'"))
+            })?;
         let mut client = entry.client;
         client
             .close()
@@ -387,7 +402,10 @@ mod tests {
             "type KernelResult",
             "type KernelHealth",
         ] {
-            assert!(sdl.contains(op), "schema missing `{op}`\n--- SDL ---\n{sdl}");
+            assert!(
+                sdl.contains(op),
+                "schema missing `{op}`\n--- SDL ---\n{sdl}"
+            );
         }
     }
 }

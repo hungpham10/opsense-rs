@@ -3,18 +3,18 @@
 //! Wraps the generated [`opsense_proto::pb::kernel_runner_client::KernelRunnerClient`]
 //! with Ed25519 signing and AES-GCM challenge-response authentication.
 
-use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
+use opsense_proto::pb::CloseRequest;
+use opsense_proto::pb::kernel_runner_client::KernelRunnerClient;
 use opsense_proto::pb::value::Kind as ValueKind;
 use opsense_proto::pb::{
-    exec_event::Event as ExecEventTag, Ack, CodeRequest, ErrorEvent, ExecEvent,
-    HealthRequest, HealthStatus, InterruptRequest, SessionHandle,
-    SessionParams, VerifyRequest, VerifyResponse, Value,
+    Ack, CodeRequest, ErrorEvent, ExecEvent, HealthRequest, HealthStatus, InterruptRequest,
+    SessionHandle, SessionParams, Value, VerifyRequest, VerifyResponse,
+    exec_event::Event as ExecEventTag,
 };
-use opsense_proto::pb::kernel_runner_client::KernelRunnerClient;
-use opsense_proto::pb::CloseRequest;
 use rand::RngCore;
 use tonic::transport::{Channel, Endpoint};
 
@@ -249,8 +249,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>> {
     (0..s.len())
         .step_by(2)
         .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
-                .map_err(|_| anyhow!("invalid hex at position {i}"))
+            u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| anyhow!("invalid hex at position {i}"))
         })
         .collect()
 }
@@ -290,7 +289,10 @@ impl ExecOutcome {
 
     /// Extract the `text` value, if the result is a text value.
     pub fn text(&self) -> Option<&str> {
-        let Some(Value { kind: Some(ValueKind::Text(t)) }) = &self.value else {
+        let Some(Value {
+            kind: Some(ValueKind::Text(t)),
+        }) = &self.value
+        else {
             return None;
         };
         Some(t.as_str())
@@ -298,7 +300,10 @@ impl ExecOutcome {
 
     /// Extract the `number` value, if the result is a number value.
     pub fn number(&self) -> Option<f64> {
-        let Some(Value { kind: Some(ValueKind::Number(n)) }) = &self.value else {
+        let Some(Value {
+            kind: Some(ValueKind::Number(n)),
+        }) = &self.value
+        else {
             return None;
         };
         Some(*n)
@@ -485,8 +490,7 @@ mod tests {
             .await
             .expect("connect exec client");
 
-        let exec_task =
-            tokio::spawn(async move { exec_client.execute("sleep:3000").await });
+        let exec_task = tokio::spawn(async move { exec_client.execute("sleep:3000").await });
 
         // Let execute() start.
         tokio::time::sleep(Duration::from_millis(100)).await;

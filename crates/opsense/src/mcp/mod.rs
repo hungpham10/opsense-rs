@@ -26,8 +26,7 @@ pub async fn run(endpoint: Option<String>) -> io::Result<()> {
         .or_else(|| std::env::var("OPSENSE_GRAPHQL_URL").ok())
         .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
 
-    let client = OpsenseClient::new(&endpoint)
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    let client = OpsenseClient::new(&endpoint).map_err(|e| io::Error::other(e.to_string()))?;
 
     server::serve(client).await
 }

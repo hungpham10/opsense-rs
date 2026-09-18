@@ -130,13 +130,12 @@ impl Admin {
             None => {
                 let pool = self.dbt(tenant_id);
                 let mut conn = pool.acquire().await?;
-                let row = sqlx::query(
-                    "SELECT token FROM sys_token_map WHERE tenant_id = $1 AND id = $2",
-                )
-                .bind(tenant_id)
-                .bind(token_id)
-                .fetch_optional(&mut *conn)
-                .await?;
+                let row =
+                    sqlx::query("SELECT token FROM sys_token_map WHERE tenant_id = $1 AND id = $2")
+                        .bind(tenant_id)
+                        .bind(token_id)
+                        .fetch_optional(&mut *conn)
+                        .await?;
                 let Some(row) = row else {
                     return Err(AdminError::Other(format!(
                         "Not found token_id {token_id} for tenant {tenant_id}"

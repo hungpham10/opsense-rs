@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -20,19 +20,19 @@ pub struct DeviceCodeRequest {}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct DeviceCodeResponse {
-    pub device_code:      String,
-    pub user_code:        String,
+    pub device_code: String,
+    pub user_code: String,
     pub verification_uri: String,
-    pub expires_in:       i64,
-    pub interval:         i32,
+    pub expires_in: i64,
+    pub interval: i32,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct DeviceTokenResponse {
-    pub access_token:  String,
+    pub access_token: String,
     pub refresh_token: String,
-    pub token_type:    String,
-    pub expires_in:    i64,
+    pub token_type: String,
+    pub expires_in: i64,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -74,7 +74,10 @@ pub async fn poll_token(
 
     loop {
         if start.elapsed().as_secs() > POLL_TIMEOUT_SECS {
-            bail!("Timed out waiting for user authorization ({}s)", POLL_TIMEOUT_SECS);
+            bail!(
+                "Timed out waiting for user authorization ({}s)",
+                POLL_TIMEOUT_SECS
+            );
         }
 
         let resp = client
@@ -124,13 +127,11 @@ pub fn save_token_to_disk(token: &str) -> Result<std::path::PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| anyhow!("HOME not set"))?;
+    let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME not set"))?;
     let dir = std::path::PathBuf::from(home)
         .join(".config")
         .join("opsense");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create dir {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create dir {}", dir.display()))?;
 
     let path = dir.join("token");
     let mut f = std::fs::OpenOptions::new()

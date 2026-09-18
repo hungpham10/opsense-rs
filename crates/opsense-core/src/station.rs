@@ -1,5 +1,8 @@
 use std::io::{Error, ErrorKind};
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use async_graphql::Enum;
 use serde::{Deserialize, Serialize};
@@ -64,10 +67,7 @@ impl TimeseriesStation {
     /// persist qua hook `attach_timeseries` của LruCache, miss tự read-through
     /// từ storage), còn lại memory-only. Series key của một block là
     /// `blk:<block_id>`, value là Block serialize JSON.
-    pub async fn from_storage(
-        id: &str,
-        cfg: &crate::config::StorageConfig,
-    ) -> Result<Self, Error> {
+    pub async fn from_storage(id: &str, cfg: &crate::config::StorageConfig) -> Result<Self, Error> {
         if cfg.backend != "duckdb" {
             return Ok(Self::default());
         }
@@ -138,8 +138,7 @@ impl TimeseriesStation {
                 ),
                 None => match self.load_cold_block(block_id).await {
                     Some(block) => {
-                        let covered =
-                            req_start >= block.range.0 && req_end <= block.range.1;
+                        let covered = req_start >= block.range.0 && req_end <= block.range.1;
                         let items = block
                             .items
                             .iter()
@@ -214,9 +213,9 @@ async fn open_station_store(
     let s3 = s3_config_from_storage(cfg, id)?;
     let (db_path, s3cfg) = match &s3 {
         Some(cfg) => {
-            let hash: u64 = id
-                .bytes()
-                .fold(0xcbf29ce484222325u64, |acc, b| (acc ^ u64::from(b)) * 0x100000001b3);
+            let hash: u64 = id.bytes().fold(0xcbf29ce484222325u64, |acc, b| {
+                (acc ^ u64::from(b)) * 0x100000001b3
+            });
             let dir = std::env::temp_dir().join(format!("opsense-ts-{hash:016x}"));
             (
                 dir.join("buffer.duckdb").to_string_lossy().into_owned(),
@@ -251,9 +250,7 @@ fn s3_config_from_storage(
         return Ok(None);
     };
     let (bucket, mut prefix) = match rest.split_once('/') {
-        Some((bucket, prefix)) => {
-            (bucket.to_string(), prefix.trim_matches('/').to_string())
-        }
+        Some((bucket, prefix)) => (bucket.to_string(), prefix.trim_matches('/').to_string()),
         None => (rest.to_string(), String::new()),
     };
     if !prefix.is_empty() {
@@ -271,8 +268,7 @@ fn s3_config_from_storage(
         .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok());
     let secret_access_key = from(&sc.secret_access_key, "OPSENSE_S3_SECRET_ACCESS_KEY")
         .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok());
-    let (Some(access_key_id), Some(secret_access_key)) = (access_key_id, secret_access_key)
-    else {
+    let (Some(access_key_id), Some(secret_access_key)) = (access_key_id, secret_access_key) else {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             "storage.data_dir là s3:// nhưng thiếu credentials \
@@ -319,10 +315,7 @@ impl PatternStation {
     }
 
     /// Constructor theo `[storage]` config — tương tự [`CategoryStation::from_storage`].
-    pub async fn from_storage(
-        id: &str,
-        cfg: &crate::config::StorageConfig,
-    ) -> Result<Self, Error> {
+    pub async fn from_storage(id: &str, cfg: &crate::config::StorageConfig) -> Result<Self, Error> {
         if cfg.backend != "duckdb" {
             return Ok(Self::new());
         }
@@ -339,9 +332,11 @@ impl PatternStation {
             use opsense_libs::storage::PatternStorage;
             let store = open_station_store(id, cfg).await?;
             let automaton = RwLock::new(AhoCorasick::new());
-            for p in store.get_all().await.map_err(|e| {
-                Error::other(format!("load patterns: {e}"))
-            })? {
+            for p in store
+                .get_all()
+                .await
+                .map_err(|e| Error::other(format!("load patterns: {e}")))?
+            {
                 automaton.write().await.add(p);
             }
             Ok(Self {
@@ -416,10 +411,7 @@ impl CategoryStation {
     /// persists qua `CategoryStorage` của `DuckS3Storage` (mỗi `insert_chain`
     /// commit thẳng vào storage; mở lại có sẵn dữ liệu — snapshot/restore S3
     /// theo cơ chế của DuckS3Storage), còn lại memory-only.
-    pub async fn from_storage(
-        id: &str,
-        cfg: &crate::config::StorageConfig,
-    ) -> Result<Self, Error> {
+    pub async fn from_storage(id: &str, cfg: &crate::config::StorageConfig) -> Result<Self, Error> {
         if cfg.backend != "duckdb" {
             return Ok(Self::new());
         }
@@ -564,7 +556,13 @@ mod tests {
     }
 
     fn obs(ts: i64) -> Observation {
-        Observation::new(ts, "m".into(), TelemetryKind::Metric, Signal::Raw, ts as f64)
+        Observation::new(
+            ts,
+            "m".into(),
+            TelemetryKind::Metric,
+            Signal::Raw,
+            ts as f64,
+        )
     }
 
     /// Block bị LRU evict → tự persist qua hook; query lại → cold load từ

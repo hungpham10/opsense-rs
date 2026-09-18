@@ -3,11 +3,11 @@ use std::io::{Error, ErrorKind};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::candle::CandleStick;
+use itertools::izip;
 use opsense_libs::jq::JsonQuery;
 use opsense_libs::lru::LruCache;
-use itertools::izip;
 use reqwest_middleware::ClientWithMiddleware;
-use crate::candle::CandleStick;
 use serde_json::Value;
 use tracing::{debug, info};
 

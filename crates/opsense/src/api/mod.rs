@@ -15,19 +15,19 @@ use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
 use async_graphql::SimpleObject;
-use axum::extract::State;
+use aws_sdk_s3::Client as S3Client;
 use axum::Json;
+use axum::extract::State;
 use headers::Header;
 use http::{HeaderName, HeaderValue};
-use aws_sdk_s3::Client as S3Client;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, StationKind};
 use opsense_libs::vector::components::{clock, null};
 use opsense_libs::vector::runtime::{Component, Event, Runtime};
-use opsense_model::secret::Secret;
 use opsense_model::resolver::Resolver;
+use opsense_model::secret::Secret;
 
 use crate::api::oauth::OAuthMetrics;
 
@@ -73,9 +73,7 @@ impl KernelRegistry {
     }
 
     /// Run `f` with mutable access to the session's client.
-    pub async fn lock(
-        &self,
-    ) -> tokio::sync::MutexGuard<'_, HashMap<String, KernelSessionEntry>> {
+    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, HashMap<String, KernelSessionEntry>> {
         self.sessions.lock().await
     }
 

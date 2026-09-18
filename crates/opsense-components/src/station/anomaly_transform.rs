@@ -82,9 +82,12 @@ impl_anomaly_station_transform!(
     ) -> Result<(), Error> {
         let ctx = downcast_ctx(&tx)?;
         let station = TimeseriesStation::from_storage(&self.id, ctx.storage()).await?;
-        ctx.registry(&self.id, Station::Timeseries(Arc::new(RwLock::new(station))))
-            .await
-            .or_else(|e| {
+        ctx.registry(
+            &self.id,
+            Station::Timeseries(Arc::new(RwLock::new(station))),
+        )
+        .await
+        .or_else(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 Ok(())
             } else {
@@ -136,9 +139,7 @@ impl_anomaly_station_transform!(
                             .insert("anomaly_score".into(), format!("{s:.3}"));
                     }
                     if capacity_breach {
-                        anomaly
-                            .labels
-                            .insert("capacity".into(), "breached".into());
+                        anomaly.labels.insert("capacity".into(), "breached".into());
                     }
                     anomalies.push(anomaly);
                 }

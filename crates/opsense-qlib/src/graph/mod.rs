@@ -5,15 +5,15 @@
 //! The DAG (sequence of `Node`s referencing `ops`) is compiled to ONNX bytes
 //! via `build_onnx()`, then to a tract `TypedRunnableModel` via `model()`.
 
-pub mod ops;
-pub mod macros;
 pub mod ctx;
+pub mod macros;
+pub mod ops;
 
 pub use ctx::OnnxEmitCtx;
 
-use std::fmt::Debug;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Error;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -297,11 +297,9 @@ impl Graph {
                     1,
                     (feat * n_out) as i64
                 ));
-                ctx.graph.input.push(crate::onnx_value_info!(
-                    "B_pred",
-                    1,
-                    n_out as i64
-                ));
+                ctx.graph
+                    .input
+                    .push(crate::onnx_value_info!("B_pred", 1, n_out as i64));
                 crate::prediction_layer!(
                     &mut ctx.graph,
                     features: inputs[0].clone(),

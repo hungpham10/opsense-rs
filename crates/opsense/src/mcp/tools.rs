@@ -5,8 +5,8 @@
 //! arm is rendered as a text error message (still success transport-wise;
 //! MCP doesn't distinguish).
 
-use crate::client::graphql::ComponentInput;
 use crate::client::OpsenseClient;
+use crate::client::graphql::ComponentInput;
 
 fn json_dump<T: serde::Serialize>(v: &T) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(v)
@@ -28,7 +28,11 @@ pub async fn attributes(client: &OpsenseClient) -> Result<String, String> {
         .and_then(|m| json_dump(&m).map_err(|e| format!("{e}")))
 }
 
-pub async fn set_attribute(client: &OpsenseClient, name: &str, value: &str) -> Result<String, String> {
+pub async fn set_attribute(
+    client: &OpsenseClient,
+    name: &str,
+    value: &str,
+) -> Result<String, String> {
     client
         .set_attribute(name, value)
         .await

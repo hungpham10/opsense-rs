@@ -2,8 +2,8 @@ use std::io::Error;
 
 use tract_onnx::pb::{AttributeProto, NodeProto};
 
-use crate::graph::Op;
 use crate::graph::OnnxEmitCtx;
+use crate::graph::Op;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]

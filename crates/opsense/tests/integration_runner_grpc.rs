@@ -62,7 +62,11 @@ async fn python_runner_executes() {
         .await
         .expect("execute");
     assert!(outcome.ok(), "python kernel should succeed: {outcome:?}");
-    assert!(outcome.stdout().contains('2'), "python stdout missing '2': {}", outcome.stdout());
+    assert!(
+        outcome.stdout().contains('2'),
+        "python stdout missing '2': {}",
+        outcome.stdout()
+    );
     // The kernel classifies scalars as repr text (`repr(value)`), not numbers.
     assert_eq!(outcome.text(), Some("2"), "python should capture `result`");
 
@@ -80,7 +84,10 @@ async fn julia_runner_executes() {
     let outcome = client.execute("1 + 1").await.expect("execute");
     assert!(outcome.ok(), "julia kernel should succeed: {outcome:?}");
     let text = outcome.text().unwrap_or("");
-    assert!(text.contains('2'), "julia '1+1' should produce '2', got: {text}");
+    assert!(
+        text.contains('2'),
+        "julia '1+1' should produce '2', got: {text}"
+    );
 
     client.close().await.expect("close");
 }

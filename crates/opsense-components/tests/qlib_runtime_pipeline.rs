@@ -149,7 +149,7 @@ async fn canned_candles_drive_paper_trading_pipeline() {
         let captured = capture.snapshot();
         if broadcast_payloads
             .iter()
-            .any(|payload| captured.iter().any(|candidate| *candidate == *payload))
+            .any(|payload| captured.contains(payload))
         {
             break;
         }

@@ -77,11 +77,7 @@ pub fn build_auth(cfg: &RunnerConfig) -> Result<Option<Arc<dyn Auth>>> {
 ///
 /// # Errors
 /// Bind/serve failures or kernel backend construction failures.
-pub async fn run(
-    bind: SocketAddr,
-    cfg: RunnerConfig,
-    auth: Option<Arc<dyn Auth>>,
-) -> Result<()> {
+pub async fn run(bind: SocketAddr, cfg: RunnerConfig, auth: Option<Arc<dyn Auth>>) -> Result<()> {
     tracing::info!(
         "opsense runner starting on {bind} (kernel: {:?})",
         cfg.kernel_command

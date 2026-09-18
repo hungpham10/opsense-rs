@@ -51,8 +51,11 @@ impl_processor_transform!(
     ) -> Result<(), Error> {
         let ctx = downcast_ctx(&tx)?;
         let station = TimeseriesStation::from_storage(&self.id, ctx.storage()).await?;
-        ctx.registry(&self.id, Station::Timeseries(Arc::new(RwLock::new(station))))
-            .await
+        ctx.registry(
+            &self.id,
+            Station::Timeseries(Arc::new(RwLock::new(station))),
+        )
+        .await
         .or_else(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 Ok(())

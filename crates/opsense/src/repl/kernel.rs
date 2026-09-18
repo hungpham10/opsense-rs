@@ -223,10 +223,7 @@ impl KernelRepl {
             return Ok(());
         }
         // If leaving Block with non-empty buffer, warn.
-        if self.mode == Mode::Block
-            && new_mode != Mode::Block
-            && !self.buffer.is_empty()
-        {
+        if self.mode == Mode::Block && new_mode != Mode::Block && !self.buffer.is_empty() {
             println!("warning: discarding {} buffered line(s)", self.buffer.len());
             self.buffer.clear();
         }
@@ -386,12 +383,20 @@ fn print_outcome(outcome: &crate::client::ExecOutcome) {
             Some(K::Nothing(_)) => println!("=> None"),
             Some(K::Json(j)) => println!("=> {j}"),
             Some(K::Dataframe(df)) => {
-                println!("=> DataFrame(rows={}, cols={}, columns=[{}])",
-                    df.rows, df.cols, df.columns.join(", "));
+                println!(
+                    "=> DataFrame(rows={}, cols={}, columns=[{}])",
+                    df.rows,
+                    df.cols,
+                    df.columns.join(", ")
+                );
             }
             Some(K::Artifact(a)) => {
-                println!("=> Artifact(name={}, mime={}, {} bytes)",
-                    a.name, a.mime, a.data.len());
+                println!(
+                    "=> Artifact(name={}, mime={}, {} bytes)",
+                    a.name,
+                    a.mime,
+                    a.data.len()
+                );
             }
             Some(K::Raw(b)) => println!("=> Raw({} bytes)", b.len()),
             None => {}

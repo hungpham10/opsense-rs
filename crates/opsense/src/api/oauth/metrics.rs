@@ -14,23 +14,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default, Debug)]
 pub struct OAuthMetrics {
-    pub device_code_issued:    AtomicU64,
-    pub device_code_approved:  AtomicU64,
-    pub device_code_denied:    AtomicU64,
-    pub access_token_issued:   AtomicU64,
+    pub device_code_issued: AtomicU64,
+    pub device_code_approved: AtomicU64,
+    pub device_code_denied: AtomicU64,
+    pub access_token_issued: AtomicU64,
     pub access_token_refreshed: AtomicU64,
-    pub long_session_issued:   AtomicU64,
+    pub long_session_issued: AtomicU64,
 }
 
 impl OAuthMetrics {
     pub const fn new() -> Self {
         Self {
-            device_code_issued:    AtomicU64::new(0),
-            device_code_approved:  AtomicU64::new(0),
-            device_code_denied:    AtomicU64::new(0),
-            access_token_issued:   AtomicU64::new(0),
+            device_code_issued: AtomicU64::new(0),
+            device_code_approved: AtomicU64::new(0),
+            device_code_denied: AtomicU64::new(0),
+            access_token_issued: AtomicU64::new(0),
             access_token_refreshed: AtomicU64::new(0),
-            long_session_issued:   AtomicU64::new(0),
+            long_session_issued: AtomicU64::new(0),
         }
     }
 
@@ -55,24 +55,24 @@ impl OAuthMetrics {
 
     pub fn snapshot(&self) -> OAuthMetricsSnapshot {
         OAuthMetricsSnapshot {
-            device_code_issued:    self.device_code_issued.load(Ordering::Relaxed),
-            device_code_approved:  self.device_code_approved.load(Ordering::Relaxed),
-            device_code_denied:    self.device_code_denied.load(Ordering::Relaxed),
-            access_token_issued:   self.access_token_issued.load(Ordering::Relaxed),
+            device_code_issued: self.device_code_issued.load(Ordering::Relaxed),
+            device_code_approved: self.device_code_approved.load(Ordering::Relaxed),
+            device_code_denied: self.device_code_denied.load(Ordering::Relaxed),
+            access_token_issued: self.access_token_issued.load(Ordering::Relaxed),
             access_token_refreshed: self.access_token_refreshed.load(Ordering::Relaxed),
-            long_session_issued:   self.long_session_issued.load(Ordering::Relaxed),
+            long_session_issued: self.long_session_issued.load(Ordering::Relaxed),
         }
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OAuthMetricsSnapshot {
-    pub device_code_issued:    u64,
-    pub device_code_approved:  u64,
-    pub device_code_denied:    u64,
-    pub access_token_issued:   u64,
+    pub device_code_issued: u64,
+    pub device_code_approved: u64,
+    pub device_code_denied: u64,
+    pub access_token_issued: u64,
     pub access_token_refreshed: u64,
-    pub long_session_issued:   u64,
+    pub long_session_issued: u64,
 }
 
 #[cfg(test)]

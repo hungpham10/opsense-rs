@@ -7,14 +7,14 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 #[derive(Debug, Clone)]
 pub struct ServeClient {
-    base_url:   String,
+    base_url: String,
     admin_token: String,
-    http:       reqwest::Client,
+    http: reqwest::Client,
 }
 
 impl ServeClient {
@@ -42,7 +42,8 @@ impl ServeClient {
     /// `GET <base>/<path>` kèm Bearer.
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = self.url(path);
-        let resp = self.http
+        let resp = self
+            .http
             .get(&url)
             .bearer_auth(&self.admin_token)
             .send()
@@ -59,7 +60,8 @@ impl ServeClient {
     /// `POST <base>/<path>` kèm Bearer + JSON body.
     pub async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         let url = self.url(path);
-        let resp = self.http
+        let resp = self
+            .http
             .post(&url)
             .bearer_auth(&self.admin_token)
             .json(body)
@@ -75,7 +77,11 @@ impl ServeClient {
     }
 
     fn url(&self, path: &str) -> String {
-        let path = if path.starts_with('/') { &path[1..] } else { path };
+        let path = if path.starts_with('/') {
+            &path[1..]
+        } else {
+            path
+        };
         format!("{}/{}", self.base_url, path)
     }
 }

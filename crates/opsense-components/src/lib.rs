@@ -20,9 +20,8 @@ pub mod telegram;
 
 pub use qlib::QlibEngine;
 pub use station::{
-    AnomalyStationTransform,
-    CategoryStationTransform, PatternStationTransform, TimeseriesStationSink,
-    TimeseriesStationTransform,
+    AnomalyStationTransform, CategoryStationTransform, PatternStationTransform,
+    TimeseriesStationSink, TimeseriesStationTransform,
 };
 pub use telegram::TelegramSink;
 

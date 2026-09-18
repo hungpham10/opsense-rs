@@ -4,20 +4,20 @@
 //! khi console/CLI authenticate với host. Sau khi user duyệt trên browser,
 //! device_code chuyển sang `approved` và tokens được phát hành.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use sqlx::Row;
 
+use crate::entities::admin::Admin;
 use crate::entities::admin::errors::AdminError;
 use crate::entities::admin::helpers::{format_dt_for_db, parse_dt, sha256_hex, tz_placeholder};
 use crate::entities::admin::token::Token;
-use crate::entities::admin::Admin;
 
 /// Thông tin device code trả về cho CLI sau khi gọi `/device/code`.
 #[derive(Debug, Clone)]
 pub struct DeviceCodeInfo {
     pub device_code: String,
-    pub user_code:   String,
+    pub user_code: String,
     pub interval_secs: i32,
     pub expires_in_secs: i64,
     pub verification_uri: String,
@@ -26,9 +26,9 @@ pub struct DeviceCodeInfo {
 /// Thông tin token trả về sau khi poll `/device/token`.
 #[derive(Debug, Clone)]
 pub struct DeviceTokenInfo {
-    pub access_token:  String,
+    pub access_token: String,
     pub refresh_token: String,
-    pub session_id:    Option<String>,
+    pub session_id: Option<String>,
 }
 
 /// Sinh random bytes dưới dạng base64url (no padding).
@@ -52,7 +52,7 @@ impl Admin {
         verification_uri: &str,
     ) -> Result<DeviceCodeInfo, AdminError> {
         let device_code = rand_base64(64);
-        let user_code   = rand_base64(8);
+        let user_code = rand_base64(8);
         let interval_secs = 5;
         let expires_in_secs = 600i64; // 10 phút
 
@@ -210,7 +210,7 @@ impl Admin {
         match status.as_str() {
             "pending" => Err(AdminError::Other("authorization_pending".into())),
             "approved" => {
-                let access_token:  String = row.try_get(3)?;
+                let access_token: String = row.try_get(3)?;
                 let refresh_token: String = row.try_get(4)?;
                 Ok(DeviceTokenInfo {
                     access_token,
@@ -219,7 +219,9 @@ impl Admin {
                 })
             }
             "denied" => Err(AdminError::Other("access_denied".into())),
-            other => Err(AdminError::Other(format!("Unknown device code status: {other}"))),
+            other => Err(AdminError::Other(format!(
+                "Unknown device code status: {other}"
+            ))),
         }
     }
 }

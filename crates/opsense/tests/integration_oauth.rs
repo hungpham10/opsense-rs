@@ -44,7 +44,9 @@ async fn ensure_dex() -> bool {
             panic!("Dex not reachable — CI requires `docker compose up`")
         }
         Err(_) => {
-            eprintln!("skipping: Dex not reachable — check OPSENSE_DEX_ISSUER or run `docker compose up` first");
+            eprintln!(
+                "skipping: Dex not reachable — check OPSENSE_DEX_ISSUER or run `docker compose up` first"
+            );
             false
         }
     }
@@ -52,9 +54,8 @@ async fn ensure_dex() -> bool {
 
 /// Wait for DB to be reachable. Returns `true` if ready, `false` to skip.
 async fn ensure_db() -> bool {
-    let db_dsn = std::env::var("DB_DSN").unwrap_or_else(|_| {
-        "postgres://opsense:opsense123@localhost:5432/opsense".into()
-    });
+    let db_dsn = std::env::var("DB_DSN")
+        .unwrap_or_else(|_| "postgres://opsense:opsense123@localhost:5432/opsense".into());
     match sqlx::PgPool::connect(&db_dsn).await {
         Ok(_) => true,
         Err(e) if common::integration_mode() => {
@@ -204,7 +205,10 @@ async fn oauth_full_flow_dex_nginx_axum() {
             .expect("device/token request");
 
         if resp.status().is_success() {
-            break resp.json::<DeviceTokenResponse>().await.expect("device/token JSON");
+            break resp
+                .json::<DeviceTokenResponse>()
+                .await
+                .expect("device/token JSON");
         }
         if attempts >= 12 {
             panic!("device/token poll exhausted ({} attempts)", attempts);
@@ -213,7 +217,10 @@ async fn oauth_full_flow_dex_nginx_axum() {
         tokio::time::sleep(Duration::from_secs(5)).await;
     };
     assert!(!token.access_token.is_empty());
-    assert!(token.access_token.starts_with("abt_"), "access_token phải có prefix abt_ để Nginx introspect được");
+    assert!(
+        token.access_token.starts_with("abt_"),
+        "access_token phải có prefix abt_ để Nginx introspect được"
+    );
     assert!(!token.refresh_token.is_empty());
 
     // 5. POST /session/issue với Bearer access_token → Ed25519 keypair
@@ -246,8 +253,7 @@ async fn oauth_full_flow_dex_nginx_axum() {
     if !list_status.is_success() {
         panic!("session/list returned {list_status}: {list_body}");
     }
-    let list: Vec<SessionListEntry> =
-        serde_json::from_str(&list_body).expect("session/list JSON");
+    let list: Vec<SessionListEntry> = serde_json::from_str(&list_body).expect("session/list JSON");
     assert!(
         list.iter().any(|s| s.session_id == session.session_id),
         "session_id not in list: {:?}",
@@ -280,17 +286,15 @@ async fn oauth_full_flow_dex_nginx_axum() {
     if !ensure_db().await {
         return;
     }
-    let db_dsn = std::env::var("DB_DSN").unwrap_or_else(|_| {
-        "postgres://opsense:opsense123@localhost:5432/opsense".into()
-    });
+    let db_dsn = std::env::var("DB_DSN")
+        .unwrap_or_else(|_| "postgres://opsense:opsense123@localhost:5432/opsense".into());
     let pool = sqlx::PgPool::connect(&db_dsn).await.expect("connect pool");
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sys_user WHERE tenant_id = 1 AND user_id = $1",
-    )
-    .bind(&sub)
-    .fetch_one(&pool)
-    .await
-    .expect("query sys_user");
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sys_user WHERE tenant_id = 1 AND user_id = $1")
+            .bind(&sub)
+            .fetch_one(&pool)
+            .await
+            .expect("query sys_user");
     assert!(count > 0, "expected sys_user row for sub '{sub}'");
 }
 

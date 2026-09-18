@@ -1,9 +1,9 @@
 use std::io::Error;
 use std::sync::{Arc, RwLock};
 
-use async_trait::async_trait;
-use crate::ohcl::QueryCandleSticks;
 use crate::candle::CandleStick;
+use crate::ohcl::QueryCandleSticks;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use reqwest::Client as HttpClient;

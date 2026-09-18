@@ -11,12 +11,15 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 
-use opsense_libs::sgd::SGDOptimizer;
-use crate::grid::TradingGrid;
 use crate::candle::CandleStick;
+use crate::grid::TradingGrid;
+use opsense_libs::sgd::SGDOptimizer;
 
 use super::calendar::to_timestamp_secs;
-use super::{Calendar, DataLoader, Fee, FetchFn, GridSnapshot, NotifyFn, OrderEvent, ParamFn, Score, Strategy};
+use super::{
+    Calendar, DataLoader, Fee, FetchFn, GridSnapshot, NotifyFn, OrderEvent, ParamFn, Score,
+    Strategy,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Caching — weekly-block LRU (dùng opsense_libs::lru::LruCache)

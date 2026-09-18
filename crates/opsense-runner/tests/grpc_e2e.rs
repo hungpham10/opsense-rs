@@ -13,11 +13,11 @@ use std::time::Duration;
 use opsense_proto::pb::kernel_runner_client::KernelRunnerClient;
 use opsense_proto::pb::value as pb_value;
 use opsense_proto::pb::{
-    CloseRequest, CodeRequest, HealthRequest, PingRequest, SessionHandle,
-    SessionParams, InterruptRequest, exec_event,
+    CloseRequest, CodeRequest, HealthRequest, InterruptRequest, PingRequest, SessionHandle,
+    SessionParams, exec_event,
 };
 use opsense_runner::backend::IpcKernelBackend;
-use opsense_runner::config::{resolve_kernel_binary, RunnerConfig};
+use opsense_runner::config::{RunnerConfig, resolve_kernel_binary};
 use opsense_runner::server::RunnerService;
 use opsense_runner::session::SessionRegistry;
 
@@ -165,7 +165,10 @@ async fn grpc_health_returns_runner_info() {
         .into_inner();
     assert!(health.ok);
     assert_eq!(health.kernel_name, "runner/ipc");
-    assert_eq!(health.detail, "command \"target/debug/opsense-kernel-echo\" args []");
+    assert_eq!(
+        health.detail,
+        "command \"target/debug/opsense-kernel-echo\" args []"
+    );
 
     server.abort();
 }
