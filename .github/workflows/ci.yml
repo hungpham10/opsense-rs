@@ -10,7 +10,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  OPSENSE_TAG: ci-${{ github.sha }}
+  OPSENSE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('ci-{0}', github.sha) }}
   COMPOSE_PROJECT_NAME: opsense-ci-${{ github.run_id }}
 
 permissions:
@@ -174,8 +174,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push release images
+      - name: Push tested release images
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           VERSION: ${{ github.ref_name }}
-        run: earthly --push +all --VERSION="$VERSION" --REGISTRY=ghcr.io --IMAGE_PREFIX=hungpham10/opsense
+        run: |
+          set -euo pipefail
+
+          images=(serve runner runner-python runner-julia)
+
+          for service in "${images[@]}"; do
+            source_image="opsense-${service}:${VERSION}"
+            release_image="ghcr.io/hungpham10/opsense-${service}:${VERSION}"
+
+            docker tag "$source_image" "$release_image"
+            docker push "$release_image"
+          done
