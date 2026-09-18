@@ -1,10 +1,10 @@
 VERSION 0.8
 
 # -----------------------------------------------------------------------
-# Global config — override via --build-arg or env when needed
+# Global config — override after the target, e.g. `earthly +all --VERSION=v1.0.0`
 # -----------------------------------------------------------------------
 ARG --global REGISTRY=ghcr.io
-ARG --global IMAGE_PREFIX=lap02921/opsense
+ARG --global IMAGE_PREFIX=hungpham10/opsense
 ARG --global VERSION=latest
 
 # -----------------------------------------------------------------------
