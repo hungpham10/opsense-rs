@@ -10,6 +10,7 @@ mod ohcl;
 mod portfolio;
 mod grid;
 mod strategies;
+mod streaming;
 mod tick;
 
 pub use candle::CandleStick;
@@ -32,6 +33,7 @@ pub use graph::ops::*;
 
 pub use portfolio::{DEFAULT_SETTLEMENT_CANDLES, Order, OrderType, Portfolio, Report};
 pub use strategies::{GridStrategy, VolatilityAdaptiveGridStrategy};
+pub use streaming::StreamingPortfolio;
 
 /// Re-export runtime dưới `crate::vector::runtime` để macro `#[source]`/`#[sink]`/`#[transform]`
 /// của opsense-macros mở rộng dùng URL như trong opsense-components.
@@ -63,7 +65,7 @@ pub struct GridSnapshot {
     pub levels: Vec<f64>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum OrderEvent {
     /// Lệnh vừa được đặt (đã nằm trong `orders` mở)
     Placed { ts: u64, order: Order },

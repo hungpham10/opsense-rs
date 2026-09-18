@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod clock;
 pub mod file;
 pub mod input;
@@ -6,6 +7,7 @@ pub mod output;
 pub mod print;
 
 mod converters;
+pub use capture::CaptureSink;
 pub use converters::{WebSocketClient, WebSocketPolling};
 
 pub fn used() {}

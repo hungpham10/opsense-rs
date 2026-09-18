@@ -13,14 +13,18 @@ use std::collections::BTreeMap;
 
 pub mod http;
 pub mod processor;
+pub mod qlib;
 pub mod signal;
 pub mod station;
+pub mod telegram;
 
+pub use qlib::QlibEngine;
 pub use station::{
     AnomalyStationTransform,
     CategoryStationTransform, PatternStationTransform, TimeseriesStationSink,
     TimeseriesStationTransform,
 };
+pub use telegram::TelegramSink;
 
 /// Render `{{name}}` placeholders in a template using the provided vars.
 ///

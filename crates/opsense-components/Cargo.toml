@@ -15,6 +15,7 @@ axum = { workspace = true }
 opsense-core = { path = "../opsense-core" }
 opsense-libs = { path = "../opsense-libs" }
 opsense-macros = { path = "../opsense-macros" }
+opsense-qlib = { path = "../opsense-qlib" }
 opsense-model = { path = "../opsense-model" }
 reqwest = { workspace = true }
 serde = { workspace = true }

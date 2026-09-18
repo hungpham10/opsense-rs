@@ -4519,6 +4519,7 @@ dependencies = [
  "opsense-libs",
  "opsense-macros",
  "opsense-model",
+ "opsense-qlib",
  "reqwest",
  "serde",
  "serde_json",
