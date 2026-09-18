@@ -18,185 +18,8 @@
 ///   - disk_markov_expected_steps: expected steps to reach any boundary
 ///   - disk_markov_grid_step: width of each band
 ///   - disk_markov_num_bands: number of bands
-
-fn process(observations) {
-    let cells = 20;
-    try { cells = param_cells } catch { 20 };
-    let n_steps = 10;
-    try { n_steps = param_n_steps } catch { 10 };
-    let recent_secs = 3600;
-    try { recent_secs = param_recent_secs } catch { 3600 };
-
-    if observations.len() == 0 {
-        return [];
-    }
-
-    // Pass 1: find max timestamp
-    let tmax = 0;
-    for x in observations {
-        let t = x["ts"];
-        if t > tmax {
-            tmax = t;
-        }
-    }
-
-    // Pass 2: filter to recent data
-    let cutoff = tmax - recent_secs;
-    let recent = [];
-    for x in observations {
-        if x["ts"] > cutoff {
-            recent.push(x);
-        }
-    }
-    if recent.len() == 0 {
-        return [];
-    }
-
-    // Extract values
-    let values = [];
-    for x in recent {
-        values.push(x["value"]);
-    }
-
-    // Fit AnalysisGrid on values (biên vật lý 0..100 for % usage)
-    let g = grid_fit_values(values, 0.0, 100.0, cells);
-    if type_of(g) == "()" {
-        return [];
-    }
-
-    let num_bands = num_cells(g);
-    let step = grid_step(g);
-
-    // Map each value to a grid cell (band index)
-    let bands = [];
-    for v in values {
-        bands.push(grid_cell(g, v));
-    }
-
-    // Build Markov transition matrix from band sequence
-    let mut trans_counts = [];
-    for i in 0..num_bands {
-        let row = [];
-        for j in 0..num_bands {
-            row.push(0);
-        }
-        trans_counts.push(row);
-    }
-
-    for i in 0..bands.len() - 1 {
-        let from = bands[i];
-        let to = bands[i + 1];
-        if from >= 0 and from < num_bands and to >= 0 and to < num_bands {
-            trans_counts[from][to] = trans_counts[from][to] + 1;
-        }
-    }
-
-    // Normalize to get transition probabilities
-    let mut trans_matrix = [];
-    for i in 0..num_bands {
-        let row_sum = 0;
-        for j in 0..num_bands {
-            row_sum = row_sum + trans_counts[i][j];
-        }
-        let row = [];
-        for j in 0..num_bands {
-            if row_sum > 0 {
-                row.push(trans_counts[i][j] as float / row_sum as float);
-            } else {
-                row.push(0.0);
-            }
-        }
-        trans_matrix.push(row);
-    }
-
-    // Compute n-step transition matrix (T^n) using matrix multiplication
-    let mut n_step = trans_matrix;
-    for _ in 2..n_steps + 1 {
-        n_step = matrix_mult(n_step, trans_matrix, num_bands);
-    }
-
-    // Calculate absorption probabilities
-    // Upper boundary: last band (num_bands - 1) = disk full
-    // Lower boundary: first band (0) = underflow
-    let upper_band = num_bands - 1;
-    let lower_band = 0;
-
-    // P(absorbing into upper) = n_step[any_start][upper_band] averaged
-    let mut upper_prob_sum = 0.0;
-    let mut lower_prob_sum = 0.0;
-    let start_states = num_bands.min(5);
-    for s in 0..start_states {
-        upper_prob_sum = upper_prob_sum + n_step[s][upper_band];
-        lower_prob_sum = lower_prob_sum + n_step[s][lower_band];
-    }
-    let upper_prob = upper_prob_sum / start_states as float;
-    let lower_prob = lower_prob_sum / start_states as float;
-
-    // Expected steps to absorption (simplified)
-    let current_val = values[values.len() - 1];
-    let current_band = grid_cell(g, current_val);
-    let expected_steps = expected_absorption_steps(trans_matrix, current_band, upper_band, lower_band);
-
-    // Build output observations
-    let out = [];
-
-    out.push(#{
-        ts: now_secs(),
-        metric_id: "disk_markov_upper_prob",
-        kind: "metric",
-        signal: "risk",
-        value: upper_prob,
-        labels: #{
-            n_steps: n_steps.to_string(),
-            num_bands: num_bands.to_string(),
-            grid_step: step.to_string(),
-            current_band: current_band.to_string(),
-        },
-    });
-
-    out.push(#{
-        ts: now_secs(),
-        metric_id: "disk_markov_lower_prob",
-        kind: "metric",
-        signal: "risk",
-        value: lower_prob,
-        labels: #{
-            n_steps: n_steps.to_string(),
-            num_bands: num_bands.to_string(),
-            grid_step: step.to_string(),
-        },
-    });
-
-    out.push(#{
-        ts: now_secs(),
-        metric_id: "disk_markov_expected_steps",
-        kind: "metric",
-        signal: "risk",
-        value: expected_steps,
-        labels: #{
-            current_band: current_band.to_string(),
-            upper_band: upper_band.to_string(),
-            lower_band: lower_band.to_string(),
-        },
-    });
-
-    out.push(#{
-        ts: now_secs(),
-        metric_id: "disk_markov_grid_info",
-        kind: "metric",
-        signal: "raw",
-        value: num_bands,
-        labels: #{
-            step: step.to_string(),
-            num_cells: num_bands.to_string(),
-            current_usage: current_val.to_string(),
-        },
-    });
-
-    out
-}
-
-/// Matrix multiplication for square matrices of size n
+///
+/// Helper functions
 fn matrix_mult(a, b, n) {
     let result = [];
     for i in 0..n {
@@ -213,8 +36,6 @@ fn matrix_mult(a, b, n) {
     result
 }
 
-/// Calculate expected steps to absorption from current state using
-/// first-step analysis approximation
 fn expected_absorption_steps(trans_matrix, current_state, upper_state, lower_state) {
     let n = trans_matrix.len();
     let max_steps = 100;
@@ -254,6 +75,186 @@ fn expected_absorption_steps(trans_matrix, current_state, upper_state, lower_sta
         }
         current_prob = next_prob;
     }
-
     expected
+}
+
+/// Main entry point – receives an array of observation maps and returns an
+/// array of new observation maps with the Markov‑projection results.
+fn process(observations) {
+    // -----------------------------------------------------------------
+    // 1️⃣  Configuration (can be overridden via pipeline params)
+    // -----------------------------------------------------------------
+    let cells = 20;
+    try { cells = param_cells } catch { 20 };
+    let n_steps = 10;
+    try { n_steps = param_n_steps } catch { 10 };
+    let recent_secs = 3600;
+    try { recent_secs = param_recent_secs } catch { 3600 };
+
+    // -----------------------------------------------------------------
+    // 2️⃣  Basic validation
+    // -----------------------------------------------------------------
+    if observations.len() == 0 {
+        return [];
+    }
+
+    // -----------------------------------------------------------------
+    // 3️⃣  Determine the most recent timestamp and filter recent data
+    // -----------------------------------------------------------------
+    let tmax = 0;
+    for x in observations {
+        let t = x["ts"];
+        if t > tmax { tmax = t; }
+    }
+    let cutoff = tmax - recent_secs;
+    let recent = [];
+    for x in observations {
+        if x["ts"] > cutoff { recent.push(x); }
+    }
+    if recent.len() == 0 { return []; }
+
+    // -----------------------------------------------------------------
+    // 4️⃣  Extract the raw usage values
+    // -----------------------------------------------------------------
+    let values = [];
+    for x in recent { values.push(x["value"]); }
+
+    // -----------------------------------------------------------------
+    // 5️⃣  Fit an AnalysisGrid to the values (0‑100 % usage range)
+    // -----------------------------------------------------------------
+    let g = grid_fit_values(values, 0.0, 100.0, cells);
+    if g == () { return []; }
+    let num_bands = num_cells(g);
+    let step = grid_step(g);
+
+    // -----------------------------------------------------------------
+    // 6️⃣  Map each value to its grid cell (band index)
+    // -----------------------------------------------------------------
+    let bands = [];
+    for v in values { bands.push(grid_cell(g, v)); }
+
+    // -----------------------------------------------------------------
+    // 7️⃣  Build the raw transition count matrix from the band sequence
+    // -----------------------------------------------------------------
+    let mut trans_counts = [];
+    for i in 0..num_bands {
+        trans_counts.push(vec![0; num_bands]);
+    }
+    for i in 0..bands.len() - 1 {
+        let from = bands[i];
+        let to   = bands[i+1];
+        if from >= 0 && from < num_bands && to >= 0 && to < num_bands {
+            trans_counts[from][to] = trans_counts[from][to] + 1;
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 8️⃣  Normalise counts → transition probabilities
+    // -----------------------------------------------------------------
+    let mut trans_matrix = [];
+    for i in 0..num_bands {
+        let row_sum = 0;
+        for j in 0..num_bands {
+            row_sum = row_sum + trans_counts[i][j];
+        }
+        let row = [];
+        for j in 0..num_bands {
+            if row_sum > 0 {
+                row.push(trans_counts[i][j] as float / row_sum as float);
+            } else {
+                row.push(0.0);
+            }
+        }
+        trans_matrix.push(row);
+    }
+
+    // -----------------------------------------------------------------
+    // 9️⃣  Compute the n‑step transition matrix (Tⁿ)
+    // -----------------------------------------------------------------
+    let mut n_step = trans_matrix;
+    for _ in 2..n_steps + 1 {
+        n_step = matrix_mult(n_step, trans_matrix, num_bands);
+    }
+
+    // -----------------------------------------------------------------
+    // 🔟  Derive absorption probabilities and expected steps
+    // -----------------------------------------------------------------
+    let upper_band = num_bands - 1;   // “disk full” absorbing state
+    let lower_band = 0;               // “underflow” absorbing state
+
+    let mut upper_prob_sum = 0.0;
+    let mut lower_prob_sum = 0.0;
+    let start_states = 5; // examine only the first few states for efficiency
+    for s in 0..start_states {
+        if s < num_bands {
+            upper_prob_sum = upper_prob_sum + n_step[s][upper_band];
+            lower_prob_sum = lower_prob_sum + n_step[s][lower_band];
+        }
+    }
+    let upper_prob = upper_prob_sum / start_states as float;
+    let lower_prob = lower_prob_sum / start_states as float;
+
+    // Expected steps to absorption (first‑step analysis)
+    let current_band = bands[bands.len() - 1];
+    let expected_steps = expected_absorption_steps(trans_matrix, current_band, upper_band, lower_band);
+
+    // -----------------------------------------------------------------
+    // 1️⃣1️⃣  Emit output observations
+    // -----------------------------------------------------------------
+    let ts = now_secs();
+
+    // Upper‑boundary risk
+    out.push(#{
+        ts: ts,
+        metric_id: "disk_markov_upper_prob",
+        kind: "metric",
+        signal: "risk",
+        value: upper_prob,
+        labels: #{ n_steps: n_steps.to_string(),
+                   num_bands: num_bands.to_string(),
+                   grid_step: step.to_string(),
+                   current_band: current_band.to_string(),
+        },
+    });
+
+    // Lower‑boundary risk
+    out.push(#{
+        ts: ts,
+        metric_id: "disk_markov_lower_prob",
+        kind: "metric",
+        signal: "risk",
+        value: lower_prob,
+        labels: #{ n_steps: n_steps.to_string(),
+                   num_bands: num_bands.to_string(),
+                   grid_step: step.to_string(),
+        },
+    });
+
+    // Expected steps to hit either boundary
+    out.push(#{
+        ts: ts,
+        metric_id: "disk_markov_expected_steps",
+        kind: "metric",
+        signal: "risk",
+        value: expected_steps,
+        labels: #{ current_band: current_band.to_string(),
+                   upper_band: upper_band.to_string(),
+                   lower_band: lower_band.to_string(),
+        },
+    });
+
+    // Raw grid information (num_bands, step size, latest usage %)
+    out.push(#{
+        ts: ts,
+        metric_id: "disk_markov_grid_info",
+        kind: "metric",
+        signal: "raw",
+        value: num_bands,
+        labels: #{ step: step.to_string(),
+                   num_cells: num_bands.to_string(),
+                   current_usage: values[values.len() - 1].to_string(),
+        },
+    });
+
+    out
 }
