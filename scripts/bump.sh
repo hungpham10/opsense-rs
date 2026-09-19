@@ -80,6 +80,7 @@ echo "Bumped version: $CURRENT_VERSION -> $NEW_VERSION"
 # ------------------------------------------------------------
 git add "$VERSION_FILE"
 git commit -m "chore: bump version to $NEW_VERSION"
+git push
 # git tag "v$NEW_VERSION"
 
 # # Push commit and tag to remote
