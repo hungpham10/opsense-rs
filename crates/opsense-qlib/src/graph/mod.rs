@@ -440,7 +440,7 @@ impl Graph {
                 .unwrap_or(0.0) as f64,
             0.0,
         );
-        if !(atr > 0.0) || !last_close.is_finite() || last_close <= 0.0 {
+        if (atr <= 0.0) || !last_close.is_finite() || last_close <= 0.0 {
             return Vec::new();
         }
 

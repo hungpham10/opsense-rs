@@ -1,7 +1,7 @@
 VERSION 0.8
 
 # -----------------------------------------------------------------------
-# Global config — override after the target, e.g. `earthly +all --VERSION=v1.0.0`
+# Global config — override khi gọi, e.g. `earthly +all --TARGET=x86_64-unknown-linux-gnu`
 # -----------------------------------------------------------------------
 ARG --global REGISTRY=ghcr.io
 ARG --global IMAGE_PREFIX=hungpham10/opsense
@@ -9,65 +9,48 @@ ARG --global VERSION=latest
 ARG --global TARGET=x86_64-unknown-linux-gnu
 
 # -----------------------------------------------------------------------
-# builder — shared Rust toolchain layer (apt deps only, no source yet)
+# build-binaries — Kiểm tra host target/, nếu thiếu thì tự build bằng Cargo
 # -----------------------------------------------------------------------
-builder:
-    FROM debian:bookworm-slim
-    ARG TOOLCHAIN_VERSION=1.94
+build-binaries:
+    FROM rust:1.94-slim-bookworm
+    ARG TARGET=$TARGET
+
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            pkg-config ca-certificates protobuf-compiler curl build-essential && \
-        apt-get clean && rm -rf /var/lib/apt/lists/* && \
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${TOOLCHAIN_VERSION} && \
-        mv /root/.cargo/bin/* /usr/local/bin/ && \
-        rustc --version && cargo --version
-    WORKDIR /app
-    SAVE IMAGE --cache-hint
+            protobuf-compiler pkg-config libssl-dev build-essential && \
+        apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# -----------------------------------------------------------------------
-# chef — install cargo-chef + cargo-zigbuild; reused by every recipe.
-# -----------------------------------------------------------------------
-chef:
-    FROM +builder
-    ARG ZIG_VERSION=0.13.0
-    RUN curl -fsSL https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz | tar -xJ -C /usr/local/lib/ && \
-        ln -s /usr/local/lib/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig && \
-        zig version && \
-        cargo install cargo-chef cargo-zigbuild --locked
-    WORKDIR /app
-    SAVE IMAGE --cache-hint
-
-# -----------------------------------------------------------------------
-# recipe — cargo-chef recipe.json
-# -----------------------------------------------------------------------
-recipe:
-    FROM +chef
-    ARG TARGET=$TARGET
+    WORKDIR /src
+    # Copy toàn bộ source code vào để phục vụ build nếu cần
     COPY . .
-    RUN cargo chef prepare --recipe-path recipe.json
-    SAVE ARTIFACT recipe.json
+
+    # Shell script kiểm tra: 
+    # - Nếu đã có file ở target/${TARGET}/release/ hoặc target/release/ thì dùng luôn
+    # - Nếu chưa có thì tiến hành cargo build
+    RUN sh -c '\
+      if [ -f "target/${TARGET}/release/opsense" ]; then \
+        echo "--> Found binaries in target/${TARGET}/release/"; \
+        mkdir -p /out && cp target/${TARGET}/release/opsense* /out/; \
+      elif [ -f "target/release/opsense" ]; then \
+        echo "--> Found binaries in target/release/"; \
+        mkdir -p /out && cp target/release/opsense* /out/; \
+      else \
+        echo "--> Binaries not found! Building via Cargo inside Earthly..."; \
+        cargo build --workspace --release --locked; \
+        mkdir -p /out && cp target/release/opsense* /out/; \
+      fi'
+
+    SAVE ARTIFACT /out/opsense /opsense
+    SAVE ARTIFACT /out/opsense-kernel-echo /opsense-kernel-echo
+    SAVE ARTIFACT /out/opsense-kernel-python /opsense-kernel-python
+    SAVE ARTIFACT /out/opsense-kernel-julia /opsense-kernel-julia
 
 # -----------------------------------------------------------------------
-# binaries — build release binaries
-# -----------------------------------------------------------------------
-binaries:
-    FROM +recipe
-    ARG TARGET=$TARGET
-    RUN cargo chef cook --release --recipe-path recipe.json 
-    COPY . .
-    RUN cargo zigbuild --release --locked --target ${TARGET}
-    SAVE ARTIFACT target/${TARGET}/release/opsense opsense
-    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-echo opsense-kernel-echo
-    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-python opsense-kernel-python
-    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-julia opsense-kernel-julia
-
-# -----------------------------------------------------------------------
-# serve — Tầng 1 host: OpenResty reverse proxy + opsense + alloy
+# serve — OpenResty reverse proxy + opsense + alloy
 # -----------------------------------------------------------------------
 serve:
     FROM openresty/openresty:1.27.1.2-4-bookworm-fat
     ARG VERSION=$VERSION
-    ARG TARGET=$TARGET
 
     # Runtime deps: supervisor, alloy (Grafana), curl, etc.
     RUN apt-get update && \
@@ -80,7 +63,7 @@ serve:
         apt-get update && apt-get install -y alloy && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    # Lua-resty modules bundled in OpenResty image
+    # Lua-resty modules
     RUN cd /tmp && \
         git clone --depth 1 https://github.com/zmartzone/lua-resty-openidc.git && \
         cp -av lua-resty-openidc/lib/resty/* /usr/local/openresty/lualib/resty/ && \
@@ -123,8 +106,6 @@ serve:
     COPY conf/nginx/map         /usr/local/openresty/nginx/conf/map.d
     COPY conf/nginx/vhost       /usr/local/openresty/nginx/conf/http.d/vhost
     COPY conf/config.alloy      /etc/alloy/config.alloy
-
-    # Dex OIDC config
     COPY conf/dex/config.dev.yaml /etc/dex/config.dev.yaml
 
     # Helper scripts + entrypoint
@@ -132,9 +113,9 @@ serve:
     COPY scripts/alloy.sh      /app/alloy.sh
     COPY scripts/release.sh    /app/entrypoint.sh
 
-    # Backend binary (Chú ý khoảng trắng giữa --TARGET=$TARGET và /opsense)
-    COPY (+binaries/opsense --TARGET=$TARGET) /app/opsense
-    RUN chmod +x /app/*.sh
+    # Copy binary lấy từ artifact của build-binaries
+    COPY +build-binaries/opsense /app/opsense
+    RUN chmod +x /app/*.sh /app/opsense
 
     ENTRYPOINT ["/app/entrypoint.sh", "/usr/bin/supervisord", "-n"]
     EXPOSE 8080
@@ -142,20 +123,20 @@ serve:
     SAVE IMAGE opsense-serve:${VERSION}
 
 # -----------------------------------------------------------------------
-# runner — Tầng 2: opsense runner subcommand + default echo kernel
+# runner — opsense runner subcommand + default echo kernel
 # -----------------------------------------------------------------------
 runner:
     FROM debian:bookworm-slim
     ARG VERSION=$VERSION
-    ARG TARGET=$TARGET
 
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates libssl3 && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    COPY (+binaries/opsense --TARGET=$TARGET)             /app/opsense
-    COPY (+binaries/opsense-kernel-echo --TARGET=$TARGET) /app/opsense-kernel-echo
+    COPY +build-binaries/opsense             /app/opsense
+    COPY +build-binaries/opsense-kernel-echo /app/opsense-kernel-echo
+    RUN chmod +x /app/opsense /app/opsense-kernel-echo
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-echo
@@ -171,7 +152,6 @@ runner:
 runner-python:
     FROM python:3.12-slim
     ARG VERSION=$VERSION
-    ARG TARGET=$TARGET
 
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -179,8 +159,9 @@ runner-python:
         pip install --no-cache-dir numpy pandas pyarrow protobuf && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    COPY (+binaries/opsense --TARGET=$TARGET)               /app/opsense
-    COPY (+binaries/opsense-kernel-python --TARGET=$TARGET) /app/opsense-kernel-python
+    COPY +build-binaries/opsense               /app/opsense
+    COPY +build-binaries/opsense-kernel-python /app/opsense-kernel-python
+    RUN chmod +x /app/opsense /app/opsense-kernel-python
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-python
@@ -196,10 +177,10 @@ runner-python:
 runner-julia:
     FROM julia:1.10-bookworm
     ARG VERSION=$VERSION
-    ARG TARGET=$TARGET
 
-    COPY (+binaries/opsense --TARGET=$TARGET)              /app/opsense
-    COPY (+binaries/opsense-kernel-julia --TARGET=$TARGET) /app/opsense-kernel-julia
+    COPY +build-binaries/opsense              /app/opsense
+    COPY +build-binaries/opsense-kernel-julia /app/opsense-kernel-julia
+    RUN chmod +x /app/opsense /app/opsense-kernel-julia
 
     RUN julia -e 'import Pkg; Pkg.add(["Arrow", "DataFrames", "CSV", "Plots"])'
 
@@ -212,43 +193,20 @@ runner-julia:
     SAVE IMAGE opsense-runner-julia:${VERSION}
 
 # -----------------------------------------------------------------------
-# all — build & push all 4 images.
+# all — build & push cả 4 images
 # -----------------------------------------------------------------------
 all:
-    ARG TARGET=$TARGET
-    BUILD --build-arg TARGET=${TARGET} +serve
-    BUILD --build-arg TARGET=${TARGET} +runner
-    BUILD --build-arg TARGET=${TARGET} +runner-python
-    BUILD --build-arg TARGET=${TARGET} +runner-julia
+    BUILD +serve
+    BUILD +runner
+    BUILD +runner-python
+    BUILD +runner-julia
 
 # -----------------------------------------------------------------------
-# all-multiarch — build and push amd64 and arm64 manifests in one export.
-# -----------------------------------------------------------------------
-all-multiarch:
-    ARG VERSION=$VERSION
-    ARG REGISTRY=$REGISTRY
-    ARG IMAGE_PREFIX=$IMAGE_PREFIX
-
-    BUILD --platform=linux/amd64 \
-        --build-arg TARGET=x86_64-unknown-linux-gnu \
-        --build-arg VERSION=${VERSION} \
-        --build-arg REGISTRY=${REGISTRY} \
-        --build-arg IMAGE_PREFIX=${IMAGE_PREFIX} \
-        +all
-    BUILD --platform=linux/arm64 \
-        --build-arg TARGET=aarch64-unknown-linux-gnu \
-        --build-arg VERSION=${VERSION} \
-        --build-arg REGISTRY=${REGISTRY} \
-        --build-arg IMAGE_PREFIX=${IMAGE_PREFIX} \
-        +all
-
-# -----------------------------------------------------------------------
-# integration-images — build 4 images locally (no registry push).
+# integration-images — build 4 images locally (no registry push)
 # -----------------------------------------------------------------------
 integration-images:
     ARG VERSION=local
-    ARG TARGET=$TARGET
-    BUILD --build-arg VERSION=${VERSION} --build-arg TARGET=${TARGET} +serve
-    BUILD --build-arg VERSION=${VERSION} --build-arg TARGET=${TARGET} +runner
-    BUILD --build-arg VERSION=${VERSION} --build-arg TARGET=${TARGET} +runner-python
-    BUILD --build-arg VERSION=${VERSION} --build-arg TARGET=${TARGET} +runner-julia
+    BUILD --build-arg VERSION=${VERSION} +serve
+    BUILD --build-arg VERSION=${VERSION} +runner
+    BUILD --build-arg VERSION=${VERSION} +runner-python
+    BUILD --build-arg VERSION=${VERSION} +runner-julia

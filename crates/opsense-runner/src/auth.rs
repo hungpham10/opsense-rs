@@ -17,12 +17,12 @@
 //!   lấy private_key, re-derive public_key, cache LRU, rồi verify.
 //!   Phù hợp khi REPL + Runner khác máy.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use ed25519_dalek::{SIGNATURE_LENGTH, SigningKey, Verifier, VerifyingKey};
+use opsense_libs::lru::LruCache;
 use rand::{RngCore, rngs::OsRng};
 use subtle::ConstantTimeEq;
 
@@ -268,48 +268,11 @@ pub(crate) fn verify_with_public_key(
 // RemoteAuth — REPL và Runner khác máy
 // =========================================================================
 
-/// LRU cache đơn giản (Mutex<HashMap>) cho `session_id → public_key`.
-/// Khi đầy thì pop ngẫu nhiên phần tử cũ nhất (O(1) amortized).
-#[derive(Debug)]
-struct PubkeyCache {
-    map: HashMap<String, [u8; 32]>,
-    order: Vec<String>, // FIFO eviction
-    cap: usize,
-}
-
-impl PubkeyCache {
-    fn new(cap: usize) -> Self {
-        Self {
-            map: HashMap::new(),
-            order: Vec::new(),
-            cap: cap.max(1),
-        }
-    }
-    fn get(&mut self, k: &str) -> Option<[u8; 32]> {
-        self.map.get(k).copied()
-    }
-    fn put(&mut self, k: String, v: [u8; 32]) {
-        if self.map.contains_key(&k) {
-            self.map.insert(k.clone(), v);
-            return;
-        }
-        if self.map.len() >= self.cap {
-            // Evict oldest
-            if let Some(oldest) = self.order.first().cloned() {
-                self.map.remove(&oldest);
-                self.order.remove(0);
-            }
-        }
-        self.map.insert(k.clone(), v);
-        self.order.push(k.clone());
-    }
-}
-
 /// Auth backed by HTTP calls tới serve, có LRU cache public_key theo
 /// `session_id`. Phù hợp khi REPL + Runner ở 2 máy khác nhau.
 pub struct RemoteAuth {
     serve: Arc<ServeClient>,
-    cache: Mutex<PubkeyCache>,
+    cache: LruCache<String, [u8; 32], 1>,
 }
 
 impl RemoteAuth {
@@ -318,14 +281,14 @@ impl RemoteAuth {
     pub fn new(serve: Arc<ServeClient>, cache_cap: usize) -> Self {
         Self {
             serve,
-            cache: Mutex::new(PubkeyCache::new(cache_cap)),
+            cache: LruCache::new(cache_cap.max(1)),
         }
     }
 
     /// Lookup public_key: hit cache trả ngay, miss → gọi serve
     /// `/api/admin/v1/session/resolve` rồi re-derive từ private_key.
     async fn lookup_public_key(&self, session_id: &str) -> Result<Option<[u8; 32]>> {
-        if let Some(pk) = self.cache.lock().unwrap().get(session_id) {
+        if let Some(pk) = self.cache.get(&session_id.to_string()) {
             return Ok(Some(pk));
         }
         let resp: SessionResolveResponse = self
@@ -356,10 +319,7 @@ impl RemoteAuth {
         let signing = SigningKey::from_bytes(&priv_arr);
         let public_key = signing.verifying_key().to_bytes();
 
-        self.cache
-            .lock()
-            .unwrap()
-            .put(session_id.to_string(), public_key);
+        self.cache.put(session_id.to_string(), public_key);
         Ok(Some(public_key))
     }
 }
