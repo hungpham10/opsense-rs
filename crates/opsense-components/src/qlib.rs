@@ -11,8 +11,7 @@ use crate::vector::runtime::{Component, Identify, Message, Outbound};
 /// Transform nhận candle JSON (`{"t","o","h","l","c","v"}`) từ upstream
 /// (vd json_2_json), feed vào [`StreamingPortfolio`] giữ state giữa các
 /// message, rồi emit từng [`OrderEvent`] thành JSON trade event:
-/// `{"event_id", "ts", "broker", "symbol", "event"}` — tương thích trực tiếp
-/// với `trade_event_station_transform` (persist trước khi forward).
+/// `{"event_id", "ts", "broker", "symbol", "event"}`.
 #[transform]
 pub struct QlibEngine {
     pub id: String,

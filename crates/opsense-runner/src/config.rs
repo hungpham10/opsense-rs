@@ -85,48 +85,51 @@ impl RunnerConfig {
     pub fn load() -> Self {
         let mut cfg = Self::default();
         if let Some(path) = Self::default_config_path()
-            && let Ok(body) = std::fs::read(&path) {
-                match serde_json::from_slice::<RunnerConfigFile>(&body) {
-                    Ok(file) => {
-                        if let Some(b) = file.bind
-                            && let Ok(addr) = b.parse() {
-                                cfg.bind = addr;
-                            }
-                        if let Some(k) = file.kernel {
-                            cfg.kernel_command = resolve_kernel_binary(&k);
-                        }
-                        if !file.kernel_args.is_empty() {
-                            cfg.kernel_args = file.kernel_args;
-                        }
-                        if let Some(v) = file.idle_timeout_secs {
-                            cfg.idle_timeout_secs = v;
-                        }
-                        if let Some(v) = file.sweep_interval_secs {
-                            cfg.sweep_interval_secs = v;
-                        }
-                        if let Some(v) = file.serve_url {
-                            cfg.serve_url = Some(v);
-                        }
-                        if let Some(v) = file.admin_token {
-                            cfg.admin_token = Some(v);
-                        }
-                        if let Some(v) = file.serve_http_timeout_secs {
-                            cfg.serve_http_timeout_secs = v;
-                        }
-                        if let Some(v) = file.pubkey_cache_capacity {
-                            cfg.pubkey_cache_capacity = v;
-                        }
+            && let Ok(body) = std::fs::read(&path)
+        {
+            match serde_json::from_slice::<RunnerConfigFile>(&body) {
+                Ok(file) => {
+                    if let Some(b) = file.bind
+                        && let Ok(addr) = b.parse()
+                    {
+                        cfg.bind = addr;
                     }
-                    Err(e) => {
-                        eprintln!("warn: failed to parse {}: {e}", path.display());
+                    if let Some(k) = file.kernel {
+                        cfg.kernel_command = resolve_kernel_binary(&k);
+                    }
+                    if !file.kernel_args.is_empty() {
+                        cfg.kernel_args = file.kernel_args;
+                    }
+                    if let Some(v) = file.idle_timeout_secs {
+                        cfg.idle_timeout_secs = v;
+                    }
+                    if let Some(v) = file.sweep_interval_secs {
+                        cfg.sweep_interval_secs = v;
+                    }
+                    if let Some(v) = file.serve_url {
+                        cfg.serve_url = Some(v);
+                    }
+                    if let Some(v) = file.admin_token {
+                        cfg.admin_token = Some(v);
+                    }
+                    if let Some(v) = file.serve_http_timeout_secs {
+                        cfg.serve_http_timeout_secs = v;
+                    }
+                    if let Some(v) = file.pubkey_cache_capacity {
+                        cfg.pubkey_cache_capacity = v;
                     }
                 }
+                Err(e) => {
+                    eprintln!("warn: failed to parse {}: {e}", path.display());
+                }
             }
+        }
         // Env overrides (luôn thắng file).
         if let Ok(v) = std::env::var("OPSENSE_RUNNER_BIND")
-            && let Ok(addr) = v.parse() {
-                cfg.bind = addr;
-            }
+            && let Ok(addr) = v.parse()
+        {
+            cfg.bind = addr;
+        }
         if let Ok(v) = std::env::var("OPSENSE_KERNEL") {
             cfg.kernel_command = resolve_kernel_binary(&v);
         }

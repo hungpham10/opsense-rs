@@ -44,7 +44,7 @@ recipe:
     FROM +chef
     ARG TARGET
     COPY . .
-    RUN cargo chef prepare --recipe-path recipe.json --target ${TARGET}
+    RUN cargo chef prepare --recipe-path recipe.json
     SAVE ARTIFACT recipe.json
 
 # -----------------------------------------------------------------------

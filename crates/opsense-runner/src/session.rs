@@ -188,7 +188,9 @@ impl SessionRegistry {
         if !ok {
             // Restore the challenge so the client can retry (or we drop on
             // sweep — single-attempt semantics would also be valid).
-            if let Some(m) = self.sessions.lock().await.get_mut(session_id) { m.pending_challenge = Some(plaintext); }
+            if let Some(m) = self.sessions.lock().await.get_mut(session_id) {
+                m.pending_challenge = Some(plaintext);
+            }
             return Ok(None);
         }
 

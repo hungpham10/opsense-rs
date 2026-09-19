@@ -14,14 +14,87 @@ use std::collections::BTreeMap;
 pub mod http;
 pub mod processor;
 pub mod qlib;
-pub mod signal;
 pub mod station;
 pub mod telegram;
 
+/// Pipeline signal helpers shared by graph nodes.
+pub mod signal {
+    use serde_json::{Value, json};
+
+    use crate::vector::runtime::Message;
+
+    pub const TICK: &str = "tick";
+    pub const DATA_READY: &str = "data_ready";
+    pub const PROCESSED: &str = "processed";
+    pub const BACKFILL: &str = "backfill";
+
+    #[must_use]
+    pub fn tick(ts: i64) -> Message {
+        Message {
+            payload: json!({"event": TICK, "ts": ts}),
+        }
+    }
+
+    #[must_use]
+    pub fn data_ready(ts: i64) -> Message {
+        Message {
+            payload: json!({"event": DATA_READY, "ts": ts}),
+        }
+    }
+
+    #[must_use]
+    pub fn processed(ts: i64) -> Message {
+        Message {
+            payload: json!({"event": PROCESSED, "ts": ts}),
+        }
+    }
+
+    #[must_use]
+    pub fn backfill(from_ts: i64, to_ts: i64) -> Message {
+        Message {
+            payload: json!({"event": BACKFILL, "from_ts": from_ts, "to_ts": to_ts}),
+        }
+    }
+
+    /// Tag the signal with its producer so consumers know which station to read.
+    #[must_use]
+    pub fn tagged(mut msg: Message, src: &str) -> Message {
+        if let Some(obj) = msg.payload.as_object_mut() {
+            obj.insert("src".into(), serde_json::json!(src));
+        }
+        msg
+    }
+
+    #[must_use]
+    pub fn event(msg: &Message) -> Option<&str> {
+        msg.payload.get("event").and_then(Value::as_str)
+    }
+
+    #[must_use]
+    pub fn ts(msg: &Message) -> Option<i64> {
+        msg.payload.get("ts").and_then(Value::as_i64)
+    }
+
+    /// Read the producer tag stamped by [`tagged`].
+    #[must_use]
+    pub fn src(msg: &Message) -> Option<&str> {
+        msg.payload.get("src").and_then(Value::as_str)
+    }
+
+    #[must_use]
+    pub fn now_secs() -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0)
+    }
+}
+
 pub use qlib::QlibEngine;
 pub use station::{
-    AnomalyStationTransform, CategoryStationTransform, PatternStationTransform,
-    TimeseriesStationSink, TimeseriesStationTransform,
+    CategoryStationTransform, PatternStationTransform, TimeseriesStationSink,
+    TimeseriesStationTransform,
 };
 pub use telegram::TelegramSink;
 
