@@ -29,49 +29,47 @@ builder:
 # -----------------------------------------------------------------------
 chef:
     FROM +builder
-    RUN cargo install cargo-chef cargo-zigbuild --locked
+    ARG ZIG_VERSION=0.13.0
+    RUN curl -fsSL https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz | tar -xJ -C /usr/local/lib/ && \
+        ln -s /usr/local/lib/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig && \
+        zig version && \
+        cargo install cargo-chef cargo-zigbuild --locked
     WORKDIR /app
     SAVE IMAGE --cache-hint
 
 # -----------------------------------------------------------------------
-# recipe — cargo-chef recipe.json. cargo chef prepare runs `cargo metadata`,
-# which requires real targets (src/lib.rs, src/main.rs) on disk, so the full
-# source tree is needed here (subject to .earthignore). recipe.json stays
-# byte-identical unless a Cargo.toml/Cargo.lock changes, so +recipe and the
-# `cargo chef cook` layer in +binaries remain cacheable.
+# recipe — cargo-chef recipe.json
 # -----------------------------------------------------------------------
 recipe:
     FROM +chef
-    ARG TARGET
+    ARG TARGET=$TARGET
     COPY . .
     RUN cargo chef prepare --recipe-path recipe.json
     SAVE ARTIFACT recipe.json
 
 # -----------------------------------------------------------------------
-# binaries — build every release binary once, save each as a LOCAL artifact
-# so the image targets can pick them up without rebuilding.
-# cargo-zigbuild uses zig as linker — no cross-compiler toolchain needed.
+# binaries — build release binaries
 # -----------------------------------------------------------------------
 binaries:
     FROM +recipe
-    ARG TARGET
-    RUN cargo chef cook --release --recipe-path recipe.json --target ${TARGET}
+    ARG TARGET=$TARGET
+    RUN cargo chef cook --release --recipe-path recipe.json 
     COPY . .
     RUN cargo zigbuild --release --locked --target ${TARGET}
-    SAVE ARTIFACT target/${TARGET}/release/opsense
-    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-echo
-    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-python
-    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-julia
+    SAVE ARTIFACT target/${TARGET}/release/opsense opsense
+    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-echo opsense-kernel-echo
+    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-python opsense-kernel-python
+    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-julia opsense-kernel-julia
 
 # -----------------------------------------------------------------------
 # serve — Tầng 1 host: OpenResty reverse proxy + opsense + alloy
 # -----------------------------------------------------------------------
 serve:
     FROM openresty/openresty:1.27.1.2-4-bookworm-fat
-    ARG VERSION
-    ARG TARGET
+    ARG VERSION=$VERSION
+    ARG TARGET=$TARGET
 
-    # Runtime deps: supervisor, alloy (Grafana), curl, etc. NO tor, NO sops.
+    # Runtime deps: supervisor, alloy (Grafana), curl, etc.
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             supervisor curl git gettext-base postgresql-client gnupg2 ca-certificates && \
@@ -126,7 +124,7 @@ serve:
     COPY conf/nginx/vhost       /usr/local/openresty/nginx/conf/http.d/vhost
     COPY conf/config.alloy      /etc/alloy/config.alloy
 
-    # Dex OIDC config (for integration test consistency; not used in prod unless Nginx points to Dex).
+    # Dex OIDC config
     COPY conf/dex/config.dev.yaml /etc/dex/config.dev.yaml
 
     # Helper scripts + entrypoint
@@ -134,8 +132,8 @@ serve:
     COPY scripts/alloy.sh      /app/alloy.sh
     COPY scripts/release.sh    /app/entrypoint.sh
 
-    # Backend binary
-    COPY (+binaries/opsense) /app/opsense
+    # Backend binary (Chú ý khoảng trắng giữa --TARGET=$TARGET và /opsense)
+    COPY (+binaries/opsense --TARGET=$TARGET) /app/opsense
     RUN chmod +x /app/*.sh
 
     ENTRYPOINT ["/app/entrypoint.sh", "/usr/bin/supervisord", "-n"]
@@ -148,16 +146,16 @@ serve:
 # -----------------------------------------------------------------------
 runner:
     FROM debian:bookworm-slim
-    ARG VERSION
-    ARG TARGET
+    ARG VERSION=$VERSION
+    ARG TARGET=$TARGET
 
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates libssl3 && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    COPY (+binaries/opsense)             /app/opsense
-    COPY (+binaries/opsense-kernel-echo)  /app/opsense-kernel-echo
+    COPY (+binaries/opsense --TARGET=$TARGET)             /app/opsense
+    COPY (+binaries/opsense-kernel-echo --TARGET=$TARGET) /app/opsense-kernel-echo
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-echo
@@ -172,8 +170,8 @@ runner:
 # -----------------------------------------------------------------------
 runner-python:
     FROM python:3.12-slim
-    ARG VERSION
-    ARG TARGET
+    ARG VERSION=$VERSION
+    ARG TARGET=$TARGET
 
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -181,8 +179,8 @@ runner-python:
         pip install --no-cache-dir numpy pandas pyarrow protobuf && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    COPY (+binaries/opsense)             /app/opsense
-    COPY (+binaries/opsense-kernel-python) /app/opsense-kernel-python
+    COPY (+binaries/opsense --TARGET=$TARGET)               /app/opsense
+    COPY (+binaries/opsense-kernel-python --TARGET=$TARGET) /app/opsense-kernel-python
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-python
@@ -197,11 +195,11 @@ runner-python:
 # -----------------------------------------------------------------------
 runner-julia:
     FROM julia:1.10-bookworm
-    ARG VERSION
-    ARG TARGET
+    ARG VERSION=$VERSION
+    ARG TARGET=$TARGET
 
-    COPY (+binaries/opsense)             /app/opsense
-    COPY (+binaries/opsense-kernel-julia) /app/opsense-kernel-julia
+    COPY (+binaries/opsense --TARGET=$TARGET)              /app/opsense
+    COPY (+binaries/opsense-kernel-julia --TARGET=$TARGET) /app/opsense-kernel-julia
 
     RUN julia -e 'import Pkg; Pkg.add(["Arrow", "DataFrames", "CSV", "Plots"])'
 
@@ -214,25 +212,43 @@ runner-julia:
     SAVE IMAGE opsense-runner-julia:${VERSION}
 
 # -----------------------------------------------------------------------
-# all — build & push all 4 images. CI workflow (`earthly --push +all`).
-# Tag comes from --build-arg VERSION (CI passes ${{ github.ref_name }}).
+# all — build & push all 4 images.
 # -----------------------------------------------------------------------
 all:
-    ARG TARGET
-    BUILD +serve
-    BUILD +runner
-    BUILD +runner-python
-    BUILD +runner-julia
+    ARG TARGET=$TARGET
+    BUILD --build-arg TARGET=${TARGET} +serve
+    BUILD --build-arg TARGET=${TARGET} +runner
+    BUILD --build-arg TARGET=${TARGET} +runner-python
+    BUILD --build-arg TARGET=${TARGET} +runner-julia
+
+# -----------------------------------------------------------------------
+# all-multiarch — build and push amd64 and arm64 manifests in one export.
+# -----------------------------------------------------------------------
+all-multiarch:
+    ARG VERSION=$VERSION
+    ARG REGISTRY=$REGISTRY
+    ARG IMAGE_PREFIX=$IMAGE_PREFIX
+
+    BUILD --platform=linux/amd64 \
+        --build-arg TARGET=x86_64-unknown-linux-gnu \
+        --build-arg VERSION=${VERSION} \
+        --build-arg REGISTRY=${REGISTRY} \
+        --build-arg IMAGE_PREFIX=${IMAGE_PREFIX} \
+        +all
+    BUILD --platform=linux/arm64 \
+        --build-arg TARGET=aarch64-unknown-linux-gnu \
+        --build-arg VERSION=${VERSION} \
+        --build-arg REGISTRY=${REGISTRY} \
+        --build-arg IMAGE_PREFIX=${IMAGE_PREFIX} \
+        +all
 
 # -----------------------------------------------------------------------
 # integration-images — build 4 images locally (no registry push).
-# Tag via --build-arg VERSION (CI: ci-${{ github.sha }}; local default: local).
-# Compose reads OPSENSE_TAG, defaulting to `local`.
 # -----------------------------------------------------------------------
 integration-images:
     ARG VERSION=local
-    ARG TARGET
-    BUILD --build-arg VERSION=${VERSION} +serve
-    BUILD --build-arg VERSION=${VERSION} +runner
-    BUILD --build-arg VERSION=${VERSION} +runner-python
-    BUILD --build-arg VERSION=${VERSION} +runner-julia
+    ARG TARGET=$TARGET
+    BUILD --build-arg VERSION=${VERSION} --build-arg TARGET=${TARGET} +serve
+    BUILD --build-arg VERSION=${VERSION} --build-arg TARGET=${TARGET} +runner
+    BUILD --build-arg VERSION=${VERSION} --build-arg TARGET=${TARGET} +runner-python
+    BUILD --build-arg VERSION=${VERSION} --build-arg TARGET=${TARGET} +runner-julia
