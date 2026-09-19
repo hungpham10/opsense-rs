@@ -17,12 +17,12 @@
 //!   lấy private_key, re-derive public_key, cache LRU, rồi verify.
 //!   Phù hợp khi REPL + Runner khác máy.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use ed25519_dalek::{SigningKey, Verifier, VerifyingKey, SIGNATURE_LENGTH};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use ed25519_dalek::{SIGNATURE_LENGTH, SigningKey, Verifier, VerifyingKey};
+use opsense_libs::lru::LruCache;
 use rand::{RngCore, rngs::OsRng};
 use subtle::ConstantTimeEq;
 
@@ -164,7 +164,9 @@ impl LocalAuth {
         if key.is_empty() {
             return Err(anyhow!("MASTER_KEY is empty"));
         }
-        Ok(Self { master_key: Some(key) })
+        Ok(Self {
+            master_key: Some(key),
+        })
     }
 }
 
@@ -207,10 +209,9 @@ impl Auth for LocalAuth {
     }
 
     async fn create_challenge(&self, _session_id: &str) -> Result<Challenge> {
-        let key = self
-            .master_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("LocalAuth has no master key — call LocalAuth::from_env or from_key"))?;
+        let key = self.master_key.as_ref().ok_or_else(|| {
+            anyhow!("LocalAuth has no master key — call LocalAuth::from_env or from_key")
+        })?;
         // 32 random bytes for the plaintext challenge.
         let mut plaintext = [0u8; 32];
         OsRng.fill_bytes(&mut plaintext);
@@ -267,44 +268,11 @@ pub(crate) fn verify_with_public_key(
 // RemoteAuth — REPL và Runner khác máy
 // =========================================================================
 
-/// LRU cache đơn giản (Mutex<HashMap>) cho `session_id → public_key`.
-/// Khi đầy thì pop ngẫu nhiên phần tử cũ nhất (O(1) amortized).
-#[derive(Debug)]
-struct PubkeyCache {
-    map:   HashMap<String, [u8; 32]>,
-    order: Vec<String>, // FIFO eviction
-    cap:   usize,
-}
-
-impl PubkeyCache {
-    fn new(cap: usize) -> Self {
-        Self { map: HashMap::new(), order: Vec::new(), cap: cap.max(1) }
-    }
-    fn get(&mut self, k: &str) -> Option<[u8; 32]> {
-        self.map.get(k).copied()
-    }
-    fn put(&mut self, k: String, v: [u8; 32]) {
-        if self.map.contains_key(&k) {
-            self.map.insert(k, v);
-            return;
-        }
-        if self.map.len() >= self.cap {
-            // Evict oldest
-            if let Some(oldest) = self.order.first().cloned() {
-                self.map.remove(&oldest);
-                self.order.remove(0);
-            }
-        }
-        self.map.insert(k.clone(), v);
-        self.order.push(k);
-    }
-}
-
 /// Auth backed by HTTP calls tới serve, có LRU cache public_key theo
 /// `session_id`. Phù hợp khi REPL + Runner ở 2 máy khác nhau.
 pub struct RemoteAuth {
-    serve:  Arc<ServeClient>,
-    cache:  Mutex<PubkeyCache>,
+    serve: Arc<ServeClient>,
+    cache: LruCache<String, [u8; 32], 1>,
 }
 
 impl RemoteAuth {
@@ -313,14 +281,14 @@ impl RemoteAuth {
     pub fn new(serve: Arc<ServeClient>, cache_cap: usize) -> Self {
         Self {
             serve,
-            cache: Mutex::new(PubkeyCache::new(cache_cap)),
+            cache: LruCache::new(cache_cap.max(1)),
         }
     }
 
     /// Lookup public_key: hit cache trả ngay, miss → gọi serve
     /// `/api/admin/v1/session/resolve` rồi re-derive từ private_key.
     async fn lookup_public_key(&self, session_id: &str) -> Result<Option<[u8; 32]>> {
-        if let Some(pk) = self.cache.lock().unwrap().get(session_id) {
+        if let Some(pk) = self.cache.get(&session_id.to_string()) {
             return Ok(Some(pk));
         }
         let resp: SessionResolveResponse = self
@@ -339,9 +307,7 @@ impl RemoteAuth {
             .private_key
             .as_deref()
             .ok_or_else(|| anyhow!("session/resolve returned active=true but no private_key"))?;
-        let pk_bytes = B64
-            .decode(pk_b64)
-            .context("private_key not valid base64")?;
+        let pk_bytes = B64.decode(pk_b64).context("private_key not valid base64")?;
         if pk_bytes.len() != 32 {
             anyhow::bail!(
                 "private_key decoded to {} bytes, expected 32",
@@ -353,10 +319,7 @@ impl RemoteAuth {
         let signing = SigningKey::from_bytes(&priv_arr);
         let public_key = signing.verifying_key().to_bytes();
 
-        self.cache
-            .lock()
-            .unwrap()
-            .put(session_id.to_string(), public_key);
+        self.cache.put(session_id.to_string(), public_key);
         Ok(Some(public_key))
     }
 }
@@ -409,9 +372,7 @@ impl Auth for RemoteAuth {
             Some(s) => s,
             None => return Ok(None),
         };
-        let bytes = B64
-            .decode(pk_b64)
-            .context("private_key not valid base64")?;
+        let bytes = B64.decode(pk_b64).context("private_key not valid base64")?;
         if bytes.len() != 32 {
             anyhow::bail!("private_key length {} != 32", bytes.len());
         }
@@ -543,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn from_env_succeeds_when_master_key_set() {
         // MASTER_KEY is a raw byte string of length 32 for AES-256.
-        let key_bytes = vec![0x42u8; 32];
+        let key_bytes = [0x42u8; 32];
         let key_str: String = key_bytes.iter().map(|b| *b as char).collect();
         // SAFETY: tests run single-threaded for this env var.
         unsafe { std::env::set_var("MASTER_KEY", &key_str) };
@@ -576,18 +537,12 @@ mod remote_tests {
         let message = format!("{now}:{nonce}:Execute");
         let sig = signing.sign(message.as_bytes());
 
-        assert!(
-            verify_with_public_key(&pk, "Execute", now, nonce, &sig.to_bytes())
-                .unwrap()
-        );
+        assert!(verify_with_public_key(&pk, "Execute", now, nonce, &sig.to_bytes()).unwrap());
         // Stale timestamp → false
         let stale = now - 60;
         let msg2 = format!("{stale}:{nonce}:Execute");
         let sig2 = signing.sign(msg2.as_bytes());
-        assert!(
-            !verify_with_public_key(&pk, "Execute", stale, nonce, &sig2.to_bytes())
-                .unwrap()
-        );
+        assert!(!verify_with_public_key(&pk, "Execute", stale, nonce, &sig2.to_bytes()).unwrap());
     }
 
     /// `RemoteAuth::verify_signature` trả `Ok(false)` (không panic) khi
@@ -597,16 +552,17 @@ mod remote_tests {
     async fn remote_auth_lookup_failure_returns_false_not_err() {
         // 127.0.0.1:1 chắc chắn connection refused.
         let serve = Arc::new(
-            ServeClient::new(
-                "http://127.0.0.1:1".to_string(),
-                "abt_test".to_string(),
-                2,
-            )
-            .unwrap(),
+            ServeClient::new("http://127.0.0.1:1".to_string(), "abt_test".to_string(), 2).unwrap(),
         );
         let auth = RemoteAuth::new(serve, 16);
         let ok = auth
-            .verify_signature("any-session-id", "Ping", chrono::Utc::now().timestamp(), 0, &[0u8; 64])
+            .verify_signature(
+                "any-session-id",
+                "Ping",
+                chrono::Utc::now().timestamp(),
+                0,
+                &[0u8; 64],
+            )
             .await
             .unwrap();
         // lookup fail → trả Ok(None) → verify_signature trả Ok(false).
@@ -618,12 +574,7 @@ mod remote_tests {
     #[tokio::test]
     async fn remote_auth_create_challenge_unwired_errors() {
         let serve = Arc::new(
-            ServeClient::new(
-                "http://127.0.0.1:1".to_string(),
-                "abt".to_string(),
-                2,
-            )
-            .unwrap(),
+            ServeClient::new("http://127.0.0.1:1".to_string(), "abt".to_string(), 2).unwrap(),
         );
         let auth = RemoteAuth::new(serve, 16);
         let err = auth.create_challenge("s").await.unwrap_err();

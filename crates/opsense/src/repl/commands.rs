@@ -172,16 +172,26 @@ async fn cmd_node_add(client: &OpsenseClient, args: &str) -> anyhow::Result<Opti
             kind: n.kind.clone(),
             id: n.id.clone(),
             config: None,
-            inputs: if n.inputs.is_empty() { None } else { Some(n.inputs.clone()) },
+            inputs: if n.inputs.is_empty() {
+                None
+            } else {
+                Some(n.inputs.clone())
+            },
         })
         .collect();
     if next.iter().any(|c| c.id == new_comp.id) {
-        anyhow::bail!("node '{}' already exists; edit the TOML config to change it", new_comp.id);
+        anyhow::bail!(
+            "node '{}' already exists; edit the TOML config to change it",
+            new_comp.id
+        );
     }
     next.push(new_comp.clone());
 
     let result = client.reload(next).await?;
-    Ok(Some(format_edit_result(&format!("added '{}'", new_comp.id), &result)))
+    Ok(Some(format_edit_result(
+        &format!("added '{}'", new_comp.id),
+        &result,
+    )))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -224,11 +234,17 @@ fn json_to_component(value: serde_json::Value) -> anyhow::Result<ComponentInput>
         .ok_or_else(|| anyhow::anyhow!("missing 'id' field"))?
         .to_string();
     let config = obj.get("config").cloned();
-    let inputs = obj
-        .get("inputs")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
-    Ok(ComponentInput { kind, id, config, inputs })
+    let inputs = obj.get("inputs").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()
+    });
+    Ok(ComponentInput {
+        kind,
+        id,
+        config,
+        inputs,
+    })
 }
 
 fn parse_json(s: &str) -> anyhow::Result<serde_json::Value> {
@@ -278,8 +294,7 @@ fn format_node(node: &NodeSummary) -> String {
 /// `http://127.0.0.1:8080` (UDS không phù hợp cho browser flow).
 async fn cmd_login(rest: &str) -> anyhow::Result<Option<String>> {
     let host = if rest.trim().is_empty() {
-        std::env::var("OPSENSE_HOST")
-            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+        std::env::var("OPSENSE_HOST").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
     } else {
         rest.trim().to_string()
     };

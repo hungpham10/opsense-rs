@@ -22,9 +22,9 @@ pub use arrow::{
 };
 pub use ipc::IpcKernelBackend;
 
+pub use opsense_proto::host::ExecOutcome;
 /// Re-export the wire types so callers depend only on this crate.
 pub use opsense_proto::pb;
-pub use opsense_proto::host::ExecOutcome;
 
 /// Connection-layer health snapshot.
 #[derive(Debug, Clone)]

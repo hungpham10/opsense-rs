@@ -1,9 +1,9 @@
 //! Pretty-printing helpers for REPL output. Backed by `comfy-table`.
 
-use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, ContentArrangement, Table};
+use comfy_table::{ContentArrangement, Table, modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL};
 
-use crate::client::{EditResult, Observation, Status};
 use crate::client::graphql::StationSummary;
+use crate::client::{EditResult, Observation, Status};
 
 /// Table-rendering extension trait for `OpsenseClient`. Keeps the formatting
 /// glue next to the client and off the dispatch hot path.
@@ -53,7 +53,12 @@ pub fn format_edit_result(label: &str, result: &EditResult) -> String {
     let mut out = String::new();
     out.push_str(&format!("{label}: reloaded={}\n", result.reloaded));
     for n in &result.nodes {
-        out.push_str(&format!("  {} ({}) <- {}\n", n.id, n.kind, n.inputs.join(", ")));
+        out.push_str(&format!(
+            "  {} ({}) <- {}\n",
+            n.id,
+            n.kind,
+            n.inputs.join(", ")
+        ));
     }
     out
 }

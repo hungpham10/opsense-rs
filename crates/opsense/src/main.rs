@@ -32,12 +32,16 @@ enum Commands {
     /// Env overrides: OPSENSE_RUNNER_BIND, OPSENSE_KERNEL,
     /// OPSENSE_RUNNER_KERNEL_ARGS
     Runner {
-        #[arg(long)] bind: Option<SocketAddr>,
-        #[arg(long)] kernel: Option<PathBuf>,
-        #[arg(long, num_args = 1..)] kernel_args: Option<Vec<String>>,
+        #[arg(long)]
+        bind: Option<SocketAddr>,
+        #[arg(long)]
+        kernel: Option<PathBuf>,
+        #[arg(long, num_args = 1..)]
+        kernel_args: Option<Vec<String>>,
         /// Smoke check: kết nối tới chính `bind` qua gRPC Health RPC, exit 0 nếu
         /// OK, 1 nếu lỗi. Dùng cho docker `HEALTHCHECK` và integration test.
-        #[arg(long)] health_check: bool,
+        #[arg(long)]
+        health_check: bool,
     },
     /// Interactive thin REPL. Connects to `opsense serve` via GraphQL by
     /// default; pass `--runner` to talk directly to a gRPC runner instead.
@@ -69,41 +73,42 @@ enum Commands {
     ///   opsense token decrypt "\\xHEXHEX..." → in plaintext
     ///
     /// Master key lấy từ env `MASTER_KEY` (32 ASCII bytes).
-    Token {
-        action: String,
-        payload: String,
-    },
+    Token { action: String, payload: String },
 }
 
 #[derive(Subcommand, Debug)]
 enum SessionSubcmd {
     /// Mint Ed25519 keypair mới từ serve, lưu vào `~/.config/opsense/sessions/<id>.json`.
     Issue {
-        #[arg(long, help = "Opsense host (vd https://opsense.example.com). Env: OPSENSE_HOST")]
+        #[arg(
+            long,
+            help = "Opsense host (vd https://opsense.example.com). Env: OPSENSE_HOST"
+        )]
         host: Option<String>,
     },
     /// Liệt kê session: remote (gọi serve) + local file.
     List {
-        #[arg(long)] host: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
     },
     /// Revoke session trên serve + xoá file local.
     Revoke {
         /// session_id (base64 public key) cần revoke.
         session_id: String,
-        #[arg(long)] host: Option<String>,
+        #[arg(long)]
+        host: Option<String>,
     },
     /// In `private_key` ra stdout — dùng để copy sang máy khác.
     ///   opsense session resolve <id> | ssh runner 'opsense session import <id> $(cat) …'
-    Resolve {
-        session_id: String,
-    },
+    Resolve { session_id: String },
     /// Import session từ `private_key` đã copy từ máy khác.
     Import {
         session_id: String,
         /// base64 private key (Ed25519 secret, 32 bytes raw).
         private_key: String,
         /// RFC 3339 timestamp; mặc định now + 8h.
-        #[arg(long)] expires_at: Option<String>,
+        #[arg(long)]
+        expires_at: Option<String>,
     },
 }
 
@@ -118,10 +123,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?
         .block_on(async {
             match Cli::parse().command {
-                Some(Commands::Runner { bind, kernel, kernel_args, health_check }) => {
+                Some(Commands::Runner {
+                    bind,
+                    kernel,
+                    kernel_args,
+                    health_check,
+                }) => {
                     if health_check {
                         // Smoke check: connect to bind via gRPC Health RPC, exit 0 if OK, 1 if error.
-                        match runner::health_check(bind.unwrap_or_else(|| "127.0.0.1:50051".parse().unwrap())).await {
+                        match runner::health_check(
+                            bind.unwrap_or_else(|| "127.0.0.1:50051".parse().unwrap()),
+                        )
+                        .await
+                        {
                             Ok(()) => std::process::exit(0),
                             Err(e) => {
                                 eprintln!("runner health check failed: {e}");
@@ -129,8 +143,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    
-                    if let Err(e) = runner::run(bind, kernel, kernel_args.unwrap_or_default()).await {
+
+                    if let Err(e) = runner::run(bind, kernel, kernel_args.unwrap_or_default()).await
+                    {
                         eprintln!("runner error: {e}");
                         std::process::exit(1);
                     }
@@ -171,16 +186,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             action: session::cli::SessionAction::Resolve(session_id),
                             host: None,
                         },
-                        SessionSubcmd::Import { session_id, private_key, expires_at } => {
-                            session::cli::SessionCmd {
-                                action: session::cli::SessionAction::Import {
-                                    session_id,
-                                    private_key,
-                                    expires_at,
-                                },
-                                host: None,
-                            }
-                        }
+                        SessionSubcmd::Import {
+                            session_id,
+                            private_key,
+                            expires_at,
+                        } => session::cli::SessionCmd {
+                            action: session::cli::SessionAction::Import {
+                                session_id,
+                                private_key,
+                                expires_at,
+                            },
+                            host: None,
+                        },
                     };
                     if let Err(e) = session::cli::run(cmd) {
                         eprintln!("session error: {e}");

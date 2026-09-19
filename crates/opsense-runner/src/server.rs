@@ -10,8 +10,8 @@ use anyhow::Result;
 use opsense_proto::pb::kernel_runner_server::KernelRunner;
 use opsense_proto::pb::{
     Ack, CloseRequest, CodeRequest, ErrorEvent, ExecEvent, HealthRequest, HealthStatus,
-    InterruptRequest, SessionHandle, SessionParams, VerifyRequest, VerifyResponse, exec_event,
-    PingRequest, Pong,
+    InterruptRequest, PingRequest, Pong, SessionHandle, SessionParams, VerifyRequest,
+    VerifyResponse, exec_event,
 };
 
 use crate::auth::{Auth, AuthContext};
@@ -42,14 +42,8 @@ pub const MAX_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 
 impl RunnerService {
     #[must_use]
-    pub fn new(
-        registry: Arc<SessionRegistry>,
-        auth: Option<Arc<dyn Auth>>,
-    ) -> Self {
-        Self {
-            registry,
-            auth,
-        }
+    pub fn new(registry: Arc<SessionRegistry>, auth: Option<Arc<dyn Auth>>) -> Self {
+        Self { registry, auth }
     }
 
     /// The service wrapped with matching message-size limits, ready to mount.
@@ -82,13 +76,14 @@ impl KernelRunner for RunnerService {
                 ))
             })?;
 
-            let challenge = auth
-                .create_challenge(&id)
-                .await
-                .map_err(internal)?;
+            let challenge = auth.create_challenge(&id).await.map_err(internal)?;
 
             self.registry
-                .attach_challenge(&id, challenge.plaintext.clone(), Some(params.requested_role.clone()))
+                .attach_challenge(
+                    &id,
+                    challenge.plaintext.clone(),
+                    Some(params.requested_role.clone()),
+                )
                 .await;
 
             Ok(Response::new(SessionHandle {
@@ -207,7 +202,13 @@ impl KernelRunner for RunnerService {
         let req = request.into_inner();
         if let (Some(ctx), Some(auth)) = (auth_ctx, &self.auth)
             && auth
-                .verify_signature(&ctx.session_id, "Ping", ctx.timestamp, ctx.nonce, &ctx.signature)
+                .verify_signature(
+                    &ctx.session_id,
+                    "Ping",
+                    ctx.timestamp,
+                    ctx.nonce,
+                    &ctx.signature,
+                )
                 .await
                 .unwrap_or(false)
         {

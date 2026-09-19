@@ -7,4 +7,7 @@
 pub mod cli;
 pub mod store;
 
-pub use store::{delete_session_from_disk, list_sessions_on_disk, load_session_from_disk, save_session_to_disk, sessions_dir, SessionFile};
+pub use store::{
+    SessionFile, delete_session_from_disk, list_sessions_on_disk, load_session_from_disk,
+    save_session_to_disk, sessions_dir,
+};

@@ -10,20 +10,51 @@ fn default_ops() -> Vec<Box<dyn Op>> {
         Box::new(ops::Last),
         Box::new(ops::Div),
         Box::new(ops::Concat { axis: 1 }),
-        Box::new(ops::Head { n_feat: 2, n_out: 8 }),
+        Box::new(ops::Head {
+            n_feat: 2,
+            n_out: 8,
+        }),
     ]
 }
 
 fn default_nodes() -> Vec<Node> {
     vec![
-        Node { op: 0, inputs: vec![In::FromExtractor(0)] },
-        Node { op: 1, inputs: vec![In::FromExtractor(0)] },
-        Node { op: 2, inputs: vec![In::FromExtractor(1), In::FromExtractor(2), In::FromExtractor(3)] },
-        Node { op: 3, inputs: vec![In::FromExtractor(1)] },
-        Node { op: 4, inputs: vec![In::FromExtractor(2)] },
-        Node { op: 5, inputs: vec![In::FromOperator(2), In::FromOperator(0)] },
-        Node { op: 6, inputs: vec![In::FromOperator(1), In::FromOperator(5)] },
-        Node { op: 7, inputs: vec![In::FromOperator(6)] },
+        Node {
+            op: 0,
+            inputs: vec![In::FromExtractor(0)],
+        },
+        Node {
+            op: 1,
+            inputs: vec![In::FromExtractor(0)],
+        },
+        Node {
+            op: 2,
+            inputs: vec![
+                In::FromExtractor(1),
+                In::FromExtractor(2),
+                In::FromExtractor(3),
+            ],
+        },
+        Node {
+            op: 3,
+            inputs: vec![In::FromExtractor(1)],
+        },
+        Node {
+            op: 4,
+            inputs: vec![In::FromExtractor(2)],
+        },
+        Node {
+            op: 5,
+            inputs: vec![In::FromOperator(2), In::FromOperator(0)],
+        },
+        Node {
+            op: 6,
+            inputs: vec![In::FromOperator(1), In::FromOperator(5)],
+        },
+        Node {
+            op: 7,
+            inputs: vec![In::FromOperator(6)],
+        },
     ]
 }
 
@@ -52,7 +83,10 @@ fn model_builds_and_infers() {
     assert_eq!(out[1].len(), 1, "atr");
 
     for v in &out[0] {
-        assert!((v - 0.5).abs() < 1e-4, "grid param ≈ 0.5 với trọng số 0, got {v}");
+        assert!(
+            (v - 0.5).abs() < 1e-4,
+            "grid param ≈ 0.5 với trọng số 0, got {v}"
+        );
     }
 }
 
@@ -84,18 +118,56 @@ fn trend_follower_genotype_compiles() {
         Box::new(ops::Atr { period: 14 }),
         Box::new(ops::Sub),
         Box::new(ops::Concat { axis: 1 }),
-        Box::new(ops::Head { n_feat: 4, n_out: 8 }),
+        Box::new(ops::Head {
+            n_feat: 4,
+            n_out: 8,
+        }),
     ];
     let nodes = vec![
-        Node { op: 0, inputs: vec![In::FromExtractor(0)] },
-        Node { op: 1, inputs: vec![In::FromExtractor(0)] },
-        Node { op: 2, inputs: vec![In::FromExtractor(1), In::FromExtractor(2), In::FromExtractor(3)] },
-        Node { op: 3, inputs: vec![In::FromOperator(0), In::FromOperator(1)] },
-        Node { op: 4, inputs: vec![In::FromOperator(0), In::FromOperator(1), In::FromOperator(2), In::FromOperator(3)] },
-        Node { op: 5, inputs: vec![In::FromOperator(4)] },
+        Node {
+            op: 0,
+            inputs: vec![In::FromExtractor(0)],
+        },
+        Node {
+            op: 1,
+            inputs: vec![In::FromExtractor(0)],
+        },
+        Node {
+            op: 2,
+            inputs: vec![
+                In::FromExtractor(1),
+                In::FromExtractor(2),
+                In::FromExtractor(3),
+            ],
+        },
+        Node {
+            op: 3,
+            inputs: vec![In::FromOperator(0), In::FromOperator(1)],
+        },
+        Node {
+            op: 4,
+            inputs: vec![
+                In::FromOperator(0),
+                In::FromOperator(1),
+                In::FromOperator(2),
+                In::FromOperator(3),
+            ],
+        },
+        Node {
+            op: 5,
+            inputs: vec![In::FromOperator(4)],
+        },
     ];
     let g = Graph::new(
-        200, ops, nodes, vec![], vec![0.0; 32], vec![0.0; 8], 8, 200, 60,
+        200,
+        ops,
+        nodes,
+        vec![],
+        vec![0.0; 32],
+        vec![0.0; 8],
+        8,
+        200,
+        60,
     );
     assert_eq!(g.num_features().expect("num_features"), 4);
     let mut inputs: Vec<Vec<f32>> = vec![vec![1.0; 200]; 4];

@@ -155,10 +155,7 @@ async fn candle_stream_drives_paper_trading_events() {
 
     let payloads = capture.snapshot();
     assert!(!payloads.is_empty(), "engine phải phát OrderEvent");
-    let events = payloads
-        .iter()
-        .map(|payload| assert_trade_event(payload))
-        .collect::<Vec<_>>();
+    let events = payloads.iter().map(assert_trade_event).collect::<Vec<_>>();
     assert!(
         events
             .iter()

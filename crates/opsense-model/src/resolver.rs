@@ -83,7 +83,8 @@ impl Resolver {
         // Build DB DSN from secrets or environment fallback
         let postgres_host = std::env::var("POSTGRES_HOST").unwrap_or_else(|_| "".to_string());
         let postgres_port = std::env::var("POSTGRES_PORT").unwrap_or_else(|_| "".to_string());
-        let postgres_password = std::env::var("POSTGRES_PASSWORD").unwrap_or_else(|_| "".to_string());
+        let postgres_password =
+            std::env::var("POSTGRES_PASSWORD").unwrap_or_else(|_| "".to_string());
         let postgres_user = std::env::var("POSTGRES_USER").unwrap_or_else(|_| "".to_string());
         let postgres_db = std::env::var("POSTGRES_DATABASE").unwrap_or_else(|_| "".to_string());
 
@@ -91,12 +92,12 @@ impl Resolver {
             secret.get("DB_DSN", "/").await.unwrap_or(format!(
                 "postgres://{}:{}@{}:{}/{}",
                 postgres_user, postgres_password, postgres_host, postgres_port, postgres_db,
-            )) 
+            ))
         } else {
             secret.get("DB_DSN", "/").await.unwrap_or(format!(
                 "mysql://{}:{}@{}:{}/{}",
                 mysql_user, mysql_password, mysql_host, mysql_port, mysql_db,
-            )) 
+            ))
         };
 
         // Process each comma-separated DSN

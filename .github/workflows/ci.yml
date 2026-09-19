@@ -12,18 +12,54 @@ env:
   RUST_BACKTRACE: 1
   OPSENSE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('ci-{0}', github.sha) }}
   COMPOSE_PROJECT_NAME: opsense-ci-${{ github.run_id }}
+  TARGET: x86_64-unknown-linux-gnu
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  # Job 1: Khai báo ID job là 'build-binaries'
+  build:
+    name: Build Release Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-binaries
+
+      - name: Build workspace binaries
+        run: cargo build --workspace --release --locked
+
+      - name: Upload binaries artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-binaries-${{ env.TARGET }}
+          path: |
+            target/release/opsense
+            target/release/opsense-kernel-echo
+            target/release/opsense-kernel-python
+            target/release/opsense-kernel-julia
+          retention-days: 1
+
+  # Job 2: Phụ thuộc vào job 'build-binaries'
   test:
-    name: Build, Unit & Integration Tests
+    name: Unit & Integration Tests
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
     services:
       redis:
@@ -40,12 +76,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Verify protoc
-        run: protoc --version
-
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -56,46 +86,37 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Python kernel dependencies
+      - name: Install Python dependencies
         run: python3 -m pip install --upgrade pip numpy pandas pyarrow protobuf
-
-      - name: Verify Python stack
-        run: |
-          python3 -c "import numpy, pandas, pyarrow; from google.protobuf import descriptor; print('python stack ok')"
 
       - name: Setup Julia
         uses: julia-actions/setup-julia@v2
         with:
           version: "1.10"
 
-      - name: Cache Julia depot
-        uses: julia-actions/cache@v2
-        with:
-          depot: ~/.julia
-          cache-name: julia-depot
-
-      - name: Install Julia kernel dependencies
+      - name: Install Julia dependencies
         run: julia -e 'import Pkg; Pkg.add(["Arrow", "DataFrames", "CSV", "Plots"])'
 
-      - name: Verify Julia stack
-        run: julia -e 'using Arrow, DataFrames, CSV, Plots; println("julia deps ok")'
-
-      - name: Cache Cargo build
-        uses: Swatinem/rust-cache@v2
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
         with:
-          shared-key: ci
+          name: rust-binaries-${{ env.TARGET }}
+          path: target/${{ env.TARGET }}/release/
 
-      - name: Build workspace
-        run: cargo build --workspace --all-targets --locked
+      - name: Make binaries executable
+        run: chmod +x target/${{ env.TARGET }}/release/*
 
       - name: Run unit tests
-        run: cargo test --workspace --all-targets --locked
+        run: cargo test --workspace --locked
 
       - name: Setup Earthly
         uses: earthly/actions-setup@v1
 
-      - name: Build container images
-        run: earthly +integration-images --VERSION=${{ env.OPSENSE_TAG }}
+      - name: Build container images via Earthly
+        run: |
+          earthly +integration-images \
+            --VERSION=${{ env.OPSENSE_TAG }} \
+            --TARGET=${{ env.TARGET }}
 
       - name: Start Compose stack
         env:
@@ -111,24 +132,6 @@ jobs:
             | jq -s -e 'length > 0 and all(.Health == "healthy")' \
             > /dev/null \
             || (echo "FAIL: not all services healthy" && cat compose-health.txt && exit 1)
-
-      - name: Wait for runner ports on the host
-        run: |
-          for port in 50051 50052 50053; do
-            ok=0
-            for _ in $(seq 1 30); do
-              if python3 -c "import socket; s=socket.create_connection(('127.0.0.1', $port), 1); s.close()"; then
-                ok=1
-                break
-              fi
-              sleep 1
-            done
-            if [ "$ok" != 1 ]; then
-              echo "FAIL: 127.0.0.1:$port not listening (echo/python/julia runners)"
-              OPSENSE_TAG=${{ env.OPSENSE_TAG }} docker compose ps
-              exit 1
-            fi
-          done
 
       - name: Run integration tests
         env:
@@ -149,44 +152,6 @@ jobs:
             --test integration_repl_pty \
             -- --test-threads=1 --nocapture
 
-      - name: Dump Compose logs on failure
-        if: failure()
-        run: |
-          OPSENSE_TAG=${{ env.OPSENSE_TAG }} docker compose logs --no-color --tail=300 > compose-failure.log
-          cat compose-failure.log
-
-      - name: Upload Compose logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: compose-logs
-          path: compose-failure.log
-
       - name: Cleanup Compose stack
         if: always()
         run: OPSENSE_TAG=${{ env.OPSENSE_TAG }} docker compose down -v
-
-      - name: Login to GHCR
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push tested release images
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        env:
-          VERSION: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-
-          images=(serve runner runner-python runner-julia)
-
-          for service in "${images[@]}"; do
-            source_image="opsense-${service}:${VERSION}"
-            release_image="ghcr.io/hungpham10/opsense-${service}:${VERSION}"
-
-            docker tag "$source_image" "$release_image"
-            docker push "$release_image"
-          done

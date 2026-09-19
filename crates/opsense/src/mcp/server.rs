@@ -1,12 +1,12 @@
 //! rmcp server handler — wraps an `OpsenseClient` and exposes it as MCP tools.
 
+use rmcp::handler::server::ServerHandler;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::handler::server::ServerHandler;
 use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::transport::stdio;
-use rmcp::{tool, tool_handler, tool_router, ServiceExt};
+use rmcp::{ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
 use crate::client::OpsenseClient;

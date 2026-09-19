@@ -4,11 +4,11 @@ use sqlx::Row;
 
 use opsense_libs::sops::encrypt;
 
+use crate::entities::admin::Admin;
 use crate::entities::admin::errors::AdminError;
 use crate::entities::admin::helpers::{
     format_dt_for_db, get_master_key, sha256_hex, tz_placeholder, user_token_service,
 };
-use crate::entities::admin::Admin;
 
 /// Thông tin base token của một user (không bao giờ chứa plaintext đầy đủ)
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -113,8 +113,10 @@ impl Token for Admin {
             .execute(&mut *conn)
             .await?;
 
-        self.cache_unencrypted_tokens_by_services
-            .put((tenant_id, service_name.to_string()), Some(token_plain.to_string()));
+        self.cache_unencrypted_tokens_by_services.put(
+            (tenant_id, service_name.to_string()),
+            Some(token_plain.to_string()),
+        );
         Ok(())
     }
 
@@ -194,13 +196,12 @@ impl Token for Admin {
     async fn reveal_user_token(&self, tenant_id: i64, user_id: &str) -> Result<String, AdminError> {
         let pool = self.dbt(tenant_id);
         let mut conn = pool.acquire().await?;
-        let row = sqlx::query(
-            "SELECT token_id FROM sys_user WHERE tenant_id = $1 AND user_id = $2",
-        )
-        .bind(tenant_id)
-        .bind(user_id)
-        .fetch_optional(&mut *conn)
-        .await?;
+        let row =
+            sqlx::query("SELECT token_id FROM sys_user WHERE tenant_id = $1 AND user_id = $2")
+                .bind(tenant_id)
+                .bind(user_id)
+                .fetch_optional(&mut *conn)
+                .await?;
         let Some(row) = row else {
             return Err(AdminError::Other(format!(
                 "Not found user {user_id}, tenant {tenant_id}"

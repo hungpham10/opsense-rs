@@ -5,17 +5,17 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SessionFile {
-    pub session_id:  String,
+    pub session_id: String,
     pub private_key: String,
     /// ISO 8601 / RFC 3339.
-    pub expires_at:  DateTime<Utc>,
-    pub created_at:  DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Trả về `~/.config/opsense/sessions/`.
@@ -53,8 +53,8 @@ pub fn save_session_to_disk(s: &SessionFile) -> Result<PathBuf> {
 
 pub fn load_session_from_disk(session_id: &str) -> Result<SessionFile> {
     let path = session_file_path(session_id)?;
-    let body = std::fs::read(&path)
-        .with_context(|| format!("read session file {}", path.display()))?;
+    let body =
+        std::fs::read(&path).with_context(|| format!("read session file {}", path.display()))?;
     let s: SessionFile = serde_json::from_slice(&body)
         .with_context(|| format!("decode session file {}", path.display()))?;
     Ok(s)
@@ -63,9 +63,7 @@ pub fn load_session_from_disk(session_id: &str) -> Result<SessionFile> {
 pub fn list_sessions_on_disk() -> Result<Vec<SessionFile>> {
     let dir = sessions_dir()?;
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(&dir)
-        .with_context(|| format!("read_dir {}", dir.display()))?
-    {
+    for entry in std::fs::read_dir(&dir).with_context(|| format!("read_dir {}", dir.display()))? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -73,9 +71,10 @@ pub fn list_sessions_on_disk() -> Result<Vec<SessionFile>> {
         }
         let body = std::fs::read(&path).ok();
         if let Some(body) = body
-            && let Ok(s) = serde_json::from_slice::<SessionFile>(&body) {
-                out.push(s);
-            }
+            && let Ok(s) = serde_json::from_slice::<SessionFile>(&body)
+        {
+            out.push(s);
+        }
     }
     Ok(out)
 }
@@ -83,8 +82,7 @@ pub fn list_sessions_on_disk() -> Result<Vec<SessionFile>> {
 pub fn delete_session_from_disk(session_id: &str) -> Result<()> {
     let path = session_file_path(session_id)?;
     if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("remove {}", path.display()))?;
+        std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     }
     Ok(())
 }

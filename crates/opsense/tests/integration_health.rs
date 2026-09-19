@@ -57,7 +57,11 @@ async fn health_endpoint_returns_ok() {
         .send()
         .await
         .expect("health request");
-    assert!(resp.status().is_success(), "health status: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "health status: {}",
+        resp.status()
+    );
     let body: serde_json::Value = resp.json().await.expect("health json");
     assert_eq!(body["ok"], serde_json::json!(true), "health body: {body}");
 }
@@ -87,7 +91,11 @@ async fn graphql_status_returns_nodes_and_stations() {
         .send()
         .await
         .expect("graphql request");
-    assert!(resp.status().is_success(), "graphql status: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "graphql status: {}",
+        resp.status()
+    );
     let body: serde_json::Value = resp.json().await.expect("graphql json");
 
     // `data.status` phải là object (resolve không lỗi).

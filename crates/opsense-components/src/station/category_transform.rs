@@ -57,12 +57,12 @@ impl_category_station_transform!(
         ctx.registry(&self.id, Station::Category(Arc::new(RwLock::new(station))))
             .await
             .or_else(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })?;
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
         let me = ctx
             .station::<Arc<RwLock<CategoryStation>>>(&self.id)
             .await?;

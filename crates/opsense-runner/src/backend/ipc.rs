@@ -50,7 +50,13 @@ impl IpcKernelBackend {
     pub fn from_env() -> Self {
         let cmd = std::env::var("OPSENSE_KERNEL")
             .ok()
-            .and_then(|v| if v.is_empty() { None } else { Some(PathBuf::from(v)) })
+            .and_then(|v| {
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(v))
+                }
+            })
             .unwrap_or_else(|| resolve_kernel_binary("opsense-kernel-echo"));
         Self::new(cmd, Vec::new())
     }
@@ -82,9 +88,7 @@ impl KernelBackend for IpcKernelBackend {
         let stdin = child.stdin.take().context("kernel stdin unavailable")?;
         let stdout = child.stdout.take().context("kernel stdout unavailable")?;
         let mut conn = KernelConnection::new(stdout, stdin);
-        conn.handshake()
-            .await
-            .context("kernel handshake")?;
+        conn.handshake().await.context("kernel handshake")?;
         let id = conn
             .start_session(params.clone())
             .await
@@ -144,7 +148,7 @@ impl KernelBackend for IpcKernelBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opsense_proto::pb::{CodeRequest, SessionParams};
+    use opsense_proto::pb::SessionParams;
 
     #[tokio::test]
     async fn ipc_backend_kind_is_ipc() {

@@ -55,9 +55,10 @@ pub async fn wait_for_health(client: &Client, timeout_secs: u64) -> anyhow::Resu
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
         if let Ok(resp) = client.get(&url).send().await
-            && resp.status().is_success() {
-                return Ok(());
-            }
+            && resp.status().is_success()
+        {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!("serve not healthy at {url} after {timeout_secs}s")
@@ -82,9 +83,10 @@ pub async fn wait_for_pipeline(
             .json(&body)
             .send()
             .await
-            && resp.status().is_success() {
-                return Ok(());
-            }
+            && resp.status().is_success()
+        {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!("pipeline not ready at {url} after {timeout_secs}s")
@@ -115,8 +117,8 @@ pub async fn wait_for_tcp_port(port: u16, timeout_secs: u64) -> anyhow::Result<(
 /// từ host — vd `opsense-dex` DNS chỉ có trong compose network).
 #[allow(dead_code)] // chỉ dùng trong integration_oauth.rs
 pub async fn wait_for_dex(timeout_secs: u64) -> anyhow::Result<()> {
-    let issuer = std::env::var("OPSENSE_DEX_ISSUER")
-        .unwrap_or_else(|_| "http://localhost:5556/dex".into());
+    let issuer =
+        std::env::var("OPSENSE_DEX_ISSUER").unwrap_or_else(|_| "http://localhost:5556/dex".into());
     let url = format!("{}/.well-known/openid-configuration", issuer);
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
@@ -128,9 +130,10 @@ pub async fn wait_for_dex(timeout_secs: u64) -> anyhow::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while Instant::now() < deadline {
         if let Ok(resp) = client.get(&url).send().await
-            && resp.status().is_success() {
-                return Ok(());
-            }
+            && resp.status().is_success()
+        {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!("Dex not healthy at {url} after {timeout_secs}s")

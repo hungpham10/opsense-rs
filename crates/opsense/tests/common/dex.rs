@@ -32,8 +32,7 @@ pub fn login_client() -> reqwest::Client {
 
 /// URL của Dex OIDC provider (compose expose 5556). Default http://localhost:5556/dex.
 pub fn dex_issuer() -> String {
-    std::env::var("OPSENSE_DEX_ISSUER")
-        .unwrap_or_else(|_| "http://localhost:5556/dex".into())
+    std::env::var("OPSENSE_DEX_ISSUER").unwrap_or_else(|_| "http://localhost:5556/dex".into())
 }
 
 /// OIDC discovery → lấy authorization_endpoint, token_endpoint, jwks_uri.
@@ -66,12 +65,12 @@ struct DexTokenRequest {
 #[derive(Deserialize, Debug)]
 struct DexTokenResponse {
     id_token: String,
-        access_token: String,
+    access_token: String,
     // Dex chỉ cấp refresh_token khi request scope `offline_access` — helper
     // này chỉ cần id_token nên field để Option.
-            refresh_token: Option<String>,
-        token_type: String,
-        expires_in: i64,
+    refresh_token: Option<String>,
+    token_type: String,
+    expires_in: i64,
 }
 
 /// Bước 1: Hit `/login` của Nginx → Nginx redirect sang Dex authorization endpoint.

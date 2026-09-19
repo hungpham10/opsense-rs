@@ -229,9 +229,7 @@ impl_http_source!(
             let station = TimeseriesStation::from_storage(&self.id, ctx.storage()).await?;
             ctx.registry(
                 &self.id,
-                Station::Timeseries(std::sync::Arc::new(tokio::sync::RwLock::new(
-                    station,
-                ))),
+                Station::Timeseries(std::sync::Arc::new(tokio::sync::RwLock::new(station))),
             )
             .await
             .or_else(|e| {

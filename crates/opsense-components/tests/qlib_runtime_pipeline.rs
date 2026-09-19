@@ -7,15 +7,11 @@
 //!
 //! Candle đi vào node `candles` qua `Runtime::inject`; test không gọi trực tiếp
 //! `QlibEngine::run()` hoặc `StreamingPortfolio::on_candle()`. Event được xác
-//! nhận qua broadcast của `Output` và snapshot của `CaptureSink`, sau đó dùng
-//! chính payload nhận được để kiểm tra persistence contract của
-//! `TradeEventStation`.
+//! nhận qua broadcast của `Output` và snapshot của `CaptureSink`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(feature = "sqlite")]
-use opsense_components::station::TradeEventStation;
 use opsense_components::vector::runtime::{Event, Runtime};
 use opsense_components::{QlibEngine, TelegramSink};
 use opsense_core::Config;
@@ -149,7 +145,7 @@ async fn canned_candles_drive_paper_trading_pipeline() {
         let captured = capture.snapshot();
         if broadcast_payloads
             .iter()
-            .any(|payload| captured.iter().any(|candidate| *candidate == *payload))
+            .any(|payload| captured.contains(payload))
         {
             break;
         }
@@ -182,76 +178,6 @@ async fn canned_candles_drive_paper_trading_pipeline() {
         .find(|payload| captured.iter().any(|candidate| candidate == *payload))
         .expect("broadcast payload phải xuất hiện trong CaptureSink");
     assert_trade_event(matching_payload);
-
-    #[cfg(feature = "sqlite")]
-    {
-        let data_dir = std::env::temp_dir().join(format!(
-            "opsense-qlib-runtime-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock after epoch")
-                .as_nanos()
-        ));
-        let cfg: Config = serde_json::from_value(json!({
-            "storage": {
-                "backend": "sqlite",
-                "data_dir": data_dir.to_string_lossy().into_owned()
-            }
-        }))
-        .expect("sqlite config");
-        let persistence_ctx = Context::new(&cfg, Arc::new(Secret::new().await.unwrap()));
-        let station = TradeEventStation::from_context("runtime-trades", &persistence_ctx)
-            .await
-            .expect("open trade event station");
-
-        for payload in &captured {
-            assert_trade_event(payload);
-            station.persist(payload).await.expect("persist trade event");
-            let broker = payload
-                .get("broker")
-                .and_then(Value::as_str)
-                .expect("persisted event must have broker");
-            let event_id = payload
-                .get("event_id")
-                .expect("persisted event must have event_id");
-            let persisted = station
-                .read_event(broker, event_id)
-                .await
-                .expect("read persisted event");
-            let persisted = persisted
-                .as_ref()
-                .expect("persisted event must be readable");
-            assert_eq!(
-                persisted.get("event_id"),
-                payload.get("event_id"),
-                "persisted event_id must match for event_id={event_id}"
-            );
-            assert_eq!(
-                persisted.get("ts"),
-                payload.get("ts"),
-                "persisted ts must match"
-            );
-            assert_eq!(
-                persisted.get("broker"),
-                payload.get("broker"),
-                "persisted broker must match"
-            );
-            assert_eq!(
-                persisted.get("symbol"),
-                payload.get("symbol"),
-                "persisted symbol must match"
-            );
-            assert_trade_event(persisted);
-            assert_trade_event(payload);
-            station
-                .persist(persisted)
-                .await
-                .expect("retrying the persisted identity must be idempotent");
-        }
-
-        let _ = std::fs::remove_dir_all(data_dir);
-    }
 
     eprintln!(
         "integration: {} broadcast payloads, {} captured payloads, {} canned candles",

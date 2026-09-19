@@ -13,8 +13,8 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use crate::frame::{Frame, FrameCodec};
 use crate::pb::{
-    Ack, CodeRequest, Envelope, ExecEvent, HealthRequest, HealthStatus,
-    Hello, InterruptRequest, SessionHandle, SessionParams, Shutdown, Welcome,
+    Ack, CodeRequest, Envelope, ExecEvent, HealthRequest, HealthStatus, Hello, InterruptRequest,
+    SessionHandle, SessionParams, Shutdown, Welcome,
 };
 use crate::pb::{envelope, exec_event};
 

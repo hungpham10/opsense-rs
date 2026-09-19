@@ -72,7 +72,8 @@ impl<T> GqlResponse<T> {
                 .join("; ");
             anyhow::bail!("GraphQL error: {msg}");
         }
-        self.data.ok_or_else(|| anyhow::anyhow!("no data in response"))
+        self.data
+            .ok_or_else(|| anyhow::anyhow!("no data in response"))
     }
 }
 
@@ -163,12 +164,7 @@ impl OpsenseClient {
         if let Some(token) = &self.bearer {
             req = req.bearer_auth(token);
         }
-        let request: GqlResponse<Q> = req
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let request: GqlResponse<Q> = req.send().await?.error_for_status()?.json().await?;
         request.into_result()
     }
 
@@ -212,7 +208,15 @@ impl OpsenseClient {
             from_ts: Option<i64>,
             to_ts: Option<i64>,
         }
-        self.gql(QUERY, Vars { node, from_ts, to_ts }).await
+        self.gql(
+            QUERY,
+            Vars {
+                node,
+                from_ts,
+                to_ts,
+            },
+        )
+        .await
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -234,7 +238,11 @@ impl OpsenseClient {
         self.gql(MUTATION, Vars { components }).await
     }
 
-    pub async fn set_attribute(&self, name: &str, value: &str) -> anyhow::Result<SetAttributeResult> {
+    pub async fn set_attribute(
+        &self,
+        name: &str,
+        value: &str,
+    ) -> anyhow::Result<SetAttributeResult> {
         const MUTATION: &str = r#"
             mutation($name: String!, $value: String!) {
                 setAttribute(name: $name, value: $value) { ok envOverrideActive }
@@ -266,11 +274,7 @@ impl TableDisplay for OpsenseClient {
         let mut table = Table::new();
         table.set_header(["id", "type", "inputs"]);
         for n in &status.nodes {
-            table.add_row([
-                n.id.as_str(),
-                n.kind.as_str(),
-                n.inputs.join(", ").as_str(),
-            ]);
+            table.add_row([n.id.as_str(), n.kind.as_str(), n.inputs.join(", ").as_str()]);
         }
         table
     }

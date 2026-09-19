@@ -6,40 +6,40 @@
 //! - `sys_short_sessions`: OAuth2 access_token storage (5min TTL,
 //!   cleanup qua DB partition drop).
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use sqlx::Row;
 
+use crate::entities::admin::Admin;
 use crate::entities::admin::errors::AdminError;
 use crate::entities::admin::helpers::{format_dt_for_db, parse_dt, sha256_hex, tz_placeholder};
-use crate::entities::admin::Admin;
 
 /// Thông tin long session trả về khi gọi `/session/issue`.
 #[derive(Debug, Clone)]
 pub struct LongSessionInfo {
-    pub session_id:    String, // base64(public_key)
-    pub private_key:   String, // base64(private_key_bytes_32)
+    pub session_id: String,  // base64(public_key)
+    pub private_key: String, // base64(private_key_bytes_32)
     pub expires_in_secs: i64,
 }
 
 /// Thông tin short session — chỉ hash lưu DB, plaintext là access_token.
 #[derive(Debug, Clone)]
 pub struct ShortSessionInfo {
-    pub session_id:    String,
-    pub access_token:  String,
+    pub session_id: String,
+    pub access_token: String,
     pub expires_in_secs: i64,
 }
 
 /// Thông tin long session cho list endpoint.
 #[derive(Debug, Clone)]
 pub struct LongSessionSummary {
-    pub session_id:   String,
-    pub status:       String,
-    pub expires_at:   chrono::DateTime<chrono::Utc>,
+    pub session_id: String,
+    pub status: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_at:   chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Admin {
@@ -132,7 +132,9 @@ impl Admin {
         .rows_affected();
 
         if affected == 0 {
-            return Err(AdminError::Other("Session not found or already revoked".into()));
+            return Err(AdminError::Other(
+                "Session not found or already revoked".into(),
+            ));
         }
         Ok(())
     }
@@ -172,12 +174,12 @@ impl Admin {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let session_id: String    = row.try_get(0)?;
-            let status:     String    = row.try_get(1)?;
-            let expires_at  = parse_dt(Some(row.try_get::<String, _>(2)?))?
+            let session_id: String = row.try_get(0)?;
+            let status: String = row.try_get(1)?;
+            let expires_at = parse_dt(Some(row.try_get::<String, _>(2)?))?
                 .ok_or_else(|| AdminError::Other("Missing expires_at".into()))?;
             let last_used_at = parse_dt(row.try_get::<Option<String>, _>(3)?)?;
-            let created_at  = parse_dt(Some(row.try_get::<String, _>(4)?))?
+            let created_at = parse_dt(Some(row.try_get::<String, _>(4)?))?
                 .ok_or_else(|| AdminError::Other("Missing created_at".into()))?;
 
             out.push(LongSessionSummary {
@@ -215,7 +217,9 @@ impl Admin {
         .fetch_optional(&mut *conn)
         .await?;
 
-        let Some(row) = row else { return Ok(None); };
+        let Some(row) = row else {
+            return Ok(None);
+        };
 
         let status: String = row.try_get(1)?;
         let expires_at = parse_dt(Some(row.try_get::<String, _>(2)?))?;
@@ -267,8 +271,8 @@ impl Admin {
         let mut bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
         let access_token = URL_SAFE_NO_PAD.encode(bytes);
-        let session_id   = rand::random::<u64>().to_string();
-        let token_hash   = sha256_hex(access_token.as_bytes());
+        let session_id = rand::random::<u64>().to_string();
+        let token_hash = sha256_hex(access_token.as_bytes());
 
         let expires_in_secs = 300i64; // 5 phút
         let expires_at = chrono::Utc::now()
@@ -321,14 +325,16 @@ impl Admin {
         .fetch_optional(&mut *conn)
         .await?;
 
-        let Some(row) = row else { return Ok(None); };
+        let Some(row) = row else {
+            return Ok(None);
+        };
 
         let expires_at = parse_dt(Some(row.try_get::<String, _>(2)?))?;
         if expires_at.is_none() || expires_at.unwrap() < chrono::Utc::now() {
             return Ok(None);
         }
 
-        let user_id:    String = row.try_get(0)?;
+        let user_id: String = row.try_get(0)?;
         let session_id: String = row.try_get(1)?;
         Ok(Some((user_id, session_id)))
     }
