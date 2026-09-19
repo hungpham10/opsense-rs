@@ -106,17 +106,26 @@ rexpect = "0.4"
 jsonwebtoken = "9"
 
 [profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-strip = "symbols"
+opt-level = 2
+lto = false
+codegen-units = 16
+strip = "debuginfo"      # Hoặc true nếu muốn giảm tối đa dung lượng binary
 panic = "abort"
+debug-assertions = true  # Giữ debug_assert! khi chạy cargo test --release
+
+[profile.test]
+debug = 1
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.release-small]
 inherits = "release"
 opt-level = "z"
+strip = true
 
-# The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"
+debug-assertions = false
+

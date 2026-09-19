@@ -77,8 +77,8 @@ impl ServeClient {
     }
 
     fn url(&self, path: &str) -> String {
-        let path = if path.starts_with('/') {
-            &path[1..]
+        let path = if let Some(stripped) = path.strip_prefix('/') {
+            stripped
         } else {
             path
         };
