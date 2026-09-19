@@ -6,6 +6,7 @@ VERSION 0.8
 ARG --global REGISTRY=ghcr.io
 ARG --global IMAGE_PREFIX=hungpham10/opsense
 ARG --global VERSION=latest
+ARG --global TARGET=x86_64-unknown-linux-gnu
 
 # -----------------------------------------------------------------------
 # builder — shared Rust toolchain layer (apt deps only, no source yet)
@@ -24,11 +25,11 @@ builder:
     SAVE IMAGE --cache-hint
 
 # -----------------------------------------------------------------------
-# chef — install cargo-chef once; this layer is reused by every recipe.
+# chef — install cargo-chef + cargo-zigbuild; reused by every recipe.
 # -----------------------------------------------------------------------
 chef:
     FROM +builder
-    RUN cargo install cargo-chef --locked
+    RUN cargo install cargo-chef cargo-zigbuild --locked
     WORKDIR /app
     SAVE IMAGE --cache-hint
 
@@ -41,23 +42,26 @@ chef:
 # -----------------------------------------------------------------------
 recipe:
     FROM +chef
+    ARG TARGET
     COPY . .
-    RUN cargo chef prepare --recipe-path recipe.json
+    RUN cargo chef prepare --recipe-path recipe.json --target ${TARGET}
     SAVE ARTIFACT recipe.json
 
 # -----------------------------------------------------------------------
 # binaries — build every release binary once, save each as a LOCAL artifact
 # so the image targets can pick them up without rebuilding.
+# cargo-zigbuild uses zig as linker — no cross-compiler toolchain needed.
 # -----------------------------------------------------------------------
 binaries:
     FROM +recipe
-    RUN cargo chef cook --release --recipe-path recipe.json
+    ARG TARGET
+    RUN cargo chef cook --release --recipe-path recipe.json --target ${TARGET}
     COPY . .
-    RUN cargo build --release --locked
-    SAVE ARTIFACT target/release/opsense
-    SAVE ARTIFACT target/release/opsense-kernel-echo
-    SAVE ARTIFACT target/release/opsense-kernel-python
-    SAVE ARTIFACT target/release/opsense-kernel-julia
+    RUN cargo zigbuild --release --locked --target ${TARGET}
+    SAVE ARTIFACT target/${TARGET}/release/opsense
+    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-echo
+    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-python
+    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-julia
 
 # -----------------------------------------------------------------------
 # serve — Tầng 1 host: OpenResty reverse proxy + opsense + alloy
@@ -65,6 +69,7 @@ binaries:
 serve:
     FROM openresty/openresty:1.27.1.2-4-bookworm-fat
     ARG VERSION
+    ARG TARGET
 
     # Runtime deps: supervisor, alloy (Grafana), curl, etc. NO tor, NO sops.
     RUN apt-get update && \
@@ -144,6 +149,7 @@ serve:
 runner:
     FROM debian:bookworm-slim
     ARG VERSION
+    ARG TARGET
 
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -167,6 +173,7 @@ runner:
 runner-python:
     FROM python:3.12-slim
     ARG VERSION
+    ARG TARGET
 
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -191,6 +198,7 @@ runner-python:
 runner-julia:
     FROM julia:1.10-bookworm
     ARG VERSION
+    ARG TARGET
 
     COPY (+binaries/opsense)             /app/opsense
     COPY (+binaries/opsense-kernel-julia) /app/opsense-kernel-julia
@@ -210,6 +218,7 @@ runner-julia:
 # Tag comes from --build-arg VERSION (CI passes ${{ github.ref_name }}).
 # -----------------------------------------------------------------------
 all:
+    ARG TARGET
     BUILD +serve
     BUILD +runner
     BUILD +runner-python
@@ -222,6 +231,7 @@ all:
 # -----------------------------------------------------------------------
 integration-images:
     ARG VERSION=local
+    ARG TARGET
     BUILD --build-arg VERSION=${VERSION} +serve
     BUILD --build-arg VERSION=${VERSION} +runner
     BUILD --build-arg VERSION=${VERSION} +runner-python

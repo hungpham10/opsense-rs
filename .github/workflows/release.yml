@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: hungpham10/opsense
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-linux-binaries:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+          target: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Build ${{ matrix.target }}
+        run: |
+          cargo zigbuild --release --locked --target ${{ matrix.target }}
+
+      - name: Strip debug symbols
+        run: |
+          strip target/${{ matrix.target }}/release/opsense || true
+          strip target/${{ matrix.target }}/release/opsense-kernel-echo || true
+          strip target/${{ matrix.target }}/release/opsense-kernel-python || true
+          strip target/${{ matrix.target }}/release/opsense-kernel-julia || true
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: opsense-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/opsense
+            target/${{ matrix.target }}/release/opsense-kernel-echo
+            target/${{ matrix.target }}/release/opsense-kernel-python
+            target/${{ matrix.target }}/release/opsense-kernel-julia
+          if-no-files-found: error
+          retention-days: 7
+
+  build-darwin-binaries:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+          target: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-darwin-${{ matrix.target }}
+
+      - name: Build ${{ matrix.target }}
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Strip debug symbols
+        run: |
+          strip target/${{ matrix.target }}/release/opsense || true
+          strip target/${{ matrix.target }}/release/opsense-kernel-echo || true
+          strip target/${{ matrix.target }}/release/opsense-kernel-python || true
+          strip target/${{ matrix.target }}/release/opsense-kernel-julia || true
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: opsense-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/opsense
+            target/${{ matrix.target }}/release/opsense-kernel-echo
+            target/${{ matrix.target }}/release/opsense-kernel-python
+            target/${{ matrix.target }}/release/opsense-kernel-julia
+          if-no-files-found: error
+          retention-days: 7
+
+  build-docker-multiarch:
+    needs: build-linux-binaries
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Earthly
+        uses: earthly/actions-setup@v1
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Build and push Docker images (${{ matrix.target }})
+        env:
+          VERSION: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+
+          case "$TARGET" in
+            aarch64-unknown-linux-*) PLATFORM="linux/arm64" ;;
+            x86_64-unknown-linux-*)  PLATFORM="linux/amd64" ;;
+            *) PLATFORM="linux/amd64" ;;
+          esac
+
+          earthly --push \
+            --platform "$PLATFORM" \
+            --build-arg VERSION="${VERSION}" \
+            --build-arg REGISTRY="${{ env.REGISTRY }}" \
+            --build-arg IMAGE_PREFIX="${{ env.IMAGE_PREFIX }}" \
+            --build-arg TARGET="${TARGET}" \
+            +all
+
+  release-binaries:
+    needs: [build-linux-binaries, build-darwin-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Organize artifacts
+        run: |
+          mkdir -p release
+          for dir in artifacts/opsense-*; do
+            cp -r "$dir"/* release/ 2>/dev/null || true
+          done
+          ls -R release/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

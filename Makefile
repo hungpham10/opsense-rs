@@ -4,6 +4,8 @@ VERSION ?= local
 OPSENSE_TAG ?= $(VERSION)
 REGISTRY ?= ghcr.io
 IMAGE_PREFIX ?= lap02921/opsense
+TARGET ?= x86_64-unknown-linux-gnu
+PLATFORM := $(shell echo $(TARGET) | sed 's/x86_64-/linux\/amd64/; s/aarch64-/linux\/arm64/')
 COMPOSE := docker compose
 EARTHLY := earthly
 
@@ -13,13 +15,14 @@ IMG_RUNNER     := $(REGISTRY)/$(IMAGE_PREFIX)-runner:$(VERSION)
 IMG_RUNNER_PY  := $(REGISTRY)/$(IMAGE_PREFIX)-runner-python:$(VERSION)
 IMG_RUNNER_JL  := $(REGISTRY)/$(IMAGE_PREFIX)-runner-julia:$(VERSION)
 
-.PHONY: help build-local release build-cloud up up-cloud down down-v logs ps restart shell encrypt decrypt sql-clean test-integration test-integration-down
+.PHONY: help build-local release build-cloud build-multiarch up up-cloud down down-v logs ps restart shell encrypt decrypt sql-clean test-integration test-integration-down
 
 help:
 	@echo "Opsense dev shortcuts:"
 	@echo "  make build-local           - Build all 4 images locally with tag VERSION (default: local)."
-	@echo "  make release               - Build & push all 4 images with VERSION as their tag."
+	@echo "  make release               - Build & push all 4 images with VERSION as their tag (host platform)."
 	@echo "  make build-cloud           - Alias for release."
+	@echo "  make build-multiarch       - Build & push all 4 images for multiple platforms (TARGET required)."
 	@echo "  make up                    - docker compose up -d using local image tag VERSION."
 	@echo "  make up-cloud              - docker compose up -d using released registry images."
 	@echo "  make down                  - docker compose down (KHÔNG xoá volume; dùng 'down-v' để xoá)"
@@ -37,6 +40,7 @@ help:
 	@echo "Biến override:"
 	@echo "  VERSION=v1.0.0 make build-local          (build local tags)"
 	@echo "  VERSION=v1.0.0 make release              (build + push registry tags)"
+	@echo "  VERSION=v1.0.0 make build-multiarch TARGET=aarch64-unknown-linux-musl  (multi-arch push)"
 	@echo "  VERSION=v1.0.0 make up-cloud             (run released registry images)"
 	@echo "  APP_ENV=uat make up"
 
@@ -46,7 +50,7 @@ build-local:
 	$(EARTHLY) --build-arg VERSION="$(VERSION)" +integration-images
 	@echo "Built local tags: opsense-serve:$(VERSION), opsense-runner:$(VERSION), opsense-runner-python:$(VERSION), opsense-runner-julia:$(VERSION)"
 
-# Build & push all 4 registry images. VERSION is used verbatim as every image tag.
+# Build & push all 4 registry images for host platform.
 release:
 	@test -n "$(VERSION)" || (echo "ERROR: VERSION is required (vd: VERSION=v1.0.0)." && exit 1)
 	@if [ "$(VERSION)" = "local" ]; then \
@@ -58,6 +62,27 @@ release:
 		--build-arg IMAGE_PREFIX="$(IMAGE_PREFIX)" \
 		+all
 	@echo "Pushed $(IMG_SERVE), $(IMG_RUNNER), $(IMG_RUNNER_PY), $(IMG_RUNNER_JL)"
+
+PLATFORM := $(shell echo $(TARGET) | sed 's/x86_64-/linux\/amd64/; s/aarch64-/linux\/arm64/')
+
+# Build & push all 4 registry images for multiple platforms.
+# Targets: aarch64-unknown-linux-musl, x86_64-unknown-linux-musl, etc.
+build-multiarch:
+	@test -n "$(VERSION)" || (echo "ERROR: VERSION is required (vd: VERSION=v1.0.0)." && exit 1)
+	@if [ "$(VERSION)" = "local" ]; then \
+		echo "ERROR: VERSION=local không được push lên registry."; exit 1; \
+	fi
+	@if [ "$(TARGET)" = "x86_64-unknown-linux-gnu" ]; then \
+		echo "WARNING: Default TARGET used. Specify TARGET for cross-compilation."; \
+	fi
+	$(EARTHLY) --push \
+		--platform $(PLATFORM) \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg REGISTRY="$(REGISTRY)" \
+		--build-arg IMAGE_PREFIX="$(IMAGE_PREFIX)" \
+		--build-arg TARGET="$(TARGET)" \
+		+all
+	@echo "Pushed $(IMG_SERVE), $(IMG_RUNNER), $(IMG_RUNNER_PY), $(IMG_RUNNER_JL) for $(TARGET)"
 
 build-cloud: release
 
