@@ -6,6 +6,8 @@
 //! - `sys_short_sessions`: OAuth2 access_token storage (5min TTL,
 //!   cleanup qua DB partition drop).
 
+use chrono::{DateTime, Duration, Utc};
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::RngCore;
@@ -37,9 +39,9 @@ pub struct ShortSessionInfo {
 pub struct LongSessionSummary {
     pub session_id: String,
     pub status: String,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
 impl Admin {
@@ -66,7 +68,7 @@ impl Admin {
 
         // 2. Mã hóa private_key
         let master_key = crate::entities::admin::helpers::get_master_key().await?;
-        let encrypted = opsense_libs::sops::encrypt(&master_key, &private_key_b64)
+        let encrypted = opsense_mlib::sops::encrypt(&master_key, &private_key_b64)
             .map_err(|e| AdminError::Other(format!("Encrypt private_key failed: {e}")))?;
 
         // 3. Lazy cleanup: xóa expired sessions của user trước
@@ -83,8 +85,8 @@ impl Admin {
 
         // 4. Insert session
         let expires_in_secs = 8 * 3600i64; // 8h
-        let expires_at = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::seconds(expires_in_secs))
+        let expires_at = Utc::now()
+            .checked_add_signed(Duration::seconds(expires_in_secs))
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
         let kind = self.kind(tenant_id);
 
@@ -201,7 +203,7 @@ impl Admin {
         user_id: &str,
         session_id: &str,
     ) -> Result<Option<String>, AdminError> {
-        use opsense_libs::sops::decrypt;
+        use opsense_mlib::sops::decrypt;
 
         let pool = self.dbt(tenant_id);
         let mut conn = pool.acquire().await?;
@@ -227,7 +229,7 @@ impl Admin {
         if status != "active" {
             return Ok(None);
         }
-        if expires_at.is_none() || expires_at.unwrap() < chrono::Utc::now() {
+        if expires_at.is_none() || expires_at.unwrap() < Utc::now() {
             // Lazy cleanup
             let _ = sqlx::query(
                 "DELETE FROM sys_long_sessions \
@@ -275,8 +277,8 @@ impl Admin {
         let token_hash = sha256_hex(access_token.as_bytes());
 
         let expires_in_secs = 300i64; // 5 phút
-        let expires_at = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::seconds(expires_in_secs))
+        let expires_at = Utc::now()
+            .checked_add_signed(Duration::seconds(expires_in_secs))
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
 
         let pool = self.dbt(tenant_id);
@@ -330,7 +332,7 @@ impl Admin {
         };
 
         let expires_at = parse_dt(Some(row.try_get::<String, _>(2)?))?;
-        if expires_at.is_none() || expires_at.unwrap() < chrono::Utc::now() {
+        if expires_at.is_none() || expires_at.unwrap() < Utc::now() {
             return Ok(None);
         }
 
@@ -373,7 +375,7 @@ mod tests {
     /// `LongSessionSummary` Debug + Clone work.
     #[test]
     fn test_long_session_summary_clone() {
-        let now = chrono::Utc::now();
+        let now = Utc::now();
         let s = LongSessionSummary {
             session_id: "s1".into(),
             status: "active".into(),

@@ -45,14 +45,19 @@ pub struct StreamingPortfolio {
 
     #[serde(skip, default)]
     orders: Vec<Order>,
+
     #[serde(skip, default)]
     history: Vec<Order>,
+
     #[serde(skip, default)]
     plan: Vec<TradingGrid>,
+
     #[serde(skip, default)]
     review_at: u64,
+
     #[serde(skip, default)]
     candle_seq: u64,
+
     #[serde(skip, default)]
     candle_ts: i64,
 }

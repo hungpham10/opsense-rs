@@ -6,33 +6,29 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
-[dependencies]
-opsense-libs = { path = "../opsense-libs" }
-opsense-model = { path = "../opsense-model" }
-opsense-macros = { path = "../opsense-macros" }
+[features]
+default = []
+json = ["dep:serde_json", "dep:serde", "dep:typetag", "opsense-mlib/json", "serde/rc"]
+graph = ["dep:tract-onnx", "dep:prost"]
 
-# Financial data / market plumbing
+[dependencies]
+opsense-mlib = { path = "../opsense-mlib" }
 itertools = "0.14"
+tracing = { workspace = true }
 reqwest = { workspace = true }
-reqwest-middleware = { version = "0.5", features = ["json"] }
-reqwest-tracing = "0.7"
-lmdb = "0.8"
 
 # ONNX genotype compilation
-tract-onnx = "0.23.2"
+tract-onnx = { workspace = true, optional = true }
+prost = { workspace = true, optional = true}
 
 # Runtime / serialization
 tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 async-trait = { workspace = true }
-typetag = { workspace = true }
-tracing = { workspace = true }
+typetag = { workspace = true, optional = true }
 rand = { workspace = true }
 csv = "1.3"
-prost = { workspace = true }
-futures-util = { workspace = true }
-utoipa = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [lints.rust]
 warnings = "deny"

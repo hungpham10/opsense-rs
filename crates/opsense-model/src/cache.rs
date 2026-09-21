@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use opsense_libs::binarysearch::{lower_bound, upper_bound};
+use opsense_mlib::binarysearch::{lower_bound, upper_bound};
 use redis::{AsyncCommands, ErrorKind, RedisError, RedisResult};
 
 use super::resolver::Resolver;

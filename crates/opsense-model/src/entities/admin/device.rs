@@ -4,6 +4,8 @@
 //! khi console/CLI authenticate với host. Sau khi user duyệt trên browser,
 //! device_code chuyển sang `approved` và tokens được phát hành.
 
+use chrono::{Duration, Utc};
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use sqlx::Row;
@@ -56,8 +58,8 @@ impl Admin {
         let interval_secs = 5;
         let expires_in_secs = 600i64; // 10 phút
 
-        let expires_at = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::seconds(expires_in_secs))
+        let expires_at = Utc::now()
+            .checked_add_signed(Duration::seconds(expires_in_secs))
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
 
         let pool = self.dbt(tenant_id);
@@ -119,7 +121,7 @@ impl Admin {
         .ok_or_else(|| AdminError::Other("Device code not found".into()))?;
 
         let expires_at = parse_dt(Some(row.try_get::<String, _>(2)?))?;
-        if expires_at.is_none() || expires_at.unwrap() < chrono::Utc::now() {
+        if expires_at.is_none() || expires_at.unwrap() < Utc::now() {
             return Err(AdminError::Other("Device code expired".into()));
         }
 
@@ -134,8 +136,8 @@ impl Admin {
         //    plaintext được mã hóa AES lưu `sys_token_map`, hash lưu `sys_user`
         //    (đúng hệ introspect mà Nginx dùng để xác minh Bearer).
         let expires_in_secs = 8 * 3600i64; // 8h
-        let expires_at_ts = chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::seconds(expires_in_secs))
+        let expires_at_ts = Utc::now()
+            .checked_add_signed(Duration::seconds(expires_in_secs))
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
         let access_token = self
             .issue_user_token(tenant_id, user_id, Some(expires_at_ts))
@@ -203,7 +205,7 @@ impl Admin {
         let status: String = row.try_get(0)?;
         let expires_at = parse_dt(Some(row.try_get::<String, _>(2)?))?;
 
-        if expires_at.is_none() || expires_at.unwrap() < chrono::Utc::now() {
+        if expires_at.is_none() || expires_at.unwrap() < Utc::now() {
             return Err(AdminError::Other("authorization_expired".into()));
         }
 

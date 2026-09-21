@@ -9,7 +9,7 @@
 //!   (trả Err) thì transaction bị hủy, hoặc cập nhật shortcuts/cache rồi để
 //!   radix commit.
 
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -72,19 +72,12 @@ impl_element!(i32, 4);
 impl_element!(i64, 8);
 impl_element!(i128, 16);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum Error {
-    #[error("index must not be zero or negative")]
     InvalidIndex,
-
-    #[error("prefix not found")]
     NotFound,
-
-    #[error("storage error: {0}")]
-    CategoryStorage(String),
-
-    #[error("callback error")]
     Callback,
+    CategoryStorage(String),
 }
 
 impl From<storage::StorageError> for Error {
@@ -94,6 +87,19 @@ impl From<storage::StorageError> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::InvalidIndex => write!(f, "index must not be zero or negative"),
+            Error::NotFound => write!(f, "prefix not found"),
+            Error::CategoryStorage(msg) => write!(f, "storage error: {msg}"),
+            Error::Callback => write!(f, "callback error"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 /// Kết quả matcher trả về cho một node: pattern khớp hoàn toàn trong prefix
 /// của node này (`found`), và các `pattern_pos` để tiếp tục dò xuống children

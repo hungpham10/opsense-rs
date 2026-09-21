@@ -86,6 +86,9 @@ impl KernelRepl {
                     self.shutdown().await;
                     break;
                 }
+                Ok(Signal::ExternalBreak(_)) | Ok(Signal::HostCommand(_)) => continue,
+                // `Signal` is #[non_exhaustive]; ignore any future variants.
+                Ok(_) => continue,
                 Err(e) => {
                     eprintln!("readline error: {e}");
                     break;
@@ -322,7 +325,7 @@ impl KernelRepl {
 
 /// Ghi Arrow IPC stream ra `.parquet` hoặc `.csv` theo phần mở rộng.
 fn write_arrow_ipc(ipc: &[u8], path: &str) -> Result<()> {
-    use arrow::ipc::reader::StreamReader;
+    use arrow_ipc::reader::StreamReader;
     let cursor = std::io::Cursor::new(ipc);
     let reader = StreamReader::try_new(cursor, None)
         .map_err(|e| anyhow::anyhow!("decode arrow ipc: {e}"))?;
@@ -337,7 +340,7 @@ fn write_arrow_ipc(ipc: &[u8], path: &str) -> Result<()> {
     let lower = path.to_lowercase();
     if lower.ends_with(".csv") {
         let file = std::fs::File::create(path)?;
-        let mut writer = arrow::csv::writer::Writer::new(file);
+        let mut writer = arrow_csv::writer::Writer::new(file);
         for batch in &batches {
             writer.write(batch)?;
         }

@@ -1,5 +1,5 @@
 [package]
-name = "opsense-libs"
+name = "opsense-mlib"
 version.workspace = true
 edition = "2024"
 license.workspace = true
@@ -10,29 +10,28 @@ warnings = "deny"
 [features]
 default = []
 bloom-search = []
-duckdb = ["dep:duckdb"]
-sqlite = ["dep:rusqlite", "dep:sqlx"]
-redis = ["dep:redis", "dep:zstd", "dep:bincode"]
+sops = ["rand", "aes-gcm"]
+json = []
+parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:object_store"]
+sqlite = ["dep:sqlx"]
+redis = ["dep:redis"]
 
 [dependencies]
-duckdb = { workspace = true, optional = true }
+arrow-array = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
-rusqlite = { workspace = true, optional = true }
 redis = { workspace = true, optional = true }
-zstd = { workspace = true, optional = true }
-lmdb-rkv = { workspace = true, optional = true }
-bincode = { workspace = true, optional = true }
-thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-utoipa = { workspace = true }
+utoipa = { workspace = true, optional = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
-async-graphql = { workspace = true }
 
 # sops (AES-GCM challenge encryption)
-aes-gcm = "0.10"
-rand = "0.8"
+aes-gcm = { version = "0.10", optional = true }
+rand = { workspace = true, optional = true }
 
 # --- vector subsystem ---
 tokio = { workspace = true }
@@ -45,5 +44,3 @@ tokio-util = { workspace = true, features = ["compat"] }
 log = { workspace = true }
 opsense-macros = { path = "../opsense-macros" }
 
-[dev-dependencies]
-tempfile = "3"

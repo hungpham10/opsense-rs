@@ -10,7 +10,6 @@ pub mod oauth;
 pub mod repl;
 
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
@@ -20,12 +19,11 @@ use axum::Json;
 use axum::extract::State;
 use headers::Header;
 use http::{HeaderName, HeaderValue};
-use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, StationKind};
-use opsense_libs::vector::components::{clock, null};
-use opsense_libs::vector::runtime::{Component, Event, Runtime};
+use opsense_mlib::vector::components::{clock, null};
+use opsense_mlib::vector::runtime::{Component, Event, Runtime};
 use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
 
@@ -33,54 +31,6 @@ use crate::api::oauth::OAuthMetrics;
 
 #[derive(Debug)]
 pub struct XTenantId(i64);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Kernel registry (Tầng 2)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A runner session created through the GraphQL bridge.
-pub struct KernelSessionEntry {
-    pub client: crate::client::grpc::RunnerClient,
-    pub backend: String,
-}
-
-/// Registry of live runner sessions, keyed by session id (= Ed25519 public
-/// key assigned by the runner at `Start`).
-///
-/// A `tokio::sync::Mutex` (not std) because resolvers hold the lock across
-/// `.await` while an execute/interrupt RPC is in flight.
-#[derive(Clone, Default)]
-pub struct KernelRegistry {
-    sessions: Arc<Mutex<HashMap<String, KernelSessionEntry>>>,
-}
-
-impl KernelRegistry {
-    pub async fn insert(&self, id: String, entry: KernelSessionEntry) {
-        self.sessions.lock().await.insert(id, entry);
-    }
-
-    pub async fn remove(&self, id: &str) -> Option<KernelSessionEntry> {
-        self.sessions.lock().await.remove(id)
-    }
-
-    pub async fn ids(&self) -> Vec<(String, String)> {
-        self.sessions
-            .lock()
-            .await
-            .iter()
-            .map(|(id, e)| (id.clone(), e.backend.clone()))
-            .collect()
-    }
-
-    /// Run `f` with mutable access to the session's client.
-    pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, HashMap<String, KernelSessionEntry>> {
-        self.sessions.lock().await
-    }
-
-    pub async fn is_empty(&self) -> bool {
-        self.sessions.lock().await.is_empty()
-    }
-}
 
 impl From<XTenantId> for i64 {
     fn from(tenant: XTenantId) -> Self {
@@ -128,7 +78,6 @@ pub struct AppState {
     runtime: Arc<RwLock<Runtime>>,
     admin_entity: Arc<opsense_model::entities::admin::Admin>,
     oauth_metrics: Arc<OAuthMetrics>,
-    kernel: KernelRegistry,
 }
 
 impl AppState {
@@ -168,14 +117,7 @@ impl AppState {
             oauth_metrics,
             secret,
             connector,
-            kernel: KernelRegistry::default(),
         })
-    }
-
-    /// Kernel session registry (Tầng 2 — runner gRPC sessions created via
-    /// GraphQL `kernelStart`).
-    pub fn kernel(&self) -> &KernelRegistry {
-        &self.kernel
     }
 
     pub async fn stop(&self) -> Result<(), Error> {
@@ -255,7 +197,7 @@ pub async fn health_check(State(_): State<AppState>) -> Json<serde_json::Value> 
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(SimpleObject, Clone, Debug)]
-pub struct NodeSummary {
+pub struct Node {
     pub id: String,
 
     #[graphql(name = "type")]
@@ -265,15 +207,15 @@ pub struct NodeSummary {
 }
 
 #[derive(SimpleObject, Clone, Debug)]
-pub struct StationSummary {
+pub struct Station {
     pub id: String,
     pub kind: StationKind,
 }
 
 #[derive(SimpleObject, Clone, Debug)]
 pub struct Status {
-    pub nodes: Vec<NodeSummary>,
-    pub stations: Vec<StationSummary>,
+    pub nodes: Vec<Node>,
+    pub stations: Vec<Station>,
 }
 
 impl AppState {
@@ -285,7 +227,7 @@ impl AppState {
 
         let nodes = topology
             .into_iter()
-            .map(|n| NodeSummary {
+            .map(|n| Node {
                 id: n.id,
                 kind: n.component_type,
                 inputs: n.inputs,
@@ -297,7 +239,7 @@ impl AppState {
             .stations()
             .await
             .into_iter()
-            .map(|(id, kind)| StationSummary { id, kind })
+            .map(|(id, kind)| Station { id, kind })
             .collect();
 
         Status { nodes, stations }

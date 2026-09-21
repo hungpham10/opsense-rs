@@ -11,17 +11,19 @@ use std::io::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+#[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
 
 use crate::grid::TradingGrid;
-use opsense_libs::grid::AnalysisGrid;
-use opsense_libs::transition::TransitionAnalysis;
+use opsense_mlib::grid::AnalysisGrid;
+use opsense_mlib::transition::TransitionAnalysis;
 
 use crate::{FetchFn, ParamFn, Strategy};
 
 const INITIAL_CAPITAL: f64 = 100_000.0;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct VolatilityAdaptiveGridStrategy {
     /// Số grid levels tối đa
     max_grid_levels: usize,
@@ -44,7 +46,7 @@ pub struct VolatilityAdaptiveGridStrategy {
     smoothing_k: f64,
     trading_candle_secs: u64,
 
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     last_review: AtomicU64,
 }
 
@@ -213,7 +215,7 @@ impl VolatilityAdaptiveGridStrategy {
 
 use crate::candle::CandleStick;
 
-#[typetag::serde(name = "volatility_adaptive_grid")]
+#[cfg_attr(feature = "json", typetag::serde(name = "volatility_adaptive_grid"))]
 #[async_trait]
 impl Strategy for VolatilityAdaptiveGridStrategy {
     fn init(&self) -> Vec<f64> {

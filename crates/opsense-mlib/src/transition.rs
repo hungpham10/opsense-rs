@@ -1,5 +1,3 @@
-use serde::{Deserialize, Serialize};
-
 use crate::grid::AnalysisGrid;
 
 /// Phân tích chuyển trạng thái của timeseries trên lưới [`AnalysisGrid`].
@@ -9,7 +7,7 @@ use crate::grid::AnalysisGrid;
 ///
 /// Hỗ trợ tính xác suất sau `n` interval (dùng iterative vector-matrix
 /// multiplication với ma trận chuyển dạng sparse).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TransitionAnalysis {
     grid: AnalysisGrid,
     interval_secs: i64,

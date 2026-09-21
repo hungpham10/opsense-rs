@@ -4,11 +4,13 @@
 //! API bên ngoài (Investing.com, SimpleFX).
 
 use crate::Tick;
+
+#[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Một cây nến OHLCV — canonical type dùng chung cho toàn bộ hệ thống.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct CandleStick {
     /// Unix timestamp (seconds).
     pub t: i64,

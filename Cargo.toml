@@ -1,18 +1,18 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
 	"crates/opsense",
-	"crates/opsense-libs",
 	"crates/opsense-core",
-	"crates/opsense-components",
 	"crates/opsense-model",
 	"crates/opsense-macros",
+	"crates/opsense-mlib",
+	"crates/opsense-qlib",
+	"crates/opsense-components",
 	"crates/opsense-proto",
 	"crates/opsense-kernel-echo",
-	"crates/opsense-runner",
 	"crates/opsense-kernel-python",
 	"crates/opsense-kernel-julia",
-	"crates/opsense-qlib"
+	"crates/opsense-runner",
 ]
 
 [workspace.package]
@@ -22,110 +22,67 @@ rust-version = "1.94"
 license = "MIT"
 repository = "https://github.com/hungpham10/opsense-rs"
 homepage = "https://github.com/hungpham10/opsense-rs"
-authors = ["Hung <hung.pham10@icloud.com>"]
+authors = ["Hung <hung0913208@gmail.com>"]
 
 [workspace.dependencies]
-axum = "0.8.8"
-axum-metrics = "0.2.0"
-axum-macros = "0.5.0"
-axum-extra = { version = "0.12.5", features = ["typed-header"] }
-axum-prometheus = "0.10.0"
-async-graphql = "7.2.1"
-async-graphql-axum = "7.2.1"
-headers = "0.4.1"
-http = "1.4.0"
-http-body-util = "0.1.3"
-tower = "0.5.3"
-tower-http = { version = "0.7.0", features = ["trace"] }
-sentry = { version = "0.49.1", default-features = false, features = ["reqwest", "rustls", "tower-http", "tracing", "contexts", "logs", "panic", "debug-images"] }
-opentelemetry = { version = "0.32.0", features = ["metrics"] }
-opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
-opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio", "metrics"] }
-tracing-opentelemetry = "0.33.0"
-
-dotenvy = "0.15.7"
-clap = { version = "4.5.57", features = ["derive"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
-tokio = { version = "1.49.0", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+# Core
+async-trait = "0.1"
+anyhow = "1"
+bytes = "1"
+tokio = { version = "1.49.0", default-features = false, features = ["full"] }
+tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 tokio-stream = "0.1"
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-native-roots"] }
+futures = "0.3"
+futures-util = { version = "0.3", features = ["sink"] }
 
-arrow = { version = "56", features = ["ipc", "json", "csv"] }
-parquet = { version = "56", features = ["arrow", "async"] }
-arrow-schema = "56"
-arrow-array = "56"
+# Debuging
+log = "0.4.29"
+tracing = "0.1.44"
+reqwest = { version = "=0.12.28", features = ["json", "cookies"] }
 
-reedline = "0.39"
-comfy-table = "7"
-plotters = { version = "0.3", features = ["terminal"] }
-uuid = { version = "1.12", features = ["v4", "v7", "serde"] }
-rmcp = { version = "0.6", features = ["server", "transport-io", "macros"] }
-
+# JSON
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-anyhow = "1.0"
-bytes = "1"
 prost = "0.14"
+
+# Machine learning
+tract-onnx = "0.23.2"
+async-graphql = "7.2.1"
+async-graphql-axum = "7.2.1"
+utoipa = "5"
+rand = "=0.8.8"
+typetag = "0.2.21"
+parking_lot = "0.12"
+dashmap = "6"
+
+# Dependencies
+# Parquet lakehouse backend (replaces DuckDB): arrow-array/arrow-schema +
+# parquet for data files, object_store for the S3 mirror. We use the split
+# sub-crates directly (not the `arrow` facade) since the lakehouse code only
+# needs schemas + arrays + RecordBatch, and the facade pulls `arrow-arith`
+# which breaks against chrono >= 0.4.42.
+base64 = { version = "=0.22.1" }
+arrow-array = { version = "=56.0.0" }
+arrow-schema = { version = "=56.0.0" }
+parquet = { version = "=56.0.0", default-features = false, features = ["arrow", "zstd", "arrow-array", "arrow-schema"] }
+# Arrow split sub-crates used by the REPL kernel `:export` path. We use
+# arrow-ipc/arrow-csv directly instead of the `arrow` facade.
+arrow-ipc = "=56.0.0"
+arrow-csv = "=56.0.0"
+# Used by opsense-runner `segment_to_record_batch` (Arrow IPC re-assembly).
+arrow-select = "=56.0.0"
+object_store = { version = "=0.11.2", default-features = false, features = ["aws"] }
+redis = { version = "=1.0.1", default-features = false, features = ["tokio-comp", "connection-manager"] }
+sqlx = { version = "=0.8.0", default-features = false, features = ["any", "chrono", "mysql", "postgres", "runtime-tokio", "sqlite"] }
+
+# gRPC kernel runner wire protocol (opsense-proto codegen)
 tonic = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
-async-trait = "0.1"
-futures = "0.3"
-futures-util = { version = "0.3", features = ["sink"] }
-rusqlite = { version = "0.32", features = ["bundled", "backup"] }
-redis = { version = "1.0", features = ["tokio-comp"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "mysql", "any", "chrono"] }
-duckdb = { version = "1.10505.0", default-features = false, features = ["bundled"] }
-lmdb-rkv = "0.14"
-thiserror = "2"
-log = "0.4.29"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-
-# Shared utility crates
-base64 = "0.22"
-libc = "0.2"
-typetag = "0.2.21"
-utoipa = "5"
-dashmap = "6"
-parking_lot = "0.12"
-rhai = { version = "1", features = ["sync", "serde"] }
-zstd = "0.13"
-bincode = "1.3"
-tempfile = "3"
 ed25519-dalek = "2"
-rand = "0.8"
-subtle = "2"
+uuid = { version = "1", features = ["v4"] }
 
-# Integration tests (CLI PTY smoke for `opsense repl --runner`)
-rexpect = "0.4"
-
-# JWT encoding/decoding for integration tests (HS256 shared secret with Dex).
-jsonwebtoken = "9"
-
-[profile.release]
-opt-level = 2
-lto = false
-codegen-units = 16
-strip = "debuginfo"      # Hoặc true nếu muốn giảm tối đa dung lượng binary
-panic = "abort"
-debug-assertions = true  # Giữ debug_assert! khi chạy cargo test --release
-
-[profile.test]
-debug = 1
-opt-level = 2
-
-[profile.dev.package."*"]
-opt-level = 3
-
-[profile.release-small]
-inherits = "release"
-opt-level = "z"
-strip = true
-
-[profile.dist]
-inherits = "release"
-debug-assertions = false
-
+# REPL / TUI (opsense `repl` subcommand)
+reedline = "0.49"
+comfy-table = "7"

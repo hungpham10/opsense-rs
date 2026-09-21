@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 
 pub use opsense_core::Observation;
 
-use crate::repl::display::TableDisplay;
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Response types (mirror of the GraphQL schema in api/repl/v1.rs)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -265,28 +263,6 @@ impl OpsenseClient {
             name: &'a str,
         }
         self.gql(MUTATION, Vars { name }).await
-    }
-}
-
-impl TableDisplay for OpsenseClient {
-    fn status_table(&self, status: &Status) -> comfy_table::Table {
-        use comfy_table::*;
-        let mut table = Table::new();
-        table.set_header(["id", "type", "inputs"]);
-        for n in &status.nodes {
-            table.add_row([n.id.as_str(), n.kind.as_str(), n.inputs.join(", ").as_str()]);
-        }
-        table
-    }
-
-    fn stations_table(&self, stations: &[StationSummary]) -> comfy_table::Table {
-        use comfy_table::*;
-        let mut table = Table::new();
-        table.set_header(["id", "kind"]);
-        for s in stations {
-            table.add_row([s.id.as_str(), s.kind.as_str()]);
-        }
-        table
     }
 }
 

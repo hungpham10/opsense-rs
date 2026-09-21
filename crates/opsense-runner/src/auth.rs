@@ -19,10 +19,10 @@
 
 use std::sync::Arc;
 
+use crate::opsense_libs::lru::LruCache;
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use ed25519_dalek::{SIGNATURE_LENGTH, SigningKey, Verifier, VerifyingKey};
-use opsense_libs::lru::LruCache;
 use rand::{RngCore, rngs::OsRng};
 use subtle::ConstantTimeEq;
 
@@ -218,7 +218,7 @@ impl Auth for LocalAuth {
         // sops::encrypt takes &String; use hex encoding so we round-trip
         // arbitrary bytes losslessly.
         let hex_plain = hex_encode(&plaintext);
-        let ciphertext = opsense_libs::sops::encrypt(key, &hex_plain)
+        let ciphertext = crate::opsense_libs::sops::encrypt(key, &hex_plain)
             .map_err(|e| anyhow!("encrypt challenge: {e}"))?;
         Ok(Challenge {
             ciphertext,

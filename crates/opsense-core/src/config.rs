@@ -21,18 +21,40 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
+use std::error::Error as StdError;
 use std::path::Path;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ConfigError {
-    #[error("failed to load config: {0}")]
-    Load(#[from] config_crate::ConfigError),
-
-    #[error("invalid config: {0}")]
+    Load(config_crate::ConfigError),
     Invalid(String),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::Load(e) => write!(f, "failed to load config: {e}"),
+            ConfigError::Invalid(msg) => write!(f, "invalid config: {msg}"),
+        }
+    }
+}
+
+impl StdError for ConfigError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            ConfigError::Load(e) => Some(e),
+            ConfigError::Invalid(_) => None,
+        }
+    }
+}
+
+impl From<config_crate::ConfigError> for ConfigError {
+    fn from(e: config_crate::ConfigError) -> Self {
+        ConfigError::Load(e)
+    }
 }
 
 /// Fields default individually (`#[serde(default)]` at the struct level) so a

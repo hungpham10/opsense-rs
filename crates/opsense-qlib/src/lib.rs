@@ -1,42 +1,64 @@
 mod calendar;
 mod candle;
-mod data_loader;
 mod extractors;
 mod fee;
-mod graph;
-mod ohcl;
-
 mod grid;
 mod portfolio;
 mod strategies;
-mod streaming;
 mod tick;
 
 pub use calendar::{CryptoCalendar, ForexCalendar, StockCalendar};
 pub use candle::CandleStick;
-pub use data_loader::{FromCsv, FromQueryCandleSticks};
+pub use tick::Tick;
+
 /// Genotype DAG: `ops` = DNA alphabet, `nodes` = wiring. Compile sang ONNX
 /// reusable làm Genotype cho ML/neuroevolution.
 pub use extractors::OhlcvExtractor;
 pub use fee::{
     DerivativeFee, MbsDerivativeFee, SimpleFixedFee, SsiDerivativeFee, VpsDerivativeFee,
 };
-pub use graph::ops::*;
-pub use graph::{Graph, In, Node};
 pub use grid::TradingGrid;
+
+#[cfg(feature = "json")]
+mod loader;
+
+#[cfg(feature = "json")]
+mod ohcl;
+
+#[cfg(feature = "json")]
+mod streaming;
+
+#[cfg(feature = "graph")]
+mod graph;
+
+#[cfg(feature = "json")]
+pub use loader::{FromCsv, FromQueryCandleSticks};
+
+#[cfg(feature = "json")]
 pub use ohcl::QueryCandleSticks;
-pub use opsense_libs::grid::{AnalysisGrid, SieveConfig};
-pub use opsense_libs::transition::TransitionAnalysis;
-pub use tick::Tick;
 
 pub use portfolio::{DEFAULT_SETTLEMENT_CANDLES, Order, OrderType, Portfolio, Report};
+
+#[cfg(feature = "json")]
 pub use strategies::{GridStrategy, VolatilityAdaptiveGridStrategy};
+
+#[cfg(feature = "graph")]
+pub use graph::{Graph, In, Node, ops::*};
+
+#[cfg(feature = "json")]
+pub use opsense_mlib::grid::{AnalysisGrid, SieveConfig};
+
+#[cfg(feature = "json")]
+pub use opsense_mlib::transition::TransitionAnalysis;
+
+#[cfg(feature = "json")]
 pub use streaming::StreamingPortfolio;
 
 /// Re-export runtime dưới `crate::vector::runtime` để macro `#[source]`/`#[sink]`/`#[transform]`
 /// của opsense-macros mở rộng dùng URL như trong opsense-components.
+#[cfg(feature = "json")]
 pub mod vector {
-    pub use opsense_libs::vector::runtime;
+    pub use opsense_mlib::vector::runtime;
 }
 
 use std::fmt::Debug;
@@ -44,6 +66,8 @@ use std::io::Error;
 use std::pin::Pin;
 
 use async_trait::async_trait;
+
+#[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
 
 pub type FetchFn<'a> = &'a mut (
@@ -58,12 +82,14 @@ pub type FetchFn<'a> = &'a mut (
 /// Mọi biến cố lệnh trong vòng forward — bắn qua `NotifyFn`, consumer tự lọc
 /// loại mình quan tâm (vd TelegramSink chỉ xử lý `Closed`).
 /// Snapshot slim của một grid tại thời điểm rebuild — chỉ giữ dải giá levels.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct GridSnapshot {
     pub levels: Vec<f64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub enum OrderEvent {
     /// Lệnh vừa được đặt (đã nằm trong `orders` mở)
     Placed { ts: u64, order: Order },
@@ -88,20 +114,20 @@ pub type NotifyFn<'a> = &'a mut (
 
 pub type ParamFn<'a> = &'a (dyn Fn(usize) -> f64 + Send + Sync);
 
-#[typetag::serde(tag = "loader")]
+#[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
 #[async_trait]
 pub trait DataLoader: Sync + Send {
     async fn range(&self, from: u64, to: u64, resolution: &str) -> Result<Vec<CandleStick>, Error>;
 }
 
 /// Transforms candle data into one or more feature vectors.
-#[typetag::serde(tag = "type")]
+#[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
 pub trait Extractor: Debug + Send + Sync {
     fn name(&self) -> &str;
     fn extract(&self, candles: &[CandleStick]) -> Result<Vec<Vec<f64>>, Error>;
 }
 
-#[typetag::serde(tag = "type")]
+#[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
 #[async_trait]
 pub trait Strategy: Sync + Send {
     fn init(&self) -> Vec<f64>;
@@ -115,17 +141,17 @@ pub trait Strategy: Sync + Send {
     ) -> Result<Vec<TradingGrid>, Error>;
 }
 
-#[typetag::serde(tag = "type")]
+#[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
 pub trait Fee: Send + Sync {
     fn rate(&self) -> f64;
 }
 
-#[typetag::serde(tag = "type")]
+#[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
 pub trait Score: Send + Sync {
     fn score(&self, report: &Report) -> f64;
 }
 
-#[typetag::serde(tag = "type")]
+#[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
 pub trait Calendar: Send + Sync {
     fn next(&self, current_ts: u64, resolution: &str) -> u64;
     fn settlement_candles(&self) -> u64 {

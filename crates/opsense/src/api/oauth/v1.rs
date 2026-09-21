@@ -162,6 +162,7 @@ fn ok(detail: Option<&str>) -> Response {
 }
 
 /// Extract user_id từ `X-User-Id` header (Nginx inject sau khi validate Bearer).
+#[allow(clippy::result_large_err)]
 fn extract_user_id(headers: &HeaderMap) -> Result<String, Response> {
     headers
         .get("x-user-id")
@@ -514,7 +515,7 @@ async fn session_list(State(state): State<AppState>, headers: HeaderMap) -> Resp
                     session_id: s.session_id,
                     status: s.status,
                     expires_at: s.expires_at.to_rfc3339(),
-                    last_used_at: s.last_used_at.map(|d| d.to_rfc3339()),
+                    last_used_at: s.last_used_at.map(|t| t.to_rfc3339()),
                     created_at: s.created_at.to_rfc3339(),
                 })
                 .collect();

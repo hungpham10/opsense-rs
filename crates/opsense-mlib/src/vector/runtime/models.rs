@@ -2,7 +2,6 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::io::Error;
 use std::sync::Arc;
 
-use async_graphql::SimpleObject;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -89,8 +88,7 @@ pub struct Message {
 }
 
 /// Read-only view of one node in the running pipeline, for status tooling.
-#[derive(Debug, Clone, Serialize, SimpleObject)]
-#[graphql(name = "NodeInfo")]
+#[derive(Debug, Clone, Serialize)]
 pub struct NodeInfo {
     pub id: String,
     pub component_type: String,

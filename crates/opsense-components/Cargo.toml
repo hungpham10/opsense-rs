@@ -11,11 +11,16 @@ warnings = "deny"
 [dependencies]
 futures = { workspace = true }
 async-trait = { workspace = true }
-axum = { workspace = true }
 opsense-core = { path = "../opsense-core" }
-opsense-libs = { path = "../opsense-libs" }
+# Aliased to `opsense-mlib` (formerly `opsense-libs`): all `opsense_libs::`
+# paths in this crate keep working through the alias. `json` enables the
+# vector / jq / search subsystems the components build on.
+opsense-libs = { package = "opsense-mlib", path = "../opsense-mlib", features = ["json"] }
 opsense-macros = { path = "../opsense-macros" }
-opsense-qlib = { path = "../opsense-qlib" }
+# `json` links qlib's typetag-registered pipeline components
+# (Calendar, grid strategies, StreamingPortfolio, …) into the inventory that
+# opsense-components deserializes from pipeline TOML / registers with typetag.
+opsense-qlib = { path = "../opsense-qlib", features = ["json"] }
 opsense-model = { path = "../opsense-model" }
 reqwest = { workspace = true }
 serde = { workspace = true }

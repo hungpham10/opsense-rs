@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 // ── Trading Grid ─────────────────────────────────────────────────────────
@@ -24,7 +23,7 @@ use std::fmt;
 /// assert_eq!(g.level_price(4), 77000.0);
 /// assert!((g.step() - 250.0).abs() < 1e-9);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TradingGrid {
     /// Level prices, sorted ascending.
     levels: Vec<f64>,

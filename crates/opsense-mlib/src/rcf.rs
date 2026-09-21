@@ -14,11 +14,10 @@
 //! Không phụ thuộc crate ngoài (PRNG xorshift nội bộ), dùng cho script
 //! phân tích trong `opsense-rhai` cũng như Rust code khác.
 
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 /// Cấu hình rừng RCF ([`RcfForest::with_config`]).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct RcfConfig {
     /// Số cây trong rừng. Nhiều cây → điểm mượt hơn, chậm hơn tuyến tính.
     pub num_trees: usize,
@@ -43,7 +42,7 @@ impl Default for RcfConfig {
 }
 
 /// Rừng RCF streaming trên vector `dims` chiều.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RcfForest {
     dims: usize,
     cfg: RcfConfig,
@@ -56,7 +55,7 @@ pub struct RcfForest {
     next_id: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 struct XorShift64(u64);
 
 impl XorShift64 {
@@ -81,7 +80,7 @@ impl XorShift64 {
 }
 
 /// Bounding box của một subtree.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 struct BBox {
     min: Vec<f64>,
     max: Vec<f64>,
@@ -120,7 +119,7 @@ impl BBox {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 enum Node {
     Empty,
     Branch {

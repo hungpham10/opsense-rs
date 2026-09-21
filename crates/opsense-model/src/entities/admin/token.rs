@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
+
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
-use opsense_libs::sops::encrypt;
+use opsense_mlib::sops::encrypt;
 
 use crate::entities::admin::Admin;
 use crate::entities::admin::errors::AdminError;
@@ -11,7 +12,7 @@ use crate::entities::admin::helpers::{
 };
 
 /// Thông tin base token của một user (không bao giờ chứa plaintext đầy đủ)
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UserTokenInfo {
     pub user_id: String,
 
@@ -29,6 +30,19 @@ pub struct UserTokenInfo {
     pub last_used_at: Option<DateTime<Utc>>,
 
     pub created_at: DateTime<Utc>,
+}
+
+impl Default for UserTokenInfo {
+    fn default() -> Self {
+        Self {
+            user_id: String::new(),
+            token_hint: None,
+            expires_at: None,
+            revoked_at: None,
+            last_used_at: None,
+            created_at: DateTime::UNIX_EPOCH,
+        }
+    }
 }
 
 /// Generic token vault (`sys_token_map`) + user base token (`sys_user`).

@@ -245,7 +245,13 @@ impl RunnerService {
 /// # Errors
 /// Propagates bind/serve failures.
 pub async fn serve(bind: SocketAddr, cfg: RunnerConfig, auth: Option<Arc<dyn Auth>>) -> Result<()> {
-    let backend = Arc::new(crate::backend::IpcKernelBackend::from_env());
+    // Build the backend from the resolved config (file → env → CLI overrides)
+    // rather than re-reading the environment, so `--kernel-command` /
+    // `--kernel-arg` and `runner.json` actually take effect.
+    let backend = Arc::new(crate::backend::IpcKernelBackend::new(
+        cfg.kernel_command.clone(),
+        cfg.kernel_args.clone(),
+    ));
     let registry = Arc::new(SessionRegistry::new(backend, auth.clone(), cfg.clone()));
     let service = RunnerService::new(registry, auth);
     let result = tonic::transport::Server::builder()

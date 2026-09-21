@@ -1,3 +1,5 @@
+use chrono::Utc;
+
 use sqlx::Row;
 
 use crate::entities::admin::Admin;
@@ -46,7 +48,7 @@ impl Jwt for Admin {
 
         let expires_at = parse_dt(row.try_get(3)?)?;
         if let Some(expires_at) = expires_at
-            && expires_at < chrono::Utc::now()
+            && expires_at < Utc::now()
         {
             return Ok(None);
         }

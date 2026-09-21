@@ -38,9 +38,14 @@ pub async fn run(
 
 /// gRPC health check for `opsense runner` command.
 /// Connects to `bind` via tonic channel, calls KernelRunner::Health RPC, exits 0 on success.
-pub async fn health_check(bind: SocketAddr) -> anyhow::Result<()> {
+/// When `bind` is `None`, resolves the runner's own configured bind
+/// (`~/.config/opsense/runner.json` / `OPSENSE_RUNNER_BIND` / default).
+pub async fn health_check(bind: Option<SocketAddr>) -> anyhow::Result<()> {
     use opsense_proto::pb::HealthRequest;
     use opsense_proto::pb::kernel_runner_client::KernelRunnerClient;
+
+    let cfg = RunnerConfig::load();
+    let bind = bind.unwrap_or(cfg.bind);
 
     let channel = tonic::transport::Channel::from_shared(format!("http://{bind}"))
         .map_err(|e| anyhow::anyhow!("invalid bind address {bind}: {e}"))?

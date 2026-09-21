@@ -22,7 +22,7 @@ mod token;
 
 use std::sync::Arc;
 
-use opsense_libs::lru::LruCache;
+use opsense_mlib::lru::LruCache;
 
 pub use errors::AdminError;
 pub use helpers::sha256_hex;
@@ -70,7 +70,7 @@ impl Admin {
         tenant_id: i64,
         service_name: &str,
     ) -> Result<String, AdminError> {
-        use opsense_libs::sops::decrypt;
+        use opsense_mlib::sops::decrypt;
         use sqlx::Row;
 
         let cache_key = (tenant_id, service_name.to_string());
@@ -117,7 +117,7 @@ impl Admin {
         tenant_id: i64,
         token_id: i64,
     ) -> Result<String, AdminError> {
-        use opsense_libs::sops::decrypt;
+        use opsense_mlib::sops::decrypt;
         use sqlx::Row;
 
         let cache_key = token_id;

@@ -26,6 +26,12 @@ pub mod http_client;
 pub mod server;
 pub mod session;
 
+/// Alias `opsense-mlib` under its pre-refactor name `opsense_libs`, so the
+/// runner source keeps the `opsense_libs::lru::LruCache` paths it shares
+/// with the rest of the platform.
+#[allow(unused_imports)]
+use opsense_mlib as opsense_libs;
+
 pub use auth::{Auth, AuthContext, LocalAuth, RemoteAuth};
 pub use backend::{EchoBackend, HealthInfo, KernelBackend, KernelOutput, LocalBackend};
 pub use config::{RunnerConfig, resolve_kernel_binary};

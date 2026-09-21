@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::candle::CandleStick;
 use itertools::izip;
-use opsense_libs::jq::JsonQuery;
-use opsense_libs::lru::LruCache;
-use reqwest_middleware::ClientWithMiddleware;
+use opsense_mlib::jq::JsonQuery;
+use opsense_mlib::lru::LruCache;
 use serde_json::Value;
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 const INDEXES: [&str; 3] = ["VNINDEX", "HNXINDEX", "VN30"];
@@ -36,26 +36,21 @@ impl JsonValueExt for Value {
     }
 }
 
-// Define the layers from the inside out
 #[derive(Clone)]
 struct CacheBlock {
     pub candles: Vec<CandleStick>,
-    // Khoảng thời gian thực tế mà dữ liệu trong block này đã bao phủ
-    // Ví dụ: [start_of_week .. last_sync_time]
     pub covered_range: (i64, i64),
     pub last_updated: u64,
 }
 
 type CandleCache = LruCache<i64, CacheBlock, 32>;
 
-// Group by whatever your keys represent (e.g., Symbol and Interval)
 type SymbolCacheMap = HashMap<String, CandleCache>;
 type ExchangeCacheMap = HashMap<String, SymbolCacheMap>;
 
 #[derive(Clone)]
 pub struct QueryCandleSticks {
-    client: Arc<ClientWithMiddleware>,
-    // Much easier to read:
+    client: reqwest::Client,
     caches: Arc<RwLock<ExchangeCacheMap>>,
     timers: Arc<RwLock<HashMap<String, u64>>>,
     mapping: Arc<RwLock<HashMap<String, String>>>,
@@ -70,7 +65,7 @@ struct CompiledProfile {
 }
 
 impl QueryCandleSticks {
-    pub fn new(client: Arc<ClientWithMiddleware>, capacity: usize) -> Result<Self, Error> {
+    pub fn new(client: reqwest::Client, capacity: usize) -> Result<Self, Error> {
         let mut profiles = HashMap::new();
         let raw_configs = vec![
             (
@@ -110,7 +105,6 @@ impl QueryCandleSticks {
             (
                 "msn",
                 "https://assets.msn.com/service/MSNFinance/Quotes/Chart?apikey=0Q_697_8_Z_S_1_1&ocid=finance-utils-peregrine&symbol={stock}&interval={res}&period={limit}",
-                // MSN trả về mảng series.dataPoints, mỗi điểm là một mảng: [time, open, high, low, close, volume]
                 [
                     "series.dataPoints[].0",
                     "series.dataPoints[].1",
@@ -123,7 +117,6 @@ impl QueryCandleSticks {
             (
                 "yahoo",
                 "https://query1.finance.yahoo.com/v8/finance/chart/{stock}?interval={res}&period1={from}&period2={to}",
-                // Yahoo trả về cấu trúc: chart.result.indicators.quote
                 [
                     "chart.result.timestamp[]",
                     "chart.result.indicators.quote.open[]",
@@ -136,7 +129,6 @@ impl QueryCandleSticks {
             (
                 "simplefx",
                 "https://candles.simplefx.com/api/v3/candles?symbol={stock}&cPeriod={res}&timeFrom={from}&timeTo={to}",
-                // SimpleFX trả về object data chứa mảng các candle objects
                 [
                     "data[].time",
                     "data[].open",
@@ -209,8 +201,6 @@ impl QueryCandleSticks {
         .await
     }
 
-    /// Like `get_candlesticks` nhưng cho phép chỉ định `url_provider` riêng
-    /// cho `{provider}` trong URL template (khi profile name khác với URL provider).
     #[allow(clippy::too_many_arguments)]
     pub async fn get_candlesticks_with_url_provider(
         &self,
@@ -226,23 +216,19 @@ impl QueryCandleSticks {
             return Err(Error::new(ErrorKind::InvalidData, "Provider not specified"));
         }
 
-        // Resolve URL provider: explicit > mapping > profile_name
         let resolved_url_provider = match url_provider {
             Some(p) => p.to_string(),
             None => {
-                if let Ok(mapping) = self.mapping.read() {
-                    mapping
-                        .get(profile_name)
-                        .cloned()
-                        .unwrap_or_else(|| profile_name.to_string())
-                } else {
-                    profile_name.to_string()
-                }
+                let mapping = self.mapping.read().await;
+                mapping
+                    .get(profile_name)
+                    .cloned()
+                    .unwrap_or_else(|| profile_name.to_string())
             }
         };
 
-        if !self.is_invalidated(stock, resolution)
-            && let Some(cached_data) = self.fetch_from_cache(stock, resolution, from, to)
+        if !self.is_invalidated(stock, resolution).await
+            && let Some(cached_data) = self.fetch_from_cache(stock, resolution, from, to).await
         {
             return Ok(cached_data);
         }
@@ -259,18 +245,19 @@ impl QueryCandleSticks {
             )
             .await?;
 
-        self.update_cache(stock, resolution, &fetched_candles, from, to)?;
+        self.update_cache(stock, resolution, &fetched_candles, from, to)
+            .await?;
         Ok(fetched_candles)
     }
 
-    fn fetch_from_cache(
+    async fn fetch_from_cache(
         &self,
         stock: &str,
         resolution: &str,
         from: i64,
         to: i64,
     ) -> Option<Vec<CandleStick>> {
-        let caches = self.caches.read().unwrap();
+        let caches = self.caches.read().await;
         let stock_cache = caches.get(stock)?.get(resolution)?;
 
         let start_block = from / SECONDS_IN_WEEK;
@@ -322,7 +309,7 @@ impl QueryCandleSticks {
         Some(result)
     }
 
-    fn update_cache(
+    async fn update_cache(
         &self,
         stock: &str,
         resolution: &str,
@@ -335,20 +322,18 @@ impl QueryCandleSticks {
             .map_err(|e| Error::other(e.to_string()))?
             .as_secs();
 
-        let mut caches = self.caches.write().unwrap();
+        let mut caches = self.caches.write().await;
         let stock_entry = caches.entry(stock.to_string()).or_default();
         let lru = stock_entry
             .entry(resolution.to_string())
             .or_insert_with(|| LruCache::new(self.capacity_per_stack));
 
-        // 1. Nhóm nến theo tuần (block)
         let mut groups: HashMap<i64, Vec<CandleStick>> = HashMap::new();
         for c in candles {
             let bid = c.t / SECONDS_IN_WEEK;
             groups.entry(bid).or_default().push(*c);
         }
 
-        // 2. Cập nhật từng block bị ảnh hưởng bởi query_from -> query_to
         let start_bid = query_from / SECONDS_IN_WEEK;
         let end_bid = query_to / SECONDS_IN_WEEK;
 
@@ -359,15 +344,12 @@ impl QueryCandleSticks {
                 last_updated: now,
             });
 
-            // Nếu có nến mới cho block này thì merge vào
             if let Some(new_cands) = groups.get_mut(&bid) {
                 block.candles.append(new_cands);
                 block.candles.sort_by_key(|c| c.t);
                 block.candles.dedup_by_key(|c| c.t);
             }
 
-            // Cập nhật độ phủ (Coverage) cho block này
-            // Độ phủ của block chỉ giới hạn trong biên giới của block đó
             let block_start = bid * SECONDS_IN_WEEK;
             let block_end = (bid + 1) * SECONDS_IN_WEEK;
 
@@ -381,16 +363,15 @@ impl QueryCandleSticks {
             lru.put(bid, block);
         }
 
-        // 3. Cập nhật timer chung cho cặp Stock:Resolution
         self.timers
             .write()
-            .unwrap()
+            .await
             .insert(format!("{}:{}", stock, resolution), now);
         Ok(())
     }
 
-    fn is_invalidated(&self, stock: &str, resolution: &str) -> bool {
-        let timers = self.timers.read().unwrap();
+    async fn is_invalidated(&self, stock: &str, resolution: &str) -> bool {
+        let timers = self.timers.read().await;
         let key = format!("{}:{}", stock, resolution);
 
         match timers.get(&key) {
@@ -417,8 +398,6 @@ impl QueryCandleSticks {
         }
     }
 
-    /// `url_provider` — giá trị thay thế `{provider}` trong URL template.
-    /// `None` = dùng `profile_name`.
     #[allow(clippy::too_many_arguments)]
     async fn fetch_from_api(
         &self,
@@ -447,7 +426,6 @@ impl QueryCandleSticks {
             ));
         }
 
-        // Nếu url_provider không được chỉ định, dùng profile_name cho {provider}
         let url_provider_val = url_provider.unwrap_or(profile_name);
 
         let (adj_from, adj_to) = if profile_name == "binance" {
@@ -469,22 +447,23 @@ impl QueryCandleSticks {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid URL template"));
         }
 
-        let resp = self
+        // Fetch JSON asynchronously with reqwest.
+        let raw_json = self
             .client
-            .get(url)
-            .timeout(Duration::from_secs(30))
+            .get(&url)
             .send()
             .await
             .map_err(|e| {
                 Error::other(format!("Failed to fetch data from {}: {}", profile_name, e))
+            })?
+            .json::<Value>()
+            .await
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Failed to parse JSON: {}", e),
+                )
             })?;
-
-        let raw_json: Value = resp.json().await.map_err(|e| {
-            Error::new(
-                ErrorKind::InvalidData,
-                format!("Failed to parse JSON: {}", e),
-            )
-        })?;
 
         let t_ref = profile.queries[0].pick(&raw_json);
         if t_ref.is_empty() {
@@ -527,8 +506,6 @@ impl QueryCandleSticks {
 mod tests {
     use super::*;
     use reqwest::Client as HttpClient;
-    use reqwest_middleware::ClientBuilder;
-    use reqwest_tracing::TracingMiddleware;
     use serde_json::json;
     use std::time::Instant;
 
@@ -603,11 +580,7 @@ mod tests {
 
     #[test]
     fn test_profile_initialization() {
-        let client = Arc::new(
-            ClientBuilder::new(HttpClient::new())
-                .with(TracingMiddleware::default())
-                .build(),
-        );
+        let client = HttpClient::new();
         let service = QueryCandleSticks::new(client, 70).unwrap();
 
         assert!(service.profiles.contains_key("ssi"));
@@ -616,11 +589,7 @@ mod tests {
 
     #[test]
     fn test_logic_extraction_ssi() {
-        let client = Arc::new(
-            ClientBuilder::new(HttpClient::new())
-                .with(TracingMiddleware::default())
-                .build(),
-        );
+        let client = HttpClient::new();
         let service = QueryCandleSticks::new(client, 70).unwrap();
         let data = mock_ssi_data(10);
 
@@ -633,11 +602,7 @@ mod tests {
 
     #[test]
     fn test_logic_extraction_binance() {
-        let client = Arc::new(
-            ClientBuilder::new(HttpClient::new())
-                .with(TracingMiddleware::default())
-                .build(),
-        );
+        let client = HttpClient::new();
         let service = QueryCandleSticks::new(client, 70).unwrap();
 
         // Binance format: [[t, o, h, l, c, v], ...]
@@ -658,11 +623,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_block_logic() {
-        let client = Arc::new(
-            ClientBuilder::new(HttpClient::new())
-                .with(TracingMiddleware::default())
-                .build(),
-        );
+        let client = HttpClient::new();
         let service = QueryCandleSticks::new(client, 10).unwrap();
 
         let stock = "FPT";
@@ -696,22 +657,25 @@ mod tests {
         let query_to = t2 + 1000;
         service
             .update_cache(stock, res, &candles, query_from, query_to)
+            .await
             .unwrap();
 
         // 2. Test hit hoàn toàn trong vùng đã phủ của Block A
         // Query nằm trong khoảng [query_from, query_to] nên phải HIT
-        let hit = service.fetch_from_cache(stock, res, t1, t1 + 100);
+        let hit = service.fetch_from_cache(stock, res, t1, t1 + 100).await;
         assert!(hit.is_some(), "Phải hit được vì nằm trong covered_range");
         assert_eq!(hit.unwrap().len(), 1);
 
         // 3. Test hit xuyên 2 blocks
-        let hit_all = service.fetch_from_cache(stock, res, t1, t2);
+        let hit_all = service.fetch_from_cache(stock, res, t1, t2).await;
         assert!(hit_all.is_some(), "Phải hit được cả 2 block");
         assert_eq!(hit_all.unwrap().len(), 2);
 
         // 4. Test miss do nằm ngoài covered_range (Dù vùng này có thể cùng Block ID)
         // Vùng này chưa được update_cache quét qua nên phải trả về None để gọi API
-        let miss_outside = service.fetch_from_cache(stock, res, query_from - 5000, query_from - 1);
+        let miss_outside = service
+            .fetch_from_cache(stock, res, query_from - 5000, query_from - 1)
+            .await;
         assert!(
             miss_outside.is_none(),
             "Phải miss vì vùng này chưa được phủ (mặc dù có thể cùng block)"
@@ -719,18 +683,14 @@ mod tests {
 
         // 5. Test hit vùng KHÔNG có nến nhưng ĐÃ phủ (ví dụ giữa t1 và t2)
         // Đây là điểm mạnh của logic mới: Trả về Some(empty) thay vì None
-        let hit_empty = service.fetch_from_cache(stock, res, t1 + 10, t1 + 20);
+        let hit_empty = service.fetch_from_cache(stock, res, t1 + 10, t1 + 20).await;
         assert!(hit_empty.is_some(), "Phải hit (Some) vì đã được quét qua");
         assert_eq!(hit_empty.unwrap().len(), 0, "Vùng này không có nến thực tế");
     }
 
     #[tokio::test]
     async fn test_cache_invalidation_ttl() {
-        let client = Arc::new(
-            ClientBuilder::new(HttpClient::new())
-                .with(TracingMiddleware::default())
-                .build(),
-        );
+        let client = HttpClient::new();
         let service = QueryCandleSticks::new(client, 10).unwrap();
         let stock = "VIC";
         let res = "1";
@@ -748,27 +708,24 @@ mod tests {
         // Cập nhật cache với vùng phủ từ t_base - 60 đến t_base + 60
         service
             .update_cache(stock, res, &[mock_candle], t_base - 60, t_base + 60)
+            .await
             .unwrap();
 
         // Kiểm tra ngay lập tức - Phải FALSE (valid) vì vừa mới update timer
         assert!(
-            !service.is_invalidated(stock, res),
+            !service.is_invalidated(stock, res).await,
             "Vừa update xong timer phải còn valid (chưa quá TTL)!"
         );
 
         // Tiện thể test luôn fetch_from_cache tại đây để đảm bảo logic coverage hoạt động
-        let hit = service.fetch_from_cache(stock, res, t_base, t_base);
+        let hit = service.fetch_from_cache(stock, res, t_base, t_base).await;
         assert!(hit.is_some(), "Dữ liệu phải tồn tại trong vùng đã phủ");
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_all_providers_real_data() {
-        let client = Arc::new(
-            ClientBuilder::new(HttpClient::new())
-                .with(TracingMiddleware::default())
-                .build(),
-        );
+        let client = HttpClient::new();
         let service = QueryCandleSticks::new(client, 100).unwrap();
 
         // Chạy lần lượt các sàn

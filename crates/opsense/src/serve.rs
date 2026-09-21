@@ -3,11 +3,9 @@ use axum::{
 };
 
 use axum_prometheus::PrometheusMetricLayer;
-use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use tokio::net::unix::UCred;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::signal;
-use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 
 use std::fs;
@@ -106,9 +104,8 @@ impl connect_info::Connected<IncomingStream<'_, UnixListener>> for UdsConnectInf
     }
 }
 
-pub async fn routes(app_state: AppState, enable_sentry: bool) -> Result<Router, Error> {
+pub async fn routes(app_state: AppState) -> Result<Router, Error> {
     let (prometheus_layer, _metric_handle) = PrometheusMetricLayer::pair();
-    let environment = std::env::var("ENVIRONMENT").unwrap_or_else(|_| "dev".to_string());
 
     // TODO: xem thử có cách nào load cấu hình từ yaml bên ngoài luôn đươc không
     let router = Router::new()
@@ -158,17 +155,7 @@ pub async fn routes(app_state: AppState, enable_sentry: bool) -> Result<Router, 
         )
         .layer(prometheus_layer);
 
-    let final_router = if enable_sentry && environment == "prod" {
-        router.layer(
-            ServiceBuilder::new()
-                .layer(SentryHttpLayer::new().enable_transaction())
-                .layer(NewSentryLayer::<Request<Body>>::new_from_top()),
-        )
-    } else {
-        router
-    };
-
-    Ok(final_router)
+    Ok(router)
 }
 
 fn config_path() -> String {
@@ -193,7 +180,7 @@ pub async fn run() -> std::io::Result<()> {
     let telemetry_guard = init_telemetry();
 
     let app_state = AppState::new(&load_config()?).await?;
-    let router = routes(app_state.clone(), telemetry_guard.is_none()).await?;
+    let router = routes(app_state.clone()).await?;
 
     let listener_mode = std::env::var("GATEWAY_LISTENER").unwrap_or_else(|_| "unix".to_string());
 

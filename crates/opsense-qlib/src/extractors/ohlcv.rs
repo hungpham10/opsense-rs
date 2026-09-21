@@ -7,24 +7,25 @@
 
 use std::io::Error;
 
-use serde::{Deserialize, Serialize};
-
+use crate::Extractor;
 use crate::candle::CandleStick;
 
-use crate::Extractor;
+#[cfg(feature = "json")]
+use serde::{Deserialize, Serialize};
 
 /// Extracts `[closes, highs, lows, prev_closes]` from a candle slice.
 ///
 /// Each array is **padded** to `window` elements by inserting copies of the
 /// first value at the front.  This guarantees the ONNX model always sees
 /// the expected `[1, window]` shape even when fewer candles are available.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct OhlcvExtractor {
     /// Target length of each output array.
     pub window: usize,
 }
 
-#[typetag::serde]
+#[cfg_attr(feature = "json", typetag::serde(name = "ohlcv"))]
 impl Extractor for OhlcvExtractor {
     fn name(&self) -> &str {
         "ohlcv"

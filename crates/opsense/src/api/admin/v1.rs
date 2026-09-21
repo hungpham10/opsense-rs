@@ -297,6 +297,7 @@ async fn get_tenant_id(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn get_tenant_auth_config(
     State(app_state): State<AppState>,
     Path(host): Path<String>,
@@ -332,6 +333,7 @@ async fn get_tenant_auth_config(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn fetch_file(
     State(app_state): State<AppState>,
     Path(path): Path<String>,

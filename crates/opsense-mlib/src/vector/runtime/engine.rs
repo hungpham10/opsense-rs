@@ -461,6 +461,7 @@ impl Runtime {
     /// for `Mutation.addNode` / `removeNode` / `updateNode`.
     ///
     /// Order is deterministic (by node id) so the output is stable.
+    #[cfg(feature = "json")]
     pub fn components(&self) -> Vec<serde_json::Value> {
         let (Ok(nodes), Ok(bootstraps)) = (self.nodes.read(), self.bootstraps.read()) else {
             return Vec::new();
