@@ -13,4 +13,4 @@ proc-macro = true
 
 [dependencies]
 quote = { version = "1.0", default-features = false }
-syn = { version = "3.0.6", default-features = false, features = ["extra-traits", "full", "proc-macro", "visit", "visit-mut"] }
+syn = { version = "3.0.6", default-features = false, features = ["derive", "extra-traits", "full", "parsing", "printing", "proc-macro", "visit", "visit-mut"] }
