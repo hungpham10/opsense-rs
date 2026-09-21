@@ -1,10 +1,8 @@
-use serde::{Deserialize, Serialize};
-
 /// Cấu hình cho thuật toán sàng phân cấp ([`AnalysisGrid::with_config`]).
 ///
 /// Điều khiển điều kiện dừng: vòng lặp sieve sẽ dừng khi mức tăng
 /// crossings đột biến vượt quá ngưỡng, báo hiệu overfitting.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct SieveConfig {
     /// Hệ số nhân: dừng khi `delta > prev_delta * delta_multiplier`.
     /// Mặc định `1.3` (tăng ≥30% so với level trước).
@@ -28,7 +26,7 @@ impl Default for SieveConfig {
 ///
 /// Dùng cho phân tích occupancy, transition, crossings.
 /// **Không phải** trading grid — trading grid là lưới lệnh cố định K bậc trong strategy.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct AnalysisGrid {
     pub step: f64,
     pub offset: f64,

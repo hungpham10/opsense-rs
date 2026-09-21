@@ -1,9 +1,9 @@
 //! Arrow segment helpers — moved from `opsense-session::backend`.
 
 use anyhow::{Result, anyhow};
-use arrow::ipc::reader::StreamReader;
-use arrow::ipc::writer::StreamWriter;
 use arrow_array::RecordBatch;
+use arrow_ipc::reader::StreamReader;
+use arrow_ipc::writer::StreamWriter;
 use bytes::Bytes;
 
 /// Rows per ARROW frame when streaming a dataset into a kernel (~0.5 MB of
@@ -59,15 +59,15 @@ pub fn segment_to_record_batch(bytes: &[u8]) -> Result<RecordBatch> {
     match batches.len() {
         0 => Err(anyhow!("empty arrow stream segment")),
         1 => Ok(batches.remove(0)),
-        _ => Ok(arrow::compute::concat_batches(&schema, &batches)?),
+        _ => Ok(arrow_select::concat::concat_batches(&schema, &batches)?),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, Int64Array};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow_array::array::{Float64Array, Int64Array};
+    use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 
     fn make_batch(rows: usize) -> RecordBatch {

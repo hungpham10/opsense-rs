@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::entities::admin::errors::AdminError;
 use crate::entities::admin::Admin;
+use crate::entities::admin::errors::AdminError;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct AuthConfig {
@@ -105,15 +105,24 @@ impl Tenant for Admin {
         let oidc_expected_alg: Option<String> = row.try_get(8)?;
 
         let jwt_secret = match jwt_secret_id {
-            Some(token_id) => Some(self.get_unencrypted_token_by_id(tenant_id, token_id).await?),
+            Some(token_id) => Some(
+                self.get_unencrypted_token_by_id(tenant_id, token_id)
+                    .await?,
+            ),
             None => None,
         };
         let session_secret = match session_secret_id {
-            Some(token_id) => Some(self.get_unencrypted_token_by_id(tenant_id, token_id).await?),
+            Some(token_id) => Some(
+                self.get_unencrypted_token_by_id(tenant_id, token_id)
+                    .await?,
+            ),
             None => None,
         };
         let oidc_client_secret = match oidc_client_secret_id {
-            Some(token_id) => Some(self.get_unencrypted_token_by_id(tenant_id, token_id).await?),
+            Some(token_id) => Some(
+                self.get_unencrypted_token_by_id(tenant_id, token_id)
+                    .await?,
+            ),
             None => None,
         };
 

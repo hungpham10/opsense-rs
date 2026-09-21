@@ -1,7 +1,7 @@
 use std::io::Error;
 
-use crate::graph::Op;
 use crate::graph::OnnxEmitCtx;
+use crate::graph::Op;
 use serde::{Deserialize, Serialize};
 
 // ── Last ──────────────────────────────────────────────────────────────

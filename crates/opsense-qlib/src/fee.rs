@@ -28,8 +28,10 @@
 //! rate = fee_per_side / contract_value
 //! ```
 
-use super::Fee;
+#[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
+
+use super::Fee;
 
 // ── DerivativeFee ────────────────────────────────────────────────────────────
 
@@ -37,7 +39,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// Cho phép mô phỏng chính xác biểu phí của bất kỳ broker nào với đầy đủ
 /// ba thành phần: hoa hồng, phí VSD, thuế TNCN.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct DerivativeFee {
     /// Tỷ lệ hoa hồng môi giới (VD: `0.0005` = 0.05%).
     pub commission_rate: f64,
@@ -74,7 +77,7 @@ impl DerivativeFee {
     }
 }
 
-#[typetag::serde(name = "derivative")]
+#[cfg_attr(feature = "json", typetag::serde(name = "derivative_fee"))]
 impl Fee for DerivativeFee {
     /// Trả về tỷ lệ phí một chiều dưới dạng fraction của giá trị hợp đồng.
     ///
@@ -106,10 +109,10 @@ impl Fee for DerivativeFee {
 /// | Thuế TNCN | 0.1% |
 ///
 /// Tham khảo: <https://chungkhoanvps.org/phi-giao-dich/phi-giao-dich-phai-sinh-vps/>
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct VpsDerivativeFee(pub DerivativeFee);
 
-#[allow(dead_code)]
 impl VpsDerivativeFee {
     /// Tạo fee VPS với mức phí chuẩn (0.05% commission).
     ///
@@ -138,7 +141,7 @@ impl VpsDerivativeFee {
     }
 }
 
-#[typetag::serde(name = "vps")]
+#[cfg_attr(feature = "json", typetag::serde(name = "vps_derivative_fee"))]
 impl Fee for VpsDerivativeFee {
     fn rate(&self) -> f64 {
         self.0.rate()
@@ -157,7 +160,8 @@ impl Fee for VpsDerivativeFee {
 /// | Thuế TNCN | 0.1% |
 ///
 /// Tham khảo: <https://www.mbs.com.vn/bieu-phi-giao-dich-chung-khoan-phai-sinh/>
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct MbsDerivativeFee(pub DerivativeFee);
 
 #[allow(dead_code)]
@@ -187,7 +191,7 @@ impl MbsDerivativeFee {
     }
 }
 
-#[typetag::serde(name = "mbs")]
+#[cfg_attr(feature = "json", typetag::serde(name = "mbs_derivative_fee"))]
 impl Fee for MbsDerivativeFee {
     fn rate(&self) -> f64 {
         self.0.rate()
@@ -203,7 +207,8 @@ impl Fee for MbsDerivativeFee {
 /// | Phí môi giới | 0.05% (tối thiểu 8,000đ/HĐ) |
 /// | Phí VSD | 3,300đ/HĐ |
 /// | Thuế TNCN | 0.1% |
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct SsiDerivativeFee(pub DerivativeFee);
 
 #[allow(dead_code)]
@@ -220,7 +225,7 @@ impl SsiDerivativeFee {
     }
 }
 
-#[typetag::serde(name = "ssi")]
+#[cfg_attr(feature = "json", typetag::serde(name = "ssi_derivative_fee"))]
 impl Fee for SsiDerivativeFee {
     fn rate(&self) -> f64 {
         self.0.rate()
@@ -233,7 +238,8 @@ impl Fee for SsiDerivativeFee {
 ///
 /// Hữu ích cho backtesting nhanh khi không cần mô phỏng chi tiết phí phái sinh.
 /// VD: `SimpleFixedFee::new(0.001)` = 0.1% phí một chiều.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct SimpleFixedFee {
     /// Tỷ lệ phí (VD: `0.001` = 0.1%).
     pub rate_value: f64,
@@ -246,7 +252,7 @@ impl SimpleFixedFee {
     }
 }
 
-#[typetag::serde(name = "fixed")]
+#[cfg_attr(feature = "json", typetag::serde(name = "simple_fixed_fee"))]
 impl Fee for SimpleFixedFee {
     fn rate(&self) -> f64 {
         self.rate_value

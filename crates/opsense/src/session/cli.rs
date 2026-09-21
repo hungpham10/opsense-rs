@@ -13,8 +13,8 @@
 //! - `opsense session import <session_id> <private_key> [--expires-at RFC3339]`
 //!     Tạo file local từ thông tin import thủ công (không gọi serve).
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use anyhow::{Context, Result, bail};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 
 use crate::client::session_api as api;
@@ -25,7 +25,7 @@ const DEFAULT_HOST: &str = "http://127.0.0.1:8080";
 #[derive(Debug, Clone)]
 pub struct SessionCmd {
     pub action: SessionAction,
-    pub host:   Option<String>,
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,7 +34,11 @@ pub enum SessionAction {
     List,
     Revoke(String),
     Resolve(String),
-    Import { session_id: String, private_key: String, expires_at: Option<String> },
+    Import {
+        session_id: String,
+        private_key: String,
+        expires_at: Option<String>,
+    },
 }
 
 pub fn run(cmd: SessionCmd) -> Result<()> {
@@ -56,9 +60,11 @@ async fn run_async(cmd: SessionCmd) -> Result<()> {
         SessionAction::List => list(&host, &bearer).await,
         SessionAction::Revoke(id) => revoke(&host, &bearer, &id).await,
         SessionAction::Resolve(id) => resolve(&id).await,
-        SessionAction::Import { session_id, private_key, expires_at } => {
-            import(session_id, private_key, expires_at)
-        }
+        SessionAction::Import {
+            session_id,
+            private_key,
+            expires_at,
+        } => import(session_id, private_key, expires_at),
     }
 }
 
@@ -107,10 +113,10 @@ async fn issue(host: &str, bearer: &str) -> Result<()> {
     let expires_at = now + chrono::Duration::seconds(resp.expires_in);
 
     let file = store::SessionFile {
-        session_id:  resp.session_id.clone(),
+        session_id: resp.session_id.clone(),
         private_key: resp.private_key.clone(),
         expires_at,
-        created_at:  now,
+        created_at: now,
     };
     let path = store::save_session_to_disk(&file)?;
 
@@ -137,17 +143,29 @@ async fn list(host: &str, bearer: &str) -> Result<()> {
 
     let local = store::list_sessions_on_disk()?;
 
-    println!("{:<48}  {:<7}  {:<10}  {:<25}  last_used_at",
-        "session_id", "source", "status", "expires_at");
+    println!(
+        "{:<48}  {:<7}  {:<10}  {:<25}  last_used_at",
+        "session_id", "source", "status", "expires_at"
+    );
     println!("{}", "-".repeat(110));
     for s in &remote {
-        println!("{:<48}  {:<7}  {:<10}  {:<25}  {}",
-            s.session_id, "remote", s.status, s.expires_at,
-            s.last_used_at.as_deref().unwrap_or("-"));
+        println!(
+            "{:<48}  {:<7}  {:<10}  {:<25}  {}",
+            s.session_id,
+            "remote",
+            s.status,
+            s.expires_at,
+            s.last_used_at.as_deref().unwrap_or("-")
+        );
     }
     for f in &local {
-        println!("{:<48}  {:<7}  {:<10}  {:<25}  -",
-            f.session_id, "local", "?", f.expires_at.to_rfc3339());
+        println!(
+            "{:<48}  {:<7}  {:<10}  {:<25}  -",
+            f.session_id,
+            "local",
+            "?",
+            f.expires_at.to_rfc3339()
+        );
     }
     Ok(())
 }
@@ -168,11 +186,7 @@ async fn resolve(session_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn import(
-    session_id: String,
-    private_key: String,
-    expires_at: Option<String>,
-) -> Result<()> {
+fn import(session_id: String, private_key: String, expires_at: Option<String>) -> Result<()> {
     // Validate private_key shape trước khi lưu.
     let pk_bytes = URL_SAFE_NO_PAD
         .decode(private_key.trim())
@@ -191,10 +205,10 @@ fn import(
     };
 
     let file = store::SessionFile {
-        session_id:  session_id.clone(),
+        session_id: session_id.clone(),
         private_key,
         expires_at,
-        created_at:  Utc::now(),
+        created_at: Utc::now(),
     };
     let path = store::save_session_to_disk(&file)?;
     eprintln!("Imported session {session_id} → {}", path.display());

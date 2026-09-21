@@ -14,11 +14,10 @@
 //! Không phụ thuộc crate ngoài (PRNG xorshift nội bộ), dùng cho script
 //! phân tích trong `opsense-rhai` cũng như Rust code khác.
 
-use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 /// Cấu hình rừng RCF ([`RcfForest::with_config`]).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 pub struct RcfConfig {
     /// Số cây trong rừng. Nhiều cây → điểm mượt hơn, chậm hơn tuyến tính.
     pub num_trees: usize,
@@ -43,7 +42,7 @@ impl Default for RcfConfig {
 }
 
 /// Rừng RCF streaming trên vector `dims` chiều.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct RcfForest {
     dims: usize,
     cfg: RcfConfig,
@@ -56,7 +55,7 @@ pub struct RcfForest {
     next_id: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy)]
 struct XorShift64(u64);
 
 impl XorShift64 {
@@ -81,7 +80,7 @@ impl XorShift64 {
 }
 
 /// Bounding box của một subtree.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 struct BBox {
     min: Vec<f64>,
     max: Vec<f64>,
@@ -109,14 +108,18 @@ impl BBox {
     // Điểm vượt ngoài bbox quá một extent ⇒ mọi cut nội bộ (nằm trong bbox)
     // không thể tách điểm khỏi khối — coi là bị cô lập ngay tại level này.
     fn far_outside(&self, p: &[f64]) -> bool {
-        self.min.iter().zip(&self.max).zip(p).any(|((&lo, &hi), &v)| {
-            let extent = hi - lo;
-            v < lo - extent || v > hi + extent
-        })
+        self.min
+            .iter()
+            .zip(&self.max)
+            .zip(p)
+            .any(|((&lo, &hi), &v)| {
+                let extent = hi - lo;
+                v < lo - extent || v > hi + extent
+            })
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 enum Node {
     Empty,
     Branch {
@@ -194,7 +197,9 @@ impl Node {
                     return;
                 }
                 // Lá đầy: thử tách thành branch bằng random cut.
-                if let Some((cut_dim, cut)) = split_cut(entries.iter().map(|(_, p)| p.as_slice()), rng) {
+                if let Some((cut_dim, cut)) =
+                    split_cut(entries.iter().map(|(_, p)| p.as_slice()), rng)
+                {
                     let mut left_entries = Vec::new();
                     let mut right_entries = Vec::new();
                     for (eid, ep) in entries.drain(..) {
@@ -230,7 +235,11 @@ impl Node {
                     // Điểm mới nằm trong một lá con; sibling là lá còn lại.
                     let (goes_left, sib) = match self {
                         Node::Branch { left, right, .. } => {
-                            let sib_size = if left.leaf_contains(id) { right.size() } else { left.size() };
+                            let sib_size = if left.leaf_contains(id) {
+                                right.size()
+                            } else {
+                                left.size()
+                            };
                             (left.leaf_contains(id), sib_size)
                         }
                         _ => unreachable!(),
@@ -353,7 +362,11 @@ where
     let (lo, hi) = (min?, max?);
 
     // Chọn dim theo tỉ lệ extent (tối đa 8 lần thử để tránh dim extent = 0).
-    let extents: Vec<f64> = lo.iter().zip(&hi).map(|(&a, &b)| (b - a).max(0.0)).collect();
+    let extents: Vec<f64> = lo
+        .iter()
+        .zip(&hi)
+        .map(|(&a, &b)| (b - a).max(0.0))
+        .collect();
     let total: f64 = extents.iter().sum();
     if total <= 0.0 {
         return None;
@@ -547,7 +560,9 @@ mod tests {
     use super::*;
 
     fn smooth_series(n: usize) -> Vec<f64> {
-        (0..n).map(|i| 50.0 + 10.0 * (i as f64 * 0.3).sin()).collect()
+        (0..n)
+            .map(|i| 50.0 + 10.0 * (i as f64 * 0.3).sin())
+            .collect()
     }
 
     #[test]
@@ -575,7 +590,10 @@ mod tests {
         }
         let spike_score = forest.add(&[500.0]).unwrap().unwrap();
         let base: f64 = scores.iter().sum::<f64>() / scores.len() as f64;
-        assert!(spike_score > base * 2.0, "spike {spike_score} vs base {base}");
+        assert!(
+            spike_score > base * 2.0,
+            "spike {spike_score} vs base {base}"
+        );
     }
 
     #[test]
@@ -590,7 +608,11 @@ mod tests {
         );
         let mut last = 0.0;
         for i in 0..400 {
-            let v = if i < 200 { 0.0 } else { (i as f64 * 0.9).sin() * 40.0 };
+            let v = if i < 200 {
+                0.0
+            } else {
+                (i as f64 * 0.9).sin() * 40.0
+            };
             if let Some(s) = forest.add(&[v]).unwrap() {
                 last = s;
             }
@@ -599,7 +621,10 @@ mod tests {
         // Điểm lệch hình dạng (đảo dấu đột ngột trong shingle).
         let odd = forest.score(&[-40.0]).unwrap();
         let normal = forest.score(&[0.0]).unwrap();
-        assert!(odd > normal, "shingle lệch {odd} phải cao hơn thường {normal}");
+        assert!(
+            odd > normal,
+            "shingle lệch {odd} phải cao hơn thường {normal}"
+        );
     }
 
     #[test]
@@ -641,6 +666,9 @@ mod tests {
         let s1 = forest.score(&[50.0]).unwrap();
         assert_eq!(forest.len(), before);
         let s2 = forest.score(&[50.0]).unwrap();
-        assert!((s1 - s2).abs() < 1e-12, "score phải deterministic: {s1} vs {s2}");
+        assert!(
+            (s1 - s2).abs() < 1e-12,
+            "score phải deterministic: {s1} vs {s2}"
+        );
     }
 }

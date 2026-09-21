@@ -15,12 +15,15 @@
 //! assignment mode — they read from a context object `{ts, interval, now,
 //! payload, attributes}`.
 
+#[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::io::{Error, ErrorKind};
-use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+#[cfg(feature = "json")]
+use serde_json::Value;
+
+use std::io::{Error, ErrorKind};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Operator {
     Match(String),
     Access(usize),

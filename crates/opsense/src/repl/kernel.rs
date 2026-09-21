@@ -86,6 +86,9 @@ impl KernelRepl {
                     self.shutdown().await;
                     break;
                 }
+                Ok(Signal::ExternalBreak(_)) | Ok(Signal::HostCommand(_)) => continue,
+                // `Signal` is #[non_exhaustive]; ignore any future variants.
+                Ok(_) => continue,
                 Err(e) => {
                     eprintln!("readline error: {e}");
                     break;
@@ -223,10 +226,7 @@ impl KernelRepl {
             return Ok(());
         }
         // If leaving Block with non-empty buffer, warn.
-        if self.mode == Mode::Block
-            && new_mode != Mode::Block
-            && !self.buffer.is_empty()
-        {
+        if self.mode == Mode::Block && new_mode != Mode::Block && !self.buffer.is_empty() {
             println!("warning: discarding {} buffered line(s)", self.buffer.len());
             self.buffer.clear();
         }
@@ -325,7 +325,7 @@ impl KernelRepl {
 
 /// Ghi Arrow IPC stream ra `.parquet` hoặc `.csv` theo phần mở rộng.
 fn write_arrow_ipc(ipc: &[u8], path: &str) -> Result<()> {
-    use arrow::ipc::reader::StreamReader;
+    use arrow_ipc::reader::StreamReader;
     let cursor = std::io::Cursor::new(ipc);
     let reader = StreamReader::try_new(cursor, None)
         .map_err(|e| anyhow::anyhow!("decode arrow ipc: {e}"))?;
@@ -340,7 +340,7 @@ fn write_arrow_ipc(ipc: &[u8], path: &str) -> Result<()> {
     let lower = path.to_lowercase();
     if lower.ends_with(".csv") {
         let file = std::fs::File::create(path)?;
-        let mut writer = arrow::csv::writer::Writer::new(file);
+        let mut writer = arrow_csv::writer::Writer::new(file);
         for batch in &batches {
             writer.write(batch)?;
         }
@@ -386,12 +386,20 @@ fn print_outcome(outcome: &crate::client::ExecOutcome) {
             Some(K::Nothing(_)) => println!("=> None"),
             Some(K::Json(j)) => println!("=> {j}"),
             Some(K::Dataframe(df)) => {
-                println!("=> DataFrame(rows={}, cols={}, columns=[{}])",
-                    df.rows, df.cols, df.columns.join(", "));
+                println!(
+                    "=> DataFrame(rows={}, cols={}, columns=[{}])",
+                    df.rows,
+                    df.cols,
+                    df.columns.join(", ")
+                );
             }
             Some(K::Artifact(a)) => {
-                println!("=> Artifact(name={}, mime={}, {} bytes)",
-                    a.name, a.mime, a.data.len());
+                println!(
+                    "=> Artifact(name={}, mime={}, {} bytes)",
+                    a.name,
+                    a.mime,
+                    a.data.len()
+                );
             }
             Some(K::Raw(b)) => println!("=> Raw({} bytes)", b.len()),
             None => {}

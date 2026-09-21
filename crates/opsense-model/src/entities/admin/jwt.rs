@@ -1,8 +1,10 @@
+use chrono::Utc;
+
 use sqlx::Row;
 
+use crate::entities::admin::Admin;
 use crate::entities::admin::errors::AdminError;
 use crate::entities::admin::helpers::{constant_time_eq, parse_dt, sha256_hex};
-use crate::entities::admin::Admin;
 
 /// JWT-style verification (sha256-hashed base token).
 ///
@@ -46,7 +48,7 @@ impl Jwt for Admin {
 
         let expires_at = parse_dt(row.try_get(3)?)?;
         if let Some(expires_at) = expires_at
-            && expires_at < chrono::Utc::now()
+            && expires_at < Utc::now()
         {
             return Ok(None);
         }
@@ -59,7 +61,9 @@ impl Jwt for Admin {
         let user_id: String = row.try_get(1)?;
         let token_id: i64 = row.try_get(2)?;
 
-        let stored = self.get_unencrypted_token_by_id(tenant_id, token_id).await?;
+        let stored = self
+            .get_unencrypted_token_by_id(tenant_id, token_id)
+            .await?;
         if !constant_time_eq(stored.as_bytes(), token.as_bytes()) {
             return Ok(None);
         }

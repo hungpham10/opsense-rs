@@ -7,19 +7,24 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 
-use opsense_libs::sgd::SGDOptimizer;
-use crate::grid::TradingGrid;
 use crate::candle::CandleStick;
+use crate::grid::TradingGrid;
+use opsense_mlib::sgd::SGDOptimizer;
+
+#[cfg(feature = "json")]
+use serde::{Deserialize, Serialize};
 
 use super::calendar::to_timestamp_secs;
-use super::{Calendar, DataLoader, Fee, FetchFn, GridSnapshot, NotifyFn, OrderEvent, ParamFn, Score, Strategy};
+use super::{
+    Calendar, DataLoader, Fee, FetchFn, GridSnapshot, NotifyFn, OrderEvent, ParamFn, Score,
+    Strategy,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Caching — weekly-block LRU (dùng opsense_libs::lru::LruCache)
+// Caching — weekly-block LRU (dùng opsense_mlib::lru::LruCache)
 //
 // Pattern từ ohcl.rs: chia time thành weekly blocks, mỗi block track
 // `covered_first`/`covered_last` là actual candle extents. Cache HIT khi
@@ -52,7 +57,7 @@ impl BlockCache {
 }
 
 /// LRU cache cho một cache key (ví dụ "1H:analysis"), keyed by block_id.
-type BlockLru = opsense_libs::lru::LruCache<i64, BlockCache, 32>;
+type BlockLru = opsense_mlib::lru::LruCache<i64, BlockCache, 32>;
 
 // Helper functions.
 // Đây là free functions để tránh borrow-checker issues với self.
@@ -98,6 +103,7 @@ impl Display for OrderType {
     }
 }
 
+#[cfg(feature = "json")]
 impl<'de> Deserialize<'de> for OrderType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -108,6 +114,7 @@ impl<'de> Deserialize<'de> for OrderType {
     }
 }
 
+#[cfg(feature = "json")]
 impl Serialize for OrderType {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -117,7 +124,8 @@ impl Serialize for OrderType {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct Order {
     // @NOTE: setup
     pub dtype: OrderType,
@@ -134,11 +142,11 @@ pub struct Order {
 
     /// T+N: chỉ cho phép đóng lệnh khi `candle_seq >= unlock_seq`.
     /// Lưu số thứ tự nến (toàn cục) được phép đóng. 0 = không giới hạn.
-    #[serde(default)]
     pub unlock_seq: u64,
 }
 
-#[derive(Deserialize, Serialize, Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct Report {
     // Tổng quan
     pub total_trades: usize,
@@ -172,7 +180,6 @@ pub struct Report {
     /// weights (w/b qua win probabilities) nên field này làm reward phân biệt
     /// được w/b — SGD oracle fit w/b đúng nghĩa. `#[serde(default)]` để report
     /// cũ (web service) deserialize không vỡ.
-    #[serde(default)]
     pub net_pnl_abs: f64,
 }
 
@@ -198,7 +205,8 @@ impl Display for Report {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct Portfolio {
     /// define environment
     loader: Arc<dyn DataLoader + Sync + Send>,
@@ -216,7 +224,7 @@ pub struct Portfolio {
     settlement_candles: u64,
 
     /// Per-resolution LRU block cache. Skip serialize.
-    #[serde(skip, default = "default_block_cache")]
+    #[cfg_attr(feature = "json", serde(skip, default = "default_block_cache"))]
     cache: Arc<RwLock<HashMap<String, BlockLru>>>,
 }
 
@@ -224,6 +232,7 @@ pub struct Portfolio {
 /// T+N theo thị trường (StockCalendar → T+3, còn lại → T+0). Truyền giá trị >0 để ép T+N.
 pub const DEFAULT_SETTLEMENT_CANDLES: u64 = 0;
 
+#[cfg(feature = "json")]
 fn default_block_cache() -> Arc<RwLock<HashMap<String, BlockLru>>> {
     Arc::new(RwLock::new(HashMap::new()))
 }
@@ -1478,7 +1487,7 @@ impl Portfolio {
             let mut guard = cache.write().await;
             let lru = guard
                 .entry(cache_key.to_string())
-                .or_insert_with(|| opsense_libs::lru::LruCache::new(1024)); // 256 blocks ~ 5 years
+                .or_insert_with(|| opsense_mlib::lru::LruCache::new(1024)); // 256 blocks ~ 5 years
             Self::update_blocks(lru, &candles_full, block_from, block_to, to, now);
         }
 

@@ -5,6 +5,9 @@
 //! - `ForexCalendar`: 24/5 — cuối tuần nghỉ (Thứ 7, CN)
 //! - `StockCalendar`: 9h-15h, Thứ 2 → Thứ 6 (assuming giờ VN)
 
+#[cfg(feature = "json")]
+use serde::{Deserialize, Serialize};
+
 use super::Calendar;
 
 /// Convert resolution string → seconds.
@@ -29,10 +32,11 @@ pub(crate) fn to_timestamp_secs(resolution: &str) -> u64 {
 // CryptoCalendar — 24/7
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct CryptoCalendar;
 
-#[typetag::serde]
+#[cfg_attr(feature = "json", typetag::serde(name = "crypto"))]
 impl Calendar for CryptoCalendar {
     fn next(&self, current_ts: u64, resolution: &str) -> u64 {
         current_ts + to_timestamp_secs(resolution)
@@ -43,10 +47,11 @@ impl Calendar for CryptoCalendar {
 // ForexCalendar — 24/5 (nghỉ Thứ 7, Chủ Nhật)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct ForexCalendar;
 
-#[typetag::serde]
+#[cfg_attr(feature = "json", typetag::serde(name = "forex"))]
 impl Calendar for ForexCalendar {
     fn next(&self, current_ts: u64, resolution: &str) -> u64 {
         let mut ts = current_ts + to_timestamp_secs(resolution);
@@ -62,10 +67,11 @@ impl Calendar for ForexCalendar {
 // StockCalendar — 9h → 15h, Thứ 2 → Thứ 6 (giờ VN UTC+7)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct StockCalendar;
 
-#[typetag::serde]
+#[cfg_attr(feature = "json", typetag::serde(name = "stock"))]
 impl Calendar for StockCalendar {
     fn next(&self, current_ts: u64, resolution: &str) -> u64 {
         let step = to_timestamp_secs(resolution);
@@ -102,8 +108,6 @@ impl Calendar for StockCalendar {
 // ═══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
-
-use serde::{Deserialize, Serialize};
 
 /// Unix → giờ Việt Nam (UTC+7).
 fn hour_vn(ts: u64) -> u32 {

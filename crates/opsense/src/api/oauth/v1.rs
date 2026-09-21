@@ -29,11 +29,11 @@ use crate::api::admin::AdminHeaders;
 
 #[derive(Serialize, Debug)]
 struct DeviceCodeResponse {
-    device_code:       String,
-    user_code:         String,
-    verification_uri:  String,
-    expires_in:        i64,
-    interval:          i32,
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    expires_in: i64,
+    interval: i32,
 }
 
 #[derive(Deserialize, Debug)]
@@ -43,29 +43,29 @@ struct DeviceVerifyRequest {
 
 #[derive(Serialize, Debug)]
 struct DeviceVerifyResponse {
-    user_id:  String,
-    status:   String,
+    user_id: String,
+    status: String,
 }
 
 #[derive(Deserialize, Debug)]
 struct DeviceTokenRequest {
     device_code: String,
-    grant_type:  String, // "urn:ietf:params:oauth:grant-type:device_code"
+    grant_type: String, // "urn:ietf:params:oauth:grant-type:device_code"
 }
 
 #[derive(Serialize, Debug)]
 struct DeviceTokenResponse {
-    access_token:  String,
+    access_token: String,
     refresh_token: String,
-    token_type:    String,
-    expires_in:    i64,
+    token_type: String,
+    expires_in: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    session_id:    Option<String>,
+    session_id: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
 struct OAuthError {
-    error:             String,
+    error: String,
     error_description: String,
 }
 
@@ -76,7 +76,7 @@ struct RefreshRequest {
 
 #[derive(Deserialize, Debug)]
 struct RevokeRequest {
-    token:         String,
+    token: String,
     #[serde(default)]
     #[allow(dead_code)]
     token_type_hint: Option<String>,
@@ -91,18 +91,18 @@ struct SessionIssueRequest {
 
 #[derive(Serialize, Debug)]
 struct SessionIssueResponse {
-    session_id:      String,
-    private_key:     String,
-    expires_in:      i64,
+    session_id: String,
+    private_key: String,
+    expires_in: i64,
 }
 
 #[derive(Serialize, Debug)]
 struct SessionListEntry {
-    session_id:   String,
-    status:       String,
-    expires_at:   String,
+    session_id: String,
+    status: String,
+    expires_at: String,
     last_used_at: Option<String>,
-    created_at:   String,
+    created_at: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -112,7 +112,7 @@ struct SessionRevokeRequest {
 
 #[derive(Serialize, Debug)]
 struct OkResponse {
-    ok:     bool,
+    ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
@@ -124,17 +124,17 @@ struct OkResponse {
 pub fn routes() -> Router<AppState> {
     Router::new()
         // ---- device flow (RFC 8628) ----
-        .route("/device/code",  post(device_code))
-        .route("/device",       get(device_form))
+        .route("/device/code", post(device_code))
+        .route("/device", get(device_form))
         .route("/device/verify", post(device_verify))
         .route("/device/token", post(device_token))
         // ---- token management ----
         .route("/token/refresh", post(token_refresh))
-        .route("/token/revoke",  post(token_revoke))
+        .route("/token/revoke", post(token_revoke))
         // ---- long session (Ed25519 keypair) ----
-        .route("/session/issue",  post(session_issue))
+        .route("/session/issue", post(session_issue))
         .route("/session/revoke", post(session_revoke))
-        .route("/session/list",   get(session_list))
+        .route("/session/list", get(session_list))
 }
 
 // =========================================================================
@@ -147,17 +147,22 @@ fn admin(state: &AppState) -> Arc<Admin> {
 
 fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
     let body = OAuthError {
-        error:             error.to_string(),
+        error: error.to_string(),
         error_description: description.to_string(),
     };
     (status, Json(body)).into_response()
 }
 
 fn ok(detail: Option<&str>) -> Response {
-    Json(OkResponse { ok: true, detail: detail.map(String::from) }).into_response()
+    Json(OkResponse {
+        ok: true,
+        detail: detail.map(String::from),
+    })
+    .into_response()
 }
 
 /// Extract user_id từ `X-User-Id` header (Nginx inject sau khi validate Bearer).
+#[allow(clippy::result_large_err)]
 fn extract_user_id(headers: &HeaderMap) -> Result<String, Response> {
     headers
         .get("x-user-id")
@@ -165,11 +170,13 @@ fn extract_user_id(headers: &HeaderMap) -> Result<String, Response> {
         .and_then(|v| v.to_str().ok())
         .filter(|s| !s.is_empty())
         .map(String::from)
-        .ok_or_else(|| oauth_error(
-            StatusCode::UNAUTHORIZED,
-            "invalid_token",
-            "Missing X-User-Id header (Bearer required)",
-        ))
+        .ok_or_else(|| {
+            oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Missing X-User-Id header (Bearer required)",
+            )
+        })
 }
 
 // =========================================================================
@@ -191,12 +198,13 @@ async fn device_code(State(state): State<AppState>) -> Response {
         Ok(info) => {
             state.oauth_metrics.inc_device_code_issued();
             Json(DeviceCodeResponse {
-                device_code:       info.device_code,
-                user_code:         info.user_code,
-                verification_uri:  info.verification_uri,
-                expires_in:        info.expires_in_secs,
-                interval:          info.interval_secs,
-            }).into_response()
+                device_code: info.device_code,
+                user_code: info.user_code,
+                verification_uri: info.verification_uri,
+                expires_in: info.expires_in_secs,
+                interval: info.interval_secs,
+            })
+            .into_response()
         }
         Err(e) => oauth_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -258,13 +266,17 @@ async fn device_verify(
     let tenant: i64 = tenant_id.into();
 
     let admin = admin(&state);
-    match admin.approve_device_code(tenant, &user_id, &payload.user_code).await {
+    match admin
+        .approve_device_code(tenant, &user_id, &payload.user_code)
+        .await
+    {
         Ok(_) => {
             state.oauth_metrics.inc_device_code_approved();
             Json(DeviceVerifyResponse {
                 user_id,
                 status: "approved".to_string(),
-            }).into_response()
+            })
+            .into_response()
         }
         Err(e) => {
             state.oauth_metrics.inc_device_code_denied();
@@ -297,25 +309,29 @@ async fn device_token(
     let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     let admin = admin(&state);
-    match admin.poll_device_token(tenant_id, &payload.device_code).await {
+    match admin
+        .poll_device_token(tenant_id, &payload.device_code)
+        .await
+    {
         Ok(info) => {
             state.oauth_metrics.inc_access_token_issued();
             Json(DeviceTokenResponse {
-                access_token:  info.access_token,
+                access_token: info.access_token,
                 refresh_token: info.refresh_token,
-                token_type:    "Bearer".to_string(),
-                expires_in:    8 * 3600,
-                session_id:    info.session_id,
-            }).into_response()
+                token_type: "Bearer".to_string(),
+                expires_in: 8 * 3600,
+                session_id: info.session_id,
+            })
+            .into_response()
         }
         Err(e) => {
             let msg = format!("{e}");
             let (code, http) = match msg.as_str() {
                 "authorization_pending" => ("authorization_pending", StatusCode::ACCEPTED),
-                "slow_down"             => ("slow_down",             StatusCode::ACCEPTED),
-                "authorization_expired" => ("expired_token",         StatusCode::GONE),
-                "access_denied"         => ("access_denied",         StatusCode::FORBIDDEN),
-                _                       => ("invalid_grant",         StatusCode::BAD_REQUEST),
+                "slow_down" => ("slow_down", StatusCode::ACCEPTED),
+                "authorization_expired" => ("expired_token", StatusCode::GONE),
+                "access_denied" => ("access_denied", StatusCode::FORBIDDEN),
+                _ => ("invalid_grant", StatusCode::BAD_REQUEST),
             };
             oauth_error(http, code, &msg)
         }
@@ -328,7 +344,6 @@ async fn token_refresh(
     State(state): State<AppState>,
     Json(payload): Json<RefreshRequest>,
 ) -> Response {
-
     let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     // Refresh token hash nằm trong `sys_short_sessions` (bảng partition,
@@ -340,14 +355,18 @@ async fn token_refresh(
     {
         Ok(Some(pair)) => pair,
         Ok(None) => {
-            return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "Refresh token not found")
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_grant",
+                "Refresh token not found",
+            );
         }
         Err(e) => {
             return oauth_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
                 &format!("lookup refresh token: {e}"),
-            )
+            );
         }
     };
 
@@ -360,26 +379,32 @@ async fn token_refresh(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
                 "Timestamp overflow",
-            )
+            );
         }
     };
-    let new_access = match admin.issue_user_token(tenant_id, &user_id, Some(expires_at_ts)).await {
+    let new_access = match admin
+        .issue_user_token(tenant_id, &user_id, Some(expires_at_ts))
+        .await
+    {
         Ok(token) => token,
-        Err(e) => return oauth_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            &format!("issue access token: {e}"),
-        ),
+        Err(e) => {
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                &format!("issue access token: {e}"),
+            );
+        }
     };
     state.oauth_metrics.inc_access_token_refreshed();
 
     Json(DeviceTokenResponse {
-        access_token:  new_access,
+        access_token: new_access,
         refresh_token: payload.refresh_token, // refresh token reuse (rotation là Phase sau)
-        token_type:    "Bearer".to_string(),
-        expires_in:    8 * 3600,
-        session_id:    None,
-    }).into_response()
+        token_type: "Bearer".to_string(),
+        expires_in: 8 * 3600,
+        session_id: None,
+    })
+    .into_response()
 }
 
 /// `POST /api/oauth/v1/token/revoke` — RFC 7009.
@@ -388,7 +413,6 @@ async fn token_revoke(
     headers: HeaderMap,
     Json(payload): Json<RevokeRequest>,
 ) -> Response {
-
     let user_id = match extract_user_id(&headers) {
         Ok(u) => u,
         Err(e) => return e,
@@ -398,11 +422,13 @@ async fn token_revoke(
     let pool = state.connector.database(tenant_id);
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
-        Err(e) => return oauth_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            &format!("acquire conn: {e}"),
-        ),
+        Err(e) => {
+            return oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                &format!("acquire conn: {e}"),
+            );
+        }
     };
 
     let token_hash = sha256_hex(payload.token.as_bytes());
@@ -436,10 +462,11 @@ async fn session_issue(
         Ok(info) => {
             state.oauth_metrics.inc_long_session_issued();
             Json(SessionIssueResponse {
-                session_id:  info.session_id,
+                session_id: info.session_id,
                 private_key: info.private_key,
-                expires_in:  info.expires_in_secs,
-            }).into_response()
+                expires_in: info.expires_in_secs,
+            })
+            .into_response()
         }
         Err(e) => oauth_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -462,21 +489,17 @@ async fn session_revoke(
     let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
     let admin = admin(&state);
-    match admin.revoke_long_session(tenant_id, &user_id, &payload.session_id).await {
+    match admin
+        .revoke_long_session(tenant_id, &user_id, &payload.session_id)
+        .await
+    {
         Ok(()) => ok(Some("session revoked")),
-        Err(e) => oauth_error(
-            StatusCode::NOT_FOUND,
-            "invalid_request",
-            &format!("{e}"),
-        ),
+        Err(e) => oauth_error(StatusCode::NOT_FOUND, "invalid_request", &format!("{e}")),
     }
 }
 
 /// `GET /api/oauth/v1/session/list` — list long sessions của user.
-async fn session_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn session_list(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user_id = match extract_user_id(&headers) {
         Ok(u) => u,
         Err(e) => return e,
@@ -489,11 +512,11 @@ async fn session_list(
             let resp: Vec<SessionListEntry> = items
                 .into_iter()
                 .map(|s| SessionListEntry {
-                    session_id:   s.session_id,
-                    status:       s.status,
-                    expires_at:   s.expires_at.to_rfc3339(),
-                    last_used_at: s.last_used_at.map(|d| d.to_rfc3339()),
-                    created_at:   s.created_at.to_rfc3339(),
+                    session_id: s.session_id,
+                    status: s.status,
+                    expires_at: s.expires_at.to_rfc3339(),
+                    last_used_at: s.last_used_at.map(|t| t.to_rfc3339()),
+                    created_at: s.created_at.to_rfc3339(),
                 })
                 .collect();
             Json(resp).into_response()

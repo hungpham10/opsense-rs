@@ -7,17 +7,19 @@ use std::io::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+#[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
 
 use crate::grid::TradingGrid;
-use opsense_libs::grid::AnalysisGrid;
-use opsense_libs::transition::TransitionAnalysis;
+use opsense_mlib::grid::AnalysisGrid;
+use opsense_mlib::transition::TransitionAnalysis;
 
 use crate::{FetchFn, ParamFn, Strategy};
 
 const INITIAL_CAPITAL: f64 = 100_000.0;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct GridStrategy {
     grid_levels: usize,
     sl_pct: f64,
@@ -30,7 +32,7 @@ pub struct GridStrategy {
     trading_candle_secs: u64,
 
     /// Timestamp của lần review gần nhất (0 = chưa review).
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     last_review: AtomicU64,
 }
 
@@ -147,7 +149,7 @@ impl GridStrategy {
     }
 }
 
-#[typetag::serde(name = "grid")]
+#[cfg_attr(feature = "json", typetag::serde(name = "grid"))]
 #[async_trait]
 impl Strategy for GridStrategy {
     /// Layout params:

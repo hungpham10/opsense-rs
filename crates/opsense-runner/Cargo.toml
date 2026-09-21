@@ -11,26 +11,27 @@ authors.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-arrow = { workspace = true, features = ["ipc"] }
-async-trait = { workspace = true }
 arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
+async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
-chrono = { workspace = true }
+chrono = { version = "0.4" }
 ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
-opsense-libs = { path = "../opsense-libs" }
+opsense-mlib = { path = "../opsense-mlib", features = ["sops"] }
 opsense-proto = { path = "../opsense-proto" }
 rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-subtle = { workspace = true }
+subtle = "2.6"
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-arrow = { workspace = true, features = ["ipc"] }
-tempfile = { workspace = true }
+tempfile = "3"

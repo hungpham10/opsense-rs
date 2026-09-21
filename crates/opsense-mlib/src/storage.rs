@@ -17,13 +17,13 @@ mod sqlite;
 #[cfg(feature = "redis")]
 mod redis;
 
-#[cfg(feature = "duckdb")]
-pub mod duckdb;
+#[cfg(feature = "parquet")]
+pub mod parquet;
 
 mod in_memory;
 
-#[cfg(feature = "duckdb")]
-pub use duckdb::DuckS3Storage;
+#[cfg(feature = "parquet")]
+pub use parquet::LakehouseStorage;
 
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;

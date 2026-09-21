@@ -18,6 +18,7 @@
 //! malicious script cannot mutate pipeline state.
 
 use opsense_libs::grid::AnalysisGrid;
+use opsense_libs::transition::TransitionAnalysis;
 
 /// Install every script-facing native function.
 pub fn register_all(eng: &mut rhai::Engine) {
@@ -51,6 +52,22 @@ pub fn register_attributes(
             .map(|(k, v)| (k.clone().into(), rhai::Dynamic::from(v.clone())))
             .collect()
     });
+    // ==== TransitionAnalysis API ====
+    eng.register_type::<TransitionAnalysis>();
+    eng.register_fn("down_probability", |t: &mut TransitionAnalysis| -> f64 { t.down_probability() });
+    eng.register_fn("up_probability", |t: &mut TransitionAnalysis| -> f64 { t.up_probability() });
+    eng.register_fn("stay_probability", |t: &mut TransitionAnalysis| -> f64 { t.stay_probability() });
+    eng.register_fn("down_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.down_probabilities() });
+    eng.register_fn("up_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.up_probabilities() });
+    eng.register_fn("stay_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.stay_probabilities() });
+    eng.register_fn("transitions", |t: &mut TransitionAnalysis| -> Vec<Vec<(usize, usize)>> { t.transitions() });
+    eng.register_fn("interval_cells", |t: &mut TransitionAnalysis, i: usize| -> Vec<(usize, usize)> { t.interval_cells(i).to_vec() });
+    eng.register_fn("dwell_times", |t: &mut TransitionAnalysis, cell: usize| -> Vec<usize> { t.dwell_times(cell).to_vec() });
+    eng.register_fn("mean_dwell", |t: &mut TransitionAnalysis, cell: usize| -> f64 { t.mean_dwell(cell).unwrap_or(0.0) });
+    eng.register_fn("max_dwell", |t: &mut TransitionAnalysis, cell: usize| -> usize { t.max_dwell(cell) });
+    eng.register_fn("interval_secs", |t: &mut TransitionAnalysis| -> i64 { t.interval_secs() });
+    eng.register_fn("num_cells", |t: &mut TransitionAnalysis| -> i64 { t.num_cells() as i64 });
+    // ==== TransitionAnalysis API ====
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +191,22 @@ fn register_time(eng: &mut rhai::Engine) {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)
     });
+    // ==== TransitionAnalysis API ====
+    eng.register_type::<TransitionAnalysis>();
+    eng.register_fn("down_probability", |t: &mut TransitionAnalysis| -> f64 { t.down_probability() });
+    eng.register_fn("up_probability", |t: &mut TransitionAnalysis| -> f64 { t.up_probability() });
+    eng.register_fn("stay_probability", |t: &mut TransitionAnalysis| -> f64 { t.stay_probability() });
+    eng.register_fn("down_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.down_probabilities() });
+    eng.register_fn("up_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.up_probabilities() });
+    eng.register_fn("stay_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.stay_probabilities() });
+    eng.register_fn("transitions", |t: &mut TransitionAnalysis| -> Vec<Vec<(usize, usize)>> { t.transitions() });
+    eng.register_fn("interval_cells", |t: &mut TransitionAnalysis, i: usize| -> Vec<(usize, usize)> { t.interval_cells(i).to_vec() });
+    eng.register_fn("dwell_times", |t: &mut TransitionAnalysis, cell: usize| -> Vec<usize> { t.dwell_times(cell).to_vec() });
+    eng.register_fn("mean_dwell", |t: &mut TransitionAnalysis, cell: usize| -> f64 { t.mean_dwell(cell).unwrap_or(0.0) });
+    eng.register_fn("max_dwell", |t: &mut TransitionAnalysis, cell: usize| -> usize { t.max_dwell(cell) });
+    eng.register_fn("interval_secs", |t: &mut TransitionAnalysis| -> i64 { t.interval_secs() });
+    eng.register_fn("num_cells", |t: &mut TransitionAnalysis| -> i64 { t.num_cells() as i64 });
+    // ==== TransitionAnalysis API ====
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +507,22 @@ fn register_ts_ops(eng: &mut rhai::Engine) {
         }
         rhai::Dynamic::from(out)
     });
+    // ==== TransitionAnalysis API ====
+    eng.register_type::<TransitionAnalysis>();
+    eng.register_fn("down_probability", |t: &mut TransitionAnalysis| -> f64 { t.down_probability() });
+    eng.register_fn("up_probability", |t: &mut TransitionAnalysis| -> f64 { t.up_probability() });
+    eng.register_fn("stay_probability", |t: &mut TransitionAnalysis| -> f64 { t.stay_probability() });
+    eng.register_fn("down_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.down_probabilities() });
+    eng.register_fn("up_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.up_probabilities() });
+    eng.register_fn("stay_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.stay_probabilities() });
+    eng.register_fn("transitions", |t: &mut TransitionAnalysis| -> Vec<Vec<(usize, usize)>> { t.transitions() });
+    eng.register_fn("interval_cells", |t: &mut TransitionAnalysis, i: usize| -> Vec<(usize, usize)> { t.interval_cells(i).to_vec() });
+    eng.register_fn("dwell_times", |t: &mut TransitionAnalysis, cell: usize| -> Vec<usize> { t.dwell_times(cell).to_vec() });
+    eng.register_fn("mean_dwell", |t: &mut TransitionAnalysis, cell: usize| -> f64 { t.mean_dwell(cell).unwrap_or(0.0) });
+    eng.register_fn("max_dwell", |t: &mut TransitionAnalysis, cell: usize| -> usize { t.max_dwell(cell) });
+    eng.register_fn("interval_secs", |t: &mut TransitionAnalysis| -> i64 { t.interval_secs() });
+    eng.register_fn("num_cells", |t: &mut TransitionAnalysis| -> i64 { t.num_cells() as i64 });
+    // ==== TransitionAnalysis API ====
 }
 
 // ---------------------------------------------------------------------------
@@ -601,4 +650,20 @@ fn register_grid_ops(eng: &mut rhai::Engine) {
             .collect();
         rhai::Dynamic::from(ranges)
     });
+    // ==== TransitionAnalysis API ====
+    eng.register_type::<TransitionAnalysis>();
+    eng.register_fn("down_probability", |t: &mut TransitionAnalysis| -> f64 { t.down_probability() });
+    eng.register_fn("up_probability", |t: &mut TransitionAnalysis| -> f64 { t.up_probability() });
+    eng.register_fn("stay_probability", |t: &mut TransitionAnalysis| -> f64 { t.stay_probability() });
+    eng.register_fn("down_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.down_probabilities() });
+    eng.register_fn("up_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.up_probabilities() });
+    eng.register_fn("stay_probabilities", |t: &mut TransitionAnalysis| -> Vec<f64> { t.stay_probabilities() });
+    eng.register_fn("transitions", |t: &mut TransitionAnalysis| -> Vec<Vec<(usize, usize)>> { t.transitions() });
+    eng.register_fn("interval_cells", |t: &mut TransitionAnalysis, i: usize| -> Vec<(usize, usize)> { t.interval_cells(i).to_vec() });
+    eng.register_fn("dwell_times", |t: &mut TransitionAnalysis, cell: usize| -> Vec<usize> { t.dwell_times(cell).to_vec() });
+    eng.register_fn("mean_dwell", |t: &mut TransitionAnalysis, cell: usize| -> f64 { t.mean_dwell(cell).unwrap_or(0.0) });
+    eng.register_fn("max_dwell", |t: &mut TransitionAnalysis, cell: usize| -> usize { t.max_dwell(cell) });
+    eng.register_fn("interval_secs", |t: &mut TransitionAnalysis| -> i64 { t.interval_secs() });
+    eng.register_fn("num_cells", |t: &mut TransitionAnalysis| -> i64 { t.num_cells() as i64 });
+    // ==== TransitionAnalysis API ====
 }

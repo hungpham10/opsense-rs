@@ -1,18 +1,157 @@
 use std::io::{Error, ErrorKind};
-use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use async_graphql::Enum;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use opsense_libs::ahocorasick::AhoCorasick;
-use opsense_libs::lru::LruCache;
-use opsense_libs::search::Search;
-use opsense_libs::snowflake_id::SnowflakeId;
-use opsense_libs::storage::TimeseriesStorage;
-#[cfg(feature = "duckdb")]
-use opsense_libs::storage::duckdb::DuckS3Storage;
+use opsense_mlib::ahocorasick::AhoCorasick;
+use opsense_mlib::lru::LruCache;
+use opsense_mlib::search::Search;
+use opsense_mlib::snowflake_id::SnowflakeId;
+use opsense_mlib::storage::{CategoryStorage, PatternStorage, TimeseriesStorage};
+#[cfg(feature = "parquet")]
+use opsense_mlib::storage::LakehouseStorage;
+#[cfg(feature = "sqlite")]
+use opsense_mlib::storage::SqliteStorage;
 use opsense_model::events::Observation;
+
+use crate::config::StorageConfig;
+
+// ==================== Storage backend ====================
+//
+// Dựng storage backend từ `[storage]` config, dùng chung cho cả 3 station
+// (timeseries / pattern / category). Backend `"memory"` (mặc định) trả về
+// station thuần memory; `"duckdb"`/`"s3"`/`"lakehouse"` mở Parquet lakehouse;
+// `"sqlite"` mở một file riêng cho từng station. Backend nhận diện nhưng
+// chưa được biên dịch (feature tắt) báo lỗi rõ ràng thay vì lặng lẽ hạ cấp.
+
+/// Số block tối đa giữ trong LRU hot của một [`TimeseriesStation`].
+const HOT_BLOCKS: usize = 32;
+
+/// Sanitize station `id` thành path segment an toàn (thay ký tự đường dẫn).
+#[cfg(any(feature = "parquet", feature = "sqlite"))]
+fn safe_segment(id: &str) -> String {
+    id.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+            _ => '_',
+        })
+        .collect()
+}
+
+/// Backend đã mở. Mọi backend đều implement đủ 3 trait
+/// (`TimeseriesStorage`, `PatternStorage`, `CategoryStorage`) nên dùng chung
+/// một enum và ép sang trait object theo nhu cầu từng station.
+enum BackendStorage {
+    /// Thuần memory — không persistence.
+    Memory,
+    #[cfg(feature = "parquet")]
+    Parquet(LakehouseStorage),
+    #[cfg(feature = "sqlite")]
+    Sqlite(SqliteStorage),
+}
+
+impl BackendStorage {
+    fn into_timeseries(self) -> Option<Arc<dyn TimeseriesStorage>> {
+        match self {
+            BackendStorage::Memory => None,
+            #[cfg(feature = "parquet")]
+            BackendStorage::Parquet(s) => Some(Arc::new(s)),
+            #[cfg(feature = "sqlite")]
+            BackendStorage::Sqlite(s) => Some(Arc::new(s)),
+        }
+    }
+
+    fn into_pattern(self) -> Option<Arc<dyn PatternStorage>> {
+        match self {
+            BackendStorage::Memory => None,
+            #[cfg(feature = "parquet")]
+            BackendStorage::Parquet(s) => Some(Arc::new(s)),
+            #[cfg(feature = "sqlite")]
+            BackendStorage::Sqlite(s) => Some(Arc::new(s)),
+        }
+    }
+
+    fn into_category(self) -> Option<Arc<RwLock<dyn CategoryStorage>>> {
+        match self {
+            BackendStorage::Memory => None,
+            #[cfg(feature = "parquet")]
+            BackendStorage::Parquet(s) => Some(Arc::new(RwLock::new(s))),
+            #[cfg(feature = "sqlite")]
+            BackendStorage::Sqlite(s) => Some(Arc::new(RwLock::new(s))),
+        }
+    }
+}
+
+/// Lỗi khi mở backend thất bại (chỉ xuất hiện khi có backend persistent).
+#[cfg(any(feature = "parquet", feature = "sqlite"))]
+fn backend_error(id: &str, backend: &str, e: impl std::fmt::Display) -> Error {
+    Error::other(format!(
+        "failed to open storage backend '{backend}' for station '{id}': {e}"
+    ))
+}
+
+/// Lỗi khi backend được yêu cầu nhưng feature chưa được biên dịch.
+#[cfg(not(all(feature = "parquet", feature = "sqlite")))]
+fn unsupported(id: &str, backend: &str, feature: &str) -> Error {
+    Error::new(
+        ErrorKind::Unsupported,
+        format!("storage backend '{backend}' for station '{id}' requires {feature}"),
+    )
+}
+
+/// Mở backend theo `cfg.backend`. `kind` = `"timeseries"` | `"pattern"` |
+/// `"category"` — tách data layout (path) giữa các loại station.
+async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<BackendStorage, Error> {
+    let backend = cfg.backend.trim();
+    #[cfg(any(feature = "parquet", feature = "sqlite"))]
+    let data_dir = cfg.data_dir.trim_end_matches('/');
+    #[cfg(any(feature = "parquet", feature = "sqlite"))]
+    let segment = safe_segment(id);
+
+    match backend {
+        "memory" => Ok(BackendStorage::Memory),
+
+        // Parquet lakehouse (thay thế DuckDB cũ).
+        #[cfg(feature = "parquet")]
+        "duckdb" | "s3" | "lakehouse" => {
+            let storage = LakehouseStorage::open(&format!("{data_dir}/{segment}-{kind}"))
+                .await
+                .map_err(|e| backend_error(id, backend, e))?;
+            Ok(BackendStorage::Parquet(storage))
+        }
+
+        // SQLite local — một file cho mỗi station.
+        #[cfg(feature = "sqlite")]
+        "sqlite" => {
+            let storage = SqliteStorage::open(&format!("{data_dir}/{segment}-{kind}.sqlite"))
+                .await
+                .map_err(|e| backend_error(id, backend, e))?;
+            Ok(BackendStorage::Sqlite(storage))
+        }
+
+        // Backend nhận diện nhưng feature tương ứng chưa được biên dịch.
+        #[cfg(not(feature = "parquet"))]
+        "duckdb" | "s3" | "lakehouse" => Err(unsupported(
+            id,
+            backend,
+            "opsense-core feature 'parquet'",
+        )),
+        #[cfg(not(feature = "sqlite"))]
+        "sqlite" => Err(unsupported(id, backend, "opsense-core feature 'sqlite'")),
+
+        other => Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "unsupported storage backend '{other}' for station '{id}' (kind '{kind}')"
+            ),
+        )),
+    }
+}
 
 /// Một block dữ liệu của station: các observation nằm trọn trong
 /// `[range.0, range.1]`, cùng block id `floor(ts / block_duration)`.
@@ -36,14 +175,12 @@ impl Default for Block {
 pub struct TimeseriesStation {
     caches: LruCache<i64, Block, 32>,
     block_duration: i64,
-    /// Persist/read-through backend (duckdb lakehouse khi được cấu hình).
-    /// `None` = station thuần memory (block evict là mất — như cũ).
     storage: Option<Arc<dyn TimeseriesStorage>>,
 }
 
 impl Default for TimeseriesStation {
     fn default() -> Self {
-        Self::new(32, None)
+        Self::new(HOT_BLOCKS, None)
     }
 }
 
@@ -60,41 +197,25 @@ impl TimeseriesStation {
     }
 
     /// Constructor theo `[storage]` config: `backend = "duckdb"` → lakehouse
-    /// (LRU hot + Parquet qua DuckDB cho block lạnh — evict/update/remove tự
+    /// (LRU hot + Parquet qua lakehouse cho block lạnh — evict/update/remove tự
     /// persist qua hook `attach_timeseries` của LruCache, miss tự read-through
-    /// từ storage), còn lại memory-only. Series key của một block là
-    /// `blk:<block_id>`, value là Block serialize JSON.
-    pub async fn from_storage(
-        id: &str,
-        cfg: &crate::config::StorageConfig,
-    ) -> Result<Self, Error> {
-        if cfg.backend != "duckdb" {
-            return Ok(Self::default());
-        }
-        #[cfg(not(feature = "duckdb"))]
-        {
-            let _ = id;
-            Err(Error::new(
-                ErrorKind::InvalidInput,
-                "storage.backend = 'duckdb' requires the `duckdb` feature \
-                 (build opsense with --features duckdb)",
-            ))
-        }
-        #[cfg(feature = "duckdb")]
-        {
-            let store: Arc<dyn TimeseriesStorage> = Arc::new(open_station_store(id, cfg).await?);
-            let mut caches = LruCache::new(32);
-            caches.attach_timeseries(
-                store.clone(),
-                Arc::new(|block_id: &i64| format!("blk:{block_id}").into_bytes()),
+    /// từ storage), `backend = "sqlite"` → một file sqlite riêng, còn lại
+    /// (mặc định `"memory"`) memory-only. Series key của một block là
+    /// `blk:<block_id>`, value là Block serialize JSON; `block_duration` lấy từ
+    /// `cfg.block_secs`.
+    pub async fn from_storage(id: &str, cfg: &StorageConfig) -> Result<Self, Error> {
+        let mut station = Self::new(HOT_BLOCKS, Some(cfg.block_secs as i64));
+
+        if let Some(ts) = open_backend(id, cfg, "timeseries").await?.into_timeseries() {
+            station.caches.attach_timeseries(
+                Arc::clone(&ts),
+                Arc::new(|key: &i64| format!("blk:{key}").into_bytes()),
                 Arc::new(|block: &Block| serde_json::to_vec(block).unwrap_or_default()),
             );
-            Ok(Self {
-                caches,
-                block_duration: cfg.block_secs.max(1) as i64,
-                storage: Some(store),
-            })
+            station.storage = Some(ts);
         }
+
+        Ok(station)
     }
 
     #[inline]
@@ -138,8 +259,7 @@ impl TimeseriesStation {
                 ),
                 None => match self.load_cold_block(block_id).await {
                     Some(block) => {
-                        let covered =
-                            req_start >= block.range.0 && req_end <= block.range.1;
+                        let covered = req_start >= block.range.0 && req_end <= block.range.1;
                         let items = block
                             .items
                             .iter()
@@ -203,102 +323,11 @@ impl TimeseriesStation {
     }
 }
 
-/// Mở `DuckS3Storage` dùng chung cho các station của node `id`: file DuckDB
-/// cục bộ tại `<data_dir>/<id>.duckdb` (local) hoặc buffer trong temp dir khi
-/// Parquet đi lên `s3://`. Return `Err` nếu thiếu credentials cho S3.
-#[cfg(feature = "duckdb")]
-async fn open_station_store(
-    id: &str,
-    cfg: &crate::config::StorageConfig,
-) -> Result<DuckS3Storage, Error> {
-    let s3 = s3_config_from_storage(cfg, id)?;
-    let (db_path, s3cfg) = match &s3 {
-        Some(cfg) => {
-            let hash: u64 = id
-                .bytes()
-                .fold(0xcbf29ce484222325u64, |acc, b| (acc ^ u64::from(b)) * 0x100000001b3);
-            let dir = std::env::temp_dir().join(format!("opsense-ts-{hash:016x}"));
-            (
-                dir.join("buffer.duckdb").to_string_lossy().into_owned(),
-                Some(cfg.clone()),
-            )
-        }
-        None => {
-            let path = std::path::Path::new(&cfg.data_dir).join(format!("{id}.duckdb"));
-            (path.to_string_lossy().into_owned(), None)
-        }
-    };
-    let store = match s3cfg {
-        Some(s3) => DuckS3Storage::open_with_s3(&db_path, s3, 4096).await,
-        None => DuckS3Storage::open(&db_path).await,
-    }
-    .map_err(|e| Error::other(e.to_string()))?;
-    Ok(store)
-}
-
-/// Map `[storage]` config → S3 credentials cho lakehouse (chỉ khi `data_dir`
-/// là `s3://bucket[/prefix]`). Field thiếu trong TOML được bù bằng env
-/// `OPSENSE_S3_*` rồi `AWS_*`. Prefix của station = `<prefix>/<station_id>`.
-#[cfg(feature = "duckdb")]
-fn s3_config_from_storage(
-    cfg: &crate::config::StorageConfig,
-    station_id: &str,
-) -> Result<Option<opsense_libs::storage::duckdb::S3Config>, Error> {
-    use opsense_libs::storage::duckdb::S3Config;
-
-    let data_dir = cfg.data_dir.trim_end_matches('/');
-    let Some(rest) = data_dir.strip_prefix("s3://").filter(|r| !r.is_empty()) else {
-        return Ok(None);
-    };
-    let (bucket, mut prefix) = match rest.split_once('/') {
-        Some((bucket, prefix)) => {
-            (bucket.to_string(), prefix.trim_matches('/').to_string())
-        }
-        None => (rest.to_string(), String::new()),
-    };
-    if !prefix.is_empty() {
-        prefix.push('/');
-    }
-    prefix.push_str(station_id);
-
-    let sc = cfg.s3.clone().unwrap_or_default();
-    let from = |v: &Option<String>, var: &str| {
-        v.clone()
-            .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var(var).ok().filter(|s| !s.is_empty()))
-    };
-    let access_key_id = from(&sc.access_key_id, "OPSENSE_S3_ACCESS_KEY_ID")
-        .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok());
-    let secret_access_key = from(&sc.secret_access_key, "OPSENSE_S3_SECRET_ACCESS_KEY")
-        .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok());
-    let (Some(access_key_id), Some(secret_access_key)) = (access_key_id, secret_access_key)
-    else {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "storage.data_dir là s3:// nhưng thiếu credentials \
-             ([storage.s3] hoặc OPSENSE_S3_ACCESS_KEY_ID / OPSENSE_S3_SECRET_ACCESS_KEY)",
-        ));
-    };
-
-    Ok(Some(S3Config {
-        bucket,
-        prefix,
-        endpoint: from(&sc.endpoint, "OPSENSE_S3_ENDPOINT"),
-        region: from(&sc.region, "OPSENSE_S3_REGION"),
-        access_key_id,
-        secret_access_key,
-        session_token: from(&sc.session_token, "OPSENSE_S3_SESSION_TOKEN"),
-    }))
-}
-
 pub struct PatternStation {
     automaton: Arc<RwLock<AhoCorasick>>,
     hits: AtomicU64,
     misses: AtomicU64,
-    /// Persist backend cho patterns (`backend = "duckdb"`): `set()` ghi thẳng
-    /// vào `ac_patterns`, mở lại load `get_all()`. `None` = memory.
-    #[cfg(feature = "duckdb")]
-    storage: Option<Arc<DuckS3Storage>>,
+    storage: Option<Arc<dyn PatternStorage>>,
 }
 
 impl Default for PatternStation {
@@ -313,52 +342,45 @@ impl PatternStation {
             automaton: Arc::new(RwLock::new(AhoCorasick::new())),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
-            #[cfg(feature = "duckdb")]
             storage: None,
         }
     }
 
-    /// Constructor theo `[storage]` config — tương tự [`CategoryStation::from_storage`].
-    pub async fn from_storage(
-        id: &str,
-        cfg: &crate::config::StorageConfig,
-    ) -> Result<Self, Error> {
-        if cfg.backend != "duckdb" {
-            return Ok(Self::new());
-        }
-        #[cfg(not(feature = "duckdb"))]
-        {
-            let _ = id;
-            Err(Error::new(
-                ErrorKind::InvalidInput,
-                "storage.backend = 'duckdb' requires the `duckdb` feature",
+    /// Constructor theo `[storage]` config: gắn `PatternStorage` để registry
+    /// pattern persist — mỗi `set` ghi thêm vào storage, mở lại restore mọi
+    /// pattern đã đăng ký rồi rebuild automaton. Backend `"memory"` (mặc định)
+    /// là station thuần memory.
+    pub async fn from_storage(id: &str, cfg: &StorageConfig) -> Result<Self, Error> {
+        let station = Self::new();
+
+        let Some(storage) = open_backend(id, cfg, "pattern").await?.into_pattern() else {
+            return Ok(station);
+        };
+
+        // Restore registry pattern từ storage trên đĩa → rebuild automaton.
+        let patterns = storage.get_all().await.map_err(|e| {
+            Error::other(format!(
+                "failed to load patterns from storage for station '{id}': {e}"
             ))
-        }
-        #[cfg(feature = "duckdb")]
+        })?;
         {
-            use opsense_libs::storage::PatternStorage;
-            let store = open_station_store(id, cfg).await?;
-            let automaton = RwLock::new(AhoCorasick::new());
-            for p in store.get_all().await.map_err(|e| {
-                Error::other(format!("load patterns: {e}"))
-            })? {
-                automaton.write().await.add(p);
+            let mut automaton = station.automaton.write().await;
+            for pattern in patterns {
+                automaton.add(pattern);
             }
-            Ok(Self {
-                automaton: Arc::new(automaton),
-                hits: AtomicU64::new(0),
-                misses: AtomicU64::new(0),
-                storage: Some(Arc::new(store)),
-            })
         }
+        station.automaton.write().await.optimize().await;
+
+        Ok(Self {
+            storage: Some(storage),
+            ..station
+        })
     }
 
     pub async fn set(&self, template: &str) {
         self.automaton.write().await.add(template.to_string());
-        #[cfg(feature = "duckdb")]
         if let Some(storage) = &self.storage {
-            use opsense_libs::storage::PatternStorage;
-            let _ = storage.add(template).await; // best-effort, như persist_point
+            let _ = storage.add(template).await;
         }
     }
 
@@ -396,6 +418,7 @@ impl PatternStation {
 pub struct CategoryStation {
     search: Search,
     id: SnowflakeId,
+    storage: Option<Arc<RwLock<dyn CategoryStorage>>>,
 }
 
 impl Default for CategoryStation {
@@ -409,37 +432,31 @@ impl CategoryStation {
         Self {
             search: Search::<u8>::in_memory(1),
             id: SnowflakeId::new(1, 1),
+            storage: None,
         }
     }
 
     /// Constructor theo `[storage]` config: `backend = "duckdb"` → radix tree
-    /// persists qua `CategoryStorage` của `DuckS3Storage` (mỗi `insert_chain`
+    /// persists qua `CategoryStorage` của Parquet lakehouse (mỗi `insert_chain`
     /// commit thẳng vào storage; mở lại có sẵn dữ liệu — snapshot/restore S3
-    /// theo cơ chế của DuckS3Storage), còn lại memory-only.
-    pub async fn from_storage(
-        id: &str,
-        cfg: &crate::config::StorageConfig,
-    ) -> Result<Self, Error> {
-        if cfg.backend != "duckdb" {
+    /// theo cơ chế riêng của lakehouse), `backend = "sqlite"` → file sqlite
+    /// riêng, còn lại (mặc định `"memory"`) memory-only.
+    pub async fn from_storage(id: &str, cfg: &StorageConfig) -> Result<Self, Error> {
+        let Some(storage) = open_backend(id, cfg, "category").await?.into_category() else {
             return Ok(Self::new());
-        }
-        #[cfg(not(feature = "duckdb"))]
-        {
-            let _ = id;
-            Err(Error::new(
-                ErrorKind::InvalidInput,
-                "storage.backend = 'duckdb' requires the `duckdb` feature",
-            ))
-        }
-        #[cfg(feature = "duckdb")]
-        {
-            let store = open_station_store(id, cfg).await?;
-            let search = Search::new(1, Arc::new(tokio::sync::RwLock::new(store)));
-            Ok(Self {
-                search,
-                id: SnowflakeId::new(1, 1),
-            })
-        }
+        };
+
+        Ok(Self {
+            search: Search::<u8>::new(1, Arc::clone(&storage)),
+            id: SnowflakeId::new(1, 1),
+            storage: Some(storage),
+        })
+    }
+
+    /// Storage backend của radix tree (nếu có) — `None` cho station memory.
+    #[must_use]
+    pub fn storage(&self) -> Option<&Arc<RwLock<dyn CategoryStorage>>> {
+        self.storage.as_ref()
     }
 
     pub async fn insert(&mut self, text: &str, metadata: &str) -> Result<u64, Error> {
@@ -548,70 +565,3 @@ impl TryFrom<&Station> for Arc<RwLock<PatternStation>> {
     }
 }
 
-#[cfg(all(test, feature = "duckdb"))]
-mod tests {
-    use super::*;
-    use crate::config::StorageConfig;
-    use opsense_model::events::{Signal, TelemetryKind};
-
-    fn duck_cfg(dir: &std::path::Path, block_secs: u64) -> StorageConfig {
-        StorageConfig {
-            backend: "duckdb".into(),
-            data_dir: dir.to_string_lossy().into_owned(),
-            block_secs,
-            ..StorageConfig::default()
-        }
-    }
-
-    fn obs(ts: i64) -> Observation {
-        Observation::new(ts, "m".into(), TelemetryKind::Metric, Signal::Raw, ts as f64)
-    }
-
-    /// Block bị LRU evict → tự persist qua hook; query lại → cold load từ
-    /// storage (read-through) trả đúng dữ liệu.
-    #[tokio::test]
-    async fn duck_station_persists_evicted_blocks() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = duck_cfg(dir.path(), 1);
-        let mut st = TimeseriesStation::from_storage("test-ts", &cfg)
-            .await
-            .unwrap();
-        // 34 block riêng biệt (block_secs = 1) → vượt LRU 32 → block đầu evict.
-        for ts in 1..=34i64 {
-            st.update_range(&[obs(ts)], ts, ts, ts);
-        }
-        // Đợi persist_point đã spawn xong (fire-and-forget trên tokio).
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        let rows = st
-            .query_range(1, 1)
-            .await
-            .expect("cold block reload phải cover");
-        assert_eq!(rows.len(), 1, "1 observation trong block đầu");
-        assert_eq!(rows[0].ts, 1);
-        assert_eq!(rows[0].value, 1.0);
-    }
-
-    /// Memory hit vẫn ưu tiên — query ngay sau ghi không cần chạm storage.
-    #[tokio::test]
-    async fn duck_station_hot_path_hits_memory() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = duck_cfg(dir.path(), 3600);
-        let mut st = TimeseriesStation::from_storage("test-hot", &cfg)
-            .await
-            .unwrap();
-        st.update_range(&[obs(100), obs(200)], 100, 200, 200);
-        let rows = st.query_range(100, 200).await.unwrap();
-        assert_eq!(rows.len(), 2);
-    }
-
-    /// Không có storage (memory backend) → miss khi block chưa từng ghi.
-    #[tokio::test]
-    async fn memory_station_misses_unknown_range() {
-        let mut st = TimeseriesStation::default();
-        assert!(st.query_range(1, 2).await.is_none());
-        st.update_range(&[obs(1)], 1, 1, 1);
-        assert_eq!(st.query_range(1, 1).await.unwrap().len(), 1);
-        assert!(st.query_range(2, 2).await.is_none());
-    }
-}

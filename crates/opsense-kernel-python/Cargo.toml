@@ -17,7 +17,6 @@ path = "src/main.rs"
 
 [dev-dependencies]
 anyhow = { workspace = true }
-arrow = { workspace = true }
 bytes = { workspace = true }
 opsense-proto = { path = "../opsense-proto" }
 tokio = { workspace = true }

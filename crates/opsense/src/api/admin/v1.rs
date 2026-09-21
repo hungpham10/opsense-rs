@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Json as JsonResponse};
 use axum::routing::{get, post};
 
 use chrono::{DateTime, Utc};
-use http::{header, Response, StatusCode};
+use http::{Response, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -81,10 +81,7 @@ fn default_oidc_name() -> String {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/tenant/{host}/id", get(get_tenant_id))
-        .route(
-            "/tenant/{host}/auth-config",
-            get(get_tenant_auth_config),
-        )
+        .route("/tenant/{host}/auth-config", get(get_tenant_auth_config))
         .route("/files/{*path}", get(fetch_file))
         .route("/tokens/generics/{name}", get(get_token).post(put_token))
         .route(
@@ -300,6 +297,7 @@ async fn get_tenant_id(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn get_tenant_auth_config(
     State(app_state): State<AppState>,
     Path(host): Path<String>,
@@ -335,6 +333,7 @@ async fn get_tenant_auth_config(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn fetch_file(
     State(app_state): State<AppState>,
     Path(path): Path<String>,

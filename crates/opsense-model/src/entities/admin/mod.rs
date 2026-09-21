@@ -22,7 +22,7 @@ mod token;
 
 use std::sync::Arc;
 
-use opsense_libs::lru::LruCache;
+use opsense_mlib::lru::LruCache;
 
 pub use errors::AdminError;
 pub use helpers::sha256_hex;
@@ -70,7 +70,7 @@ impl Admin {
         tenant_id: i64,
         service_name: &str,
     ) -> Result<String, AdminError> {
-        use opsense_libs::sops::decrypt;
+        use opsense_mlib::sops::decrypt;
         use sqlx::Row;
 
         let cache_key = (tenant_id, service_name.to_string());
@@ -117,7 +117,7 @@ impl Admin {
         tenant_id: i64,
         token_id: i64,
     ) -> Result<String, AdminError> {
-        use opsense_libs::sops::decrypt;
+        use opsense_mlib::sops::decrypt;
         use sqlx::Row;
 
         let cache_key = token_id;
@@ -130,13 +130,12 @@ impl Admin {
             None => {
                 let pool = self.dbt(tenant_id);
                 let mut conn = pool.acquire().await?;
-                let row = sqlx::query(
-                    "SELECT token FROM sys_token_map WHERE tenant_id = $1 AND id = $2",
-                )
-                .bind(tenant_id)
-                .bind(token_id)
-                .fetch_optional(&mut *conn)
-                .await?;
+                let row =
+                    sqlx::query("SELECT token FROM sys_token_map WHERE tenant_id = $1 AND id = $2")
+                        .bind(tenant_id)
+                        .bind(token_id)
+                        .fetch_optional(&mut *conn)
+                        .await?;
                 let Some(row) = row else {
                     return Err(AdminError::Other(format!(
                         "Not found token_id {token_id} for tenant {tenant_id}"

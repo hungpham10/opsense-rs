@@ -115,7 +115,18 @@ async fn http_fetch_writes_observations_into_own_station() {
     runtime.reload(components).expect("valid graph");
 
     let _handle = runtime.start(|_event: Event| async {}).expect("start");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Wait until the mock endpoint actually receives a request instead of
+    // assuming a fixed sleep: on slow CI the clock + bootstrap tasks need
+    // more than 500 ms to emit the first tick and complete the fetch.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if !requests.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
     runtime.stop().expect("stop");
     runtime.wait_for_shutdown().await.expect("shutdown");
 

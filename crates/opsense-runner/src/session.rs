@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 
 use opsense_proto::pb::{CodeRequest, SessionParams};
 
-use crate::auth::{AuthContext, Auth};
+use crate::auth::{Auth, AuthContext};
 use crate::backend::{ExecOutcome, HealthInfo, KernelBackend};
 use crate::config::RunnerConfig;
 
@@ -111,11 +111,16 @@ impl SessionRegistry {
         auth_ctx: Option<&AuthContext>,
     ) -> Result<String> {
         if let Some(auth) = &self.auth {
-            let ctx = auth_ctx.ok_or_else(|| {
-                anyhow::anyhow!("auth required but no context supplied")
-            })?;
+            let ctx =
+                auth_ctx.ok_or_else(|| anyhow::anyhow!("auth required but no context supplied"))?;
             if !auth
-                .verify_signature(&ctx.session_id, "Start", ctx.timestamp, ctx.nonce, &ctx.signature)
+                .verify_signature(
+                    &ctx.session_id,
+                    "Start",
+                    ctx.timestamp,
+                    ctx.nonce,
+                    &ctx.signature,
+                )
                 .await?
             {
                 return Err(anyhow::anyhow!("auth verification failed"));
@@ -183,9 +188,9 @@ impl SessionRegistry {
         if !ok {
             // Restore the challenge so the client can retry (or we drop on
             // sweep — single-attempt semantics would also be valid).
-            self.sessions.lock().await.get_mut(session_id).map(|m| {
+            if let Some(m) = self.sessions.lock().await.get_mut(session_id) {
                 m.pending_challenge = Some(plaintext);
-            });
+            }
             return Ok(None);
         }
 
@@ -219,7 +224,13 @@ impl SessionRegistry {
         if let Some(auth) = &self.auth {
             let ctx = auth_ctx.ok_or_else(|| anyhow::anyhow!("auth required"))?;
             if !auth
-                .verify_signature(&ctx.session_id, "Close", ctx.timestamp, ctx.nonce, &ctx.signature)
+                .verify_signature(
+                    &ctx.session_id,
+                    "Close",
+                    ctx.timestamp,
+                    ctx.nonce,
+                    &ctx.signature,
+                )
                 .await?
             {
                 return Err(anyhow::anyhow!("auth verification failed"));
@@ -250,7 +261,8 @@ impl SessionRegistry {
         request_id: &str,
         auth_ctx: Option<&AuthContext>,
     ) -> Result<()> {
-        self.verify_or_skip(auth_ctx, session_id, "Interrupt").await?;
+        self.verify_or_skip(auth_ctx, session_id, "Interrupt")
+            .await?;
         self.touch(session_id).await;
         self.backend.interrupt(session_id, request_id).await
     }
@@ -277,7 +289,13 @@ impl SessionRegistry {
         if let Some(auth) = &self.auth {
             let ctx = auth_ctx.ok_or_else(|| anyhow::anyhow!("auth required"))?;
             if !auth
-                .verify_signature(&ctx.session_id, method, ctx.timestamp, ctx.nonce, &ctx.signature)
+                .verify_signature(
+                    &ctx.session_id,
+                    method,
+                    ctx.timestamp,
+                    ctx.nonce,
+                    &ctx.signature,
+                )
                 .await?
             {
                 return Err(anyhow::anyhow!("auth verification failed for {session_id}"));

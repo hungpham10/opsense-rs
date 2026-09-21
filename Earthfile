@@ -1,7 +1,7 @@
 VERSION 0.8
 
 # -----------------------------------------------------------------------
-# Global config — override after the target, e.g. `earthly +all --VERSION=v1.0.0`
+# Global config — override khi gọi, e.g. `earthly +all --TARGET=x86_64-unknown-linux-gnu`
 # -----------------------------------------------------------------------
 ARG --global REGISTRY=ghcr.io
 ARG --global IMAGE_PREFIX=hungpham10/opsense
@@ -9,69 +9,56 @@ ARG --global VERSION=latest
 ARG --global TARGET=x86_64-unknown-linux-gnu
 
 # -----------------------------------------------------------------------
-# builder — shared Rust toolchain layer (apt deps only, no source yet)
+# build-binaries — Ưu tiên lấy binary sẵn từ host, fallback về Cargo build
 # -----------------------------------------------------------------------
-builder:
-    FROM debian:bookworm-slim
-    ARG TOOLCHAIN_VERSION=1.94
+build-binaries:
+    FROM rust:1.94-slim-bookworm
+    ARG TARGET=$TARGET
+
+    WORKDIR /src
+
+    # 1. Cài đặt system dependencies để sẵn sàng cho fallback build nếu thiếu binary
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            pkg-config ca-certificates protobuf-compiler curl build-essential && \
-        apt-get clean && rm -rf /var/lib/apt/lists/* && \
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${TOOLCHAIN_VERSION} && \
-        mv /root/.cargo/bin/* /usr/local/bin/ && \
-        rustc --version && cargo --version
-    WORKDIR /app
-    SAVE IMAGE --cache-hint
+            protobuf-compiler pkg-config libssl-dev build-essential mold clang && \
+        apt-get clean && rm -rf /var/lib/apt/lists/*
+
+    # 2. Copy binaries từ host nếu đã build sẵn ở CI runner (dùng --if-exists thay cho --ignore-missing)
+    # Lưu ý: Earthly sẽ không fail nếu các đường dẫn dưới đây chưa tồn tại
+    COPY --dir --if-exists binaries target/${TARGET}/release target/release /src/bin/
+
+    # 3. Copy toàn bộ source code vào để phục vụ fallback build
+    COPY . /src/code/
+
+    # 4. Kiểm tra: Nếu có binary từ host thì copy ra /out, ngược lại tiến hành cargo build
+    RUN sh -c '\
+      mkdir -p /out && \
+      if [ -f "/src/bin/opsense" ]; then \
+        echo "--> Found pre-built binaries from host!"; \
+        cp /src/bin/opsense* /out/; \
+      elif [ -f "/src/bin/release/opsense" ]; then \
+        echo "--> Found pre-built binaries in release folder!"; \
+        cp /src/bin/release/opsense* /out/; \
+      else \
+        echo "--> Pre-built binaries not found! Fallback to Cargo build inside Earthly..."; \
+        cd /src/code && \
+        RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build --workspace --release --locked && \
+        cp target/release/opsense* /out/; \
+      fi'
+
+    SAVE ARTIFACT /out/opsense /opsense
+    SAVE ARTIFACT /out/opsense-kernel-echo /opsense-kernel-echo
+    SAVE ARTIFACT /out/opsense-kernel-python /opsense-kernel-python
+    SAVE ARTIFACT /out/opsense-kernel-julia /opsense-kernel-julia
 
 # -----------------------------------------------------------------------
-# chef — install cargo-chef + cargo-zigbuild; reused by every recipe.
-# -----------------------------------------------------------------------
-chef:
-    FROM +builder
-    RUN cargo install cargo-chef cargo-zigbuild --locked
-    WORKDIR /app
-    SAVE IMAGE --cache-hint
-
-# -----------------------------------------------------------------------
-# recipe — cargo-chef recipe.json. cargo chef prepare runs `cargo metadata`,
-# which requires real targets (src/lib.rs, src/main.rs) on disk, so the full
-# source tree is needed here (subject to .earthignore). recipe.json stays
-# byte-identical unless a Cargo.toml/Cargo.lock changes, so +recipe and the
-# `cargo chef cook` layer in +binaries remain cacheable.
-# -----------------------------------------------------------------------
-recipe:
-    FROM +chef
-    ARG TARGET
-    COPY . .
-    RUN cargo chef prepare --recipe-path recipe.json --target ${TARGET}
-    SAVE ARTIFACT recipe.json
-
-# -----------------------------------------------------------------------
-# binaries — build every release binary once, save each as a LOCAL artifact
-# so the image targets can pick them up without rebuilding.
-# cargo-zigbuild uses zig as linker — no cross-compiler toolchain needed.
-# -----------------------------------------------------------------------
-binaries:
-    FROM +recipe
-    ARG TARGET
-    RUN cargo chef cook --release --recipe-path recipe.json --target ${TARGET}
-    COPY . .
-    RUN cargo zigbuild --release --locked --target ${TARGET}
-    SAVE ARTIFACT target/${TARGET}/release/opsense
-    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-echo
-    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-python
-    SAVE ARTIFACT target/${TARGET}/release/opsense-kernel-julia
-
-# -----------------------------------------------------------------------
-# serve — Tầng 1 host: OpenResty reverse proxy + opsense + alloy
+# serve — OpenResty reverse proxy + opsense + alloy
 # -----------------------------------------------------------------------
 serve:
     FROM openresty/openresty:1.27.1.2-4-bookworm-fat
-    ARG VERSION
-    ARG TARGET
+    ARG VERSION=$VERSION
 
-    # Runtime deps: supervisor, alloy (Grafana), curl, etc. NO tor, NO sops.
+    # Runtime deps: supervisor, alloy (Grafana), curl, etc.
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             supervisor curl git gettext-base postgresql-client gnupg2 ca-certificates && \
@@ -82,7 +69,7 @@ serve:
         apt-get update && apt-get install -y alloy && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    # Lua-resty modules bundled in OpenResty image
+    # Lua-resty modules
     RUN cd /tmp && \
         git clone --depth 1 https://github.com/zmartzone/lua-resty-openidc.git && \
         cp -av lua-resty-openidc/lib/resty/* /usr/local/openresty/lualib/resty/ && \
@@ -125,8 +112,6 @@ serve:
     COPY conf/nginx/map         /usr/local/openresty/nginx/conf/map.d
     COPY conf/nginx/vhost       /usr/local/openresty/nginx/conf/http.d/vhost
     COPY conf/config.alloy      /etc/alloy/config.alloy
-
-    # Dex OIDC config (for integration test consistency; not used in prod unless Nginx points to Dex).
     COPY conf/dex/config.dev.yaml /etc/dex/config.dev.yaml
 
     # Helper scripts + entrypoint
@@ -134,9 +119,9 @@ serve:
     COPY scripts/alloy.sh      /app/alloy.sh
     COPY scripts/release.sh    /app/entrypoint.sh
 
-    # Backend binary
-    COPY (+binaries/opsense) /app/opsense
-    RUN chmod +x /app/*.sh
+    # Copy binary lấy từ artifact của build-binaries
+    COPY +build-binaries/opsense /app/opsense
+    RUN chmod +x /app/*.sh /app/opsense
 
     ENTRYPOINT ["/app/entrypoint.sh", "/usr/bin/supervisord", "-n"]
     EXPOSE 8080
@@ -144,20 +129,20 @@ serve:
     SAVE IMAGE opsense-serve:${VERSION}
 
 # -----------------------------------------------------------------------
-# runner — Tầng 2: opsense runner subcommand + default echo kernel
+# runner — opsense runner subcommand + default echo kernel
 # -----------------------------------------------------------------------
 runner:
     FROM debian:bookworm-slim
-    ARG VERSION
-    ARG TARGET
+    ARG VERSION=$VERSION
 
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             ca-certificates libssl3 && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    COPY (+binaries/opsense)             /app/opsense
-    COPY (+binaries/opsense-kernel-echo)  /app/opsense-kernel-echo
+    COPY +build-binaries/opsense             /app/opsense
+    COPY +build-binaries/opsense-kernel-echo /app/opsense-kernel-echo
+    RUN chmod +x /app/opsense /app/opsense-kernel-echo
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-echo
@@ -172,8 +157,7 @@ runner:
 # -----------------------------------------------------------------------
 runner-python:
     FROM python:3.12-slim
-    ARG VERSION
-    ARG TARGET
+    ARG VERSION=$VERSION
 
     RUN apt-get update && \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -181,8 +165,9 @@ runner-python:
         pip install --no-cache-dir numpy pandas pyarrow protobuf && \
         apt-get clean && rm -rf /var/lib/apt/lists/*
 
-    COPY (+binaries/opsense)             /app/opsense
-    COPY (+binaries/opsense-kernel-python) /app/opsense-kernel-python
+    COPY +build-binaries/opsense               /app/opsense
+    COPY +build-binaries/opsense-kernel-python /app/opsense-kernel-python
+    RUN chmod +x /app/opsense /app/opsense-kernel-python
 
     ENV OPSENSE_RUNNER_BIND=0.0.0.0:50051
     ENV OPSENSE_KERNEL=/app/opsense-kernel-python
@@ -197,11 +182,11 @@ runner-python:
 # -----------------------------------------------------------------------
 runner-julia:
     FROM julia:1.10-bookworm
-    ARG VERSION
-    ARG TARGET
+    ARG VERSION=$VERSION
 
-    COPY (+binaries/opsense)             /app/opsense
-    COPY (+binaries/opsense-kernel-julia) /app/opsense-kernel-julia
+    COPY +build-binaries/opsense              /app/opsense
+    COPY +build-binaries/opsense-kernel-julia /app/opsense-kernel-julia
+    RUN chmod +x /app/opsense /app/opsense-kernel-julia
 
     RUN julia -e 'import Pkg; Pkg.add(["Arrow", "DataFrames", "CSV", "Plots"])'
 
@@ -214,24 +199,19 @@ runner-julia:
     SAVE IMAGE opsense-runner-julia:${VERSION}
 
 # -----------------------------------------------------------------------
-# all — build & push all 4 images. CI workflow (`earthly --push +all`).
-# Tag comes from --build-arg VERSION (CI passes ${{ github.ref_name }}).
+# all — build & push cả 4 images
 # -----------------------------------------------------------------------
 all:
-    ARG TARGET
     BUILD +serve
     BUILD +runner
     BUILD +runner-python
     BUILD +runner-julia
 
 # -----------------------------------------------------------------------
-# integration-images — build 4 images locally (no registry push).
-# Tag via --build-arg VERSION (CI: ci-${{ github.sha }}; local default: local).
-# Compose reads OPSENSE_TAG, defaulting to `local`.
+# integration-images — build 4 images locally (no registry push)
 # -----------------------------------------------------------------------
 integration-images:
     ARG VERSION=local
-    ARG TARGET
     BUILD --build-arg VERSION=${VERSION} +serve
     BUILD --build-arg VERSION=${VERSION} +runner
     BUILD --build-arg VERSION=${VERSION} +runner-python

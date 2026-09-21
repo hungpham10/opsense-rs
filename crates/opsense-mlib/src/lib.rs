@@ -10,19 +10,27 @@
 pub mod ahocorasick;
 pub mod binarysearch;
 pub mod bloom;
-pub mod cast;
 pub mod grid;
-pub mod jq;
 pub mod lru;
 pub mod radix;
 pub mod rcf;
 pub mod search;
-pub mod snowflake_id;
 pub mod sgd;
-pub mod sops;
+pub mod snowflake_id;
 pub mod transition;
-pub mod vector;
 
 // Plan §1: public so external crates (opsense-store, opsense-components) can
 // name `TimeseriesStorage`/`PatternStorage`/`CategoryStorage`.
 pub mod storage;
+
+#[cfg(feature = "sops")]
+pub mod sops;
+
+#[cfg(feature = "json")]
+pub mod cast;
+
+#[cfg(feature = "json")]
+pub mod jq;
+
+#[cfg(feature = "json")]
+pub mod vector;

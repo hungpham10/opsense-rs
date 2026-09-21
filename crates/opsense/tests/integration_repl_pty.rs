@@ -46,9 +46,7 @@ fn wait_clean_exit(p: &rexpect::session::PtySession) -> Result<(), String> {
     loop {
         match p.process.status() {
             Some(WaitStatus::Exited(_, 0)) => return Ok(()),
-            Some(WaitStatus::StillAlive) | None
-                if std::time::Instant::now() > deadline =>
-            {
+            Some(WaitStatus::StillAlive) | None if std::time::Instant::now() > deadline => {
                 return Err("repl did not exit within 10s".into());
             }
             Some(WaitStatus::StillAlive) | None => {
@@ -88,7 +86,8 @@ fn repl_runner_mode_runs_code_and_exits() {
 
     // Chọn echo kernel.
     p.send_line(":echo").expect("send :echo");
-    p.exp_string(ECHO_CONNECTED).expect("connected to echo kernel");
+    p.exp_string(ECHO_CONNECTED)
+        .expect("connected to echo kernel");
 
     // Chạy code.
     p.send_line("hello world").expect("send code");

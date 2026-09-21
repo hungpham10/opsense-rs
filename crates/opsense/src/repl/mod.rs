@@ -76,6 +76,9 @@ pub async fn run(endpoint: Option<String>, runner: Option<String>) -> anyhow::Re
                 println!("Goodbye.");
                 break;
             }
+            Ok(Signal::ExternalBreak(_)) | Ok(Signal::HostCommand(_)) => continue,
+            // `Signal` is #[non_exhaustive]; ignore any future variants.
+            Ok(_) => continue,
             Err(e) => {
                 eprintln!("readline error: {e}");
                 break;

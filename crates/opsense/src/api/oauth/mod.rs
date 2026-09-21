@@ -16,12 +16,12 @@
 pub mod metrics;
 mod v1;
 
+use axum::Json;
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Json;
 
 use super::AppState;
 use crate::api::oauth::metrics::OAuthMetricsSnapshot;

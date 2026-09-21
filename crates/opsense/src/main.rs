@@ -1,8 +1,9 @@
 use clap::{CommandFactory, Parser, Subcommand};
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use opsense::{mcp, repl, runner, serve, session, token};
+use opsense::serve;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -16,101 +17,65 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run the Opsense service. Default: pipeline + REST API.
+    /// Run the Opsense service: pipeline runtime + REST/GraphQL API.
     ///
-    /// Analysis/MCP/runner modes (all hosted by serve.rs):
-    ///   --repl                        interactive REPL (kernel over IPC)
-    ///   --mcp                         MCP server over stdio (owns stdin)
-    ///   --mcp --http                  MCP server over Streamable HTTP
-    ///   --runner-bind <host:port>     host the KernelRunner gRPC server
-    /// Env overrides: OPSENSE_RUNNER_BIND, OPSENSE_MCP_PORT, GATEWAY_LISTENER
+    /// Listener mode via `GATEWAY_LISTENER` (`http`=TCP, default `unix`),
+    /// config path via `OPSENSE_CONFIG` (default `.opsense/config.toml`).
     Serve {},
-    /// Standalone execution worker: gRPC KernelRunner service over local
-    /// kernel IPC processes (`opsense runner` = execution layer of the
-    /// serve <-> runner architecture).
+
+    /// Run the MCP stdio server (Model Context Protocol client tooling).
     ///
-    /// Env overrides: OPSENSE_RUNNER_BIND, OPSENSE_KERNEL,
-    /// OPSENSE_RUNNER_KERNEL_ARGS
-    Runner {
-        #[arg(long)] bind: Option<SocketAddr>,
-        #[arg(long)] kernel: Option<PathBuf>,
-        #[arg(long, num_args = 1..)] kernel_args: Option<Vec<String>>,
-        /// Smoke check: kết nối tới chính `bind` qua gRPC Health RPC, exit 0 nếu
-        /// OK, 1 nếu lỗi. Dùng cho docker `HEALTHCHECK` và integration test.
-        #[arg(long)] health_check: bool,
-    },
-    /// Interactive thin REPL. Connects to `opsense serve` via GraphQL by
-    /// default; pass `--runner` to talk directly to a gRPC runner instead.
+    /// Thin client that speaks to a running `opsense serve` over GraphQL at
+    /// `OPSENSE_GRAPHQL_URL` (default `http://127.0.0.1:8080/graphql`).
+    Mcp {},
+
+    /// Run the opsense REPL client.
     ///
-    /// Env: OPSENSE_GRAPHQL_URL (default http://127.0.0.1:8080/graphql)
+    /// Without `--runner` this talks to a running gateway over GraphQL
+    /// (`$OPSENSE_GRAPHQL_URL`, default `http://127.0.0.1:8080/graphql`);
+    /// with `--runner` it connects directly to a kernel-runner gRPC endpoint
+    /// (kernel mode, commands `:echo`/`:py`/`:jl`, `:inline`/`:block`).
     Repl {
-        #[arg(long, help = "GraphQL endpoint URL (overrides OPSENSE_GRAPHQL_URL)")]
+        /// GraphQL endpoint to talk to (default `$OPSENSE_GRAPHQL_URL` or
+        /// `http://127.0.0.1:8080/graphql`).
+        #[arg(long)]
         endpoint: Option<String>,
-        /// gRPC endpoint of a running runner (e.g. "http://127.0.0.1:50051").
-        /// When set, the REPL switches to kernel mode and ignores `endpoint`.
-        #[arg(long, help = "gRPC runner endpoint for kernel REPL mode")]
+        /// Kernel-runner gRPC endpoint (e.g. `http://opsense-runner:50051`);
+        /// enables kernel mode.
+        #[arg(long)]
         runner: Option<String>,
     },
-    /// Alias of `serve --mcp [--http]`.
-    Mcp {
-        #[arg(long, help = "GraphQL endpoint URL (overrides OPSENSE_GRAPHQL_URL)")]
-        endpoint: Option<String>,
-    },
-    /// Service Account (long session) — Ed25519 keypair do serve mint,
-    /// dùng để REPL ký request gRPC tới Runner.
-    Session {
-        #[command(subcommand)]
-        action: SessionSubcmd,
-    },
-    /// Encrypt/decrypt helper cho `sys_token_map.token` (Postgres bytea).
-    /// Dùng để generate SQL seed với MASTER_KEY cố định.
-    ///
-    ///   opsense token encrypt "plain text"   → in `\\xHEXHEX...` (paste vào SQL)
-    ///   opsense token decrypt "\\xHEXHEX..." → in plaintext
-    ///
-    /// Master key lấy từ env `MASTER_KEY` (32 ASCII bytes).
-    Token {
-        action: String,
-        payload: String,
-    },
-}
 
-#[derive(Subcommand, Debug)]
-enum SessionSubcmd {
-    /// Mint Ed25519 keypair mới từ serve, lưu vào `~/.config/opsense/sessions/<id>.json`.
-    Issue {
-        #[arg(long, help = "Opsense host (vd https://opsense.example.com). Env: OPSENSE_HOST")]
-        host: Option<String>,
-    },
-    /// Liệt kê session: remote (gọi serve) + local file.
-    List {
-        #[arg(long)] host: Option<String>,
-    },
-    /// Revoke session trên serve + xoá file local.
-    Revoke {
-        /// session_id (base64 public key) cần revoke.
-        session_id: String,
-        #[arg(long)] host: Option<String>,
-    },
-    /// In `private_key` ra stdout — dùng để copy sang máy khác.
-    ///   opsense session resolve <id> | ssh runner 'opsense session import <id> $(cat) …'
-    Resolve {
-        session_id: String,
-    },
-    /// Import session từ `private_key` đã copy từ máy khác.
-    Import {
-        session_id: String,
-        /// base64 private key (Ed25519 secret, 32 bytes raw).
-        private_key: String,
-        /// RFC 3339 timestamp; mặc định now + 8h.
-        #[arg(long)] expires_at: Option<String>,
+    /// Run the opsense kernel runner: a standalone execution worker exposing
+    /// the `KernelRunner` gRPC service, spawning one kernel process per
+    /// session (echo / python / julia).
+    ///
+    /// Bind, kernel command and auth come from `~/.config/opsense/runner.json`
+    /// (`OPSENSE_RUNNER_CONFIG`), then env (`OPSENSE_RUNNER_BIND`,
+    /// `OPSENSE_KERNEL`, `OPSENSE_SERVE_URL`, `OPSENSE_ADMIN_TOKEN`), then
+    /// CLI overrides below.
+    Runner {
+        /// gRPC bind address (default from config/env `OPSENSE_RUNNER_BIND`,
+        /// fallback `0.0.0.0:50051`).
+        bind: Option<SocketAddr>,
+        /// Kernel binary to spawn per session; overrides config/env
+        /// `OPSENSE_KERNEL`.
+        #[arg(long = "kernel-command", value_name = "PATH")]
+        kernel_command: Option<PathBuf>,
+        /// Extra argument passed to the kernel binary (repeatable).
+        #[arg(long = "kernel-arg", value_name = "ARG")]
+        kernel_args: Vec<String>,
+        /// Connect to `bind`, run one `KernelRunner::Health` RPC, then exit.
+        /// Used by container healthchecks (`opsense runner --health-check`).
+        #[arg(long)]
+        health_check: bool,
     },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-
-    opsense_libs::vector::components::used();
+    // Register sqlx `any` drivers (mysql/postgres/sqlite) before the Resolver
+    // builds its connection pools.
     sqlx::any::install_default_drivers();
 
     tokio::runtime::Builder::new_multi_thread()
@@ -118,79 +83,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?
         .block_on(async {
             match Cli::parse().command {
-                Some(Commands::Runner { bind, kernel, kernel_args, health_check }) => {
-                    if health_check {
-                        // Smoke check: connect to bind via gRPC Health RPC, exit 0 if OK, 1 if error.
-                        match runner::health_check(bind.unwrap_or_else(|| "127.0.0.1:50051".parse().unwrap())).await {
-                            Ok(()) => std::process::exit(0),
-                            Err(e) => {
-                                eprintln!("runner health check failed: {e}");
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                    
-                    if let Err(e) = runner::run(bind, kernel, kernel_args.unwrap_or_default()).await {
-                        eprintln!("runner error: {e}");
-                        std::process::exit(1);
-                    }
-                }
-                Some(Commands::Repl { endpoint, runner }) => {
-                    if let Err(e) = repl::run(endpoint, runner).await {
-                        eprintln!("repl error: {e}");
-                        std::process::exit(1);
-                    }
-                }
-                Some(Commands::Mcp { endpoint }) => {
-                    if let Err(e) = mcp::run(endpoint).await {
-                        eprintln!("mcp error: {e}");
-                        std::process::exit(1);
-                    }
-                }
                 Some(Commands::Serve {}) => {
                     if let Err(e) = serve::run().await {
                         eprintln!("server error: {e}");
                         std::process::exit(1);
                     }
                 }
-                Some(Commands::Session { action }) => {
-                    let cmd = match action {
-                        SessionSubcmd::Issue { host } => session::cli::SessionCmd {
-                            action: session::cli::SessionAction::Issue,
-                            host,
-                        },
-                        SessionSubcmd::List { host } => session::cli::SessionCmd {
-                            action: session::cli::SessionAction::List,
-                            host,
-                        },
-                        SessionSubcmd::Revoke { session_id, host } => session::cli::SessionCmd {
-                            action: session::cli::SessionAction::Revoke(session_id),
-                            host,
-                        },
-                        SessionSubcmd::Resolve { session_id } => session::cli::SessionCmd {
-                            action: session::cli::SessionAction::Resolve(session_id),
-                            host: None,
-                        },
-                        SessionSubcmd::Import { session_id, private_key, expires_at } => {
-                            session::cli::SessionCmd {
-                                action: session::cli::SessionAction::Import {
-                                    session_id,
-                                    private_key,
-                                    expires_at,
-                                },
-                                host: None,
-                            }
-                        }
-                    };
-                    if let Err(e) = session::cli::run(cmd) {
-                        eprintln!("session error: {e}");
+                Some(Commands::Mcp {}) => {
+                    if let Err(e) = opsense::mcp::run(None).await {
+                        eprintln!("mcp error: {e}");
                         std::process::exit(1);
                     }
                 }
-                Some(Commands::Token { action, payload }) => {
-                    let master_key = std::env::var("MASTER_KEY").unwrap_or_default();
-                    if let Err(e) = token::run(&master_key, &action, &payload).await {
-                        eprintln!("token error: {e}");
+                Some(Commands::Repl { endpoint, runner }) => {
+                    if let Err(e) = opsense::repl::run(endpoint, runner).await {
+                        eprintln!("repl error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Runner {
+                    bind,
+                    kernel_command,
+                    kernel_args,
+                    health_check,
+                }) => {
+                    if health_check {
+                        if let Err(e) = opsense::runner::health_check(bind).await {
+                            eprintln!("runner error: {e}");
+                            std::process::exit(1);
+                        }
+                    } else if let Err(e) =
+                        opsense::runner::run(bind, kernel_command, kernel_args).await
+                    {
+                        eprintln!("runner error: {e}");
                         std::process::exit(1);
                     }
                 }

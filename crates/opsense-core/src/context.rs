@@ -146,7 +146,7 @@ impl Context {
     }
 }
 
-impl opsense_libs::vector::runtime::Context for Context {
+impl opsense_mlib::vector::runtime::Context for Context {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

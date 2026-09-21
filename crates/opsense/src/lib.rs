@@ -1,15 +1,30 @@
+//! Opsense gateway binary — library crate.
+//!
+//! Exported slices: `serve` (HTTP / Unix-socket gateway), `api` (admin /
+//! oauth / repl GraphQL), `client` (GraphQL thin client + gRPC
+//! [`client::RunnerClient`]), `repl` (CLI REPL, kernel `--runner` mode) and
+//! `mcp` (MCP stdio server over the client). The kernel-runner (gRPC server),
+//! session and token modules are being rebuilt on top of the refactored
+//! `opsense-core` / `opsense-mlib` / `opsense-model` crates and are not
+//! exported yet.
+
 pub mod api;
 pub mod client;
-pub mod init;
 pub mod mcp;
 pub mod repl;
 pub mod runner;
 pub mod serve;
-pub mod session;
-pub mod token;
+
+/// Alias `opsense-mlib` under its pre-refactor name `opsense_libs`, matching
+/// the forms used by `opsense-components` and by the runner-client code
+/// (`opsense_libs::sops::{decrypt,encrypt}`, challenge-response handshake).
+#[allow(unused_imports)]
+use opsense_mlib as opsense_libs;
 
 /// Link the `opsense-qlib` crate so its typetag-registered pipeline
 /// components join the component inventory deserialized from
 /// pipeline TOML. Same mechanism as `opsense-components`.
-#[allow(unused_imports)]
-use opsense_qlib as _qlib_inventory;
+/// The bare `use` is intentional (side-effect linking), so clippy's
+/// `single_component_path_imports` is allowed here.
+#[allow(unused_imports, clippy::single_component_path_imports)]
+use opsense_qlib;
