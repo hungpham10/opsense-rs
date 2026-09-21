@@ -25,14 +25,19 @@ build-binaries:
 
     # 2. Copy binaries từ host nếu đã build sẵn ở CI runner (dùng --if-exists thay cho --ignore-missing)
     # Lưu ý: Earthly sẽ không fail nếu các đường dẫn dưới đây chưa tồn tại
-    COPY --dir --if-exists binaries target/${TARGET}/release target/release /src/bin/
+    # KHÔNG dùng --dir để nội dung binaries/ được copy thẳng vào /src/bin/ (không tạo thư mục con binaries/)
+    COPY --if-exists binaries/ /src/bin/
+    # target/ bị .earthignore chặn; giữ lại dòng dưới làm fallback nhưng thực tế không bao giờ copy được
+    COPY --dir --if-exists target/${TARGET}/release target/release /src/bin/
 
     # 3. Copy toàn bộ source code vào để phục vụ fallback build
     COPY . /src/code/
 
-    # 4. Kiểm tra: Nếu có binary từ host thì copy ra /out, ngược lại tiến hành cargo build
+    # 4. Kiểm tra & log: Nếu có binary từ host thì copy ra /out, ngược lại tiến hành cargo build
     RUN sh -c '\
       mkdir -p /out && \
+      echo "=== Verifying pre-built binaries in /src/bin ===" && \
+      if [ -d "/src/bin" ]; then ls -la /src/bin/; else echo "/src/bin does not exist (no pre-built binaries copied)"; fi && \
       if [ -f "/src/bin/opsense" ]; then \
         echo "--> Found pre-built binaries from host!"; \
         cp /src/bin/opsense* /out/; \
@@ -44,7 +49,9 @@ build-binaries:
         cd /src/code && \
         RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build --workspace --release --locked && \
         cp target/release/opsense* /out/; \
-      fi'
+      fi && \
+      echo "=== Final artifacts in /out ===" && \
+      ls -la /out/'
 
     SAVE ARTIFACT /out/opsense /opsense
     SAVE ARTIFACT /out/opsense-kernel-echo /opsense-kernel-echo
