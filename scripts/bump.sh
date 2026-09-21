@@ -20,6 +20,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Path to version file (repository root)
 VERSION_FILE="$SCRIPT_DIR/version.txt"
+# Cargo manifest/lockfile (cargo-dist reads the Cargo version, not version.txt)
+CARGO_TOML="$SCRIPT_DIR/Cargo.toml"
+CARGO_LOCK="$SCRIPT_DIR/Cargo.lock"
 
 # ------------------------------------------------------------
 # Resolve current version
@@ -76,9 +79,35 @@ echo "$NEW_VERSION" > "$VERSION_FILE"
 echo "Bumped version: $CURRENT_VERSION -> $NEW_VERSION"
 
 # ------------------------------------------------------------
+# Sync the Cargo workspace version with version.txt
+# ------------------------------------------------------------
+# cargo-dist derives the release version from the Cargo package version
+# (every crate uses `version.workspace = true`), not from version.txt. If
+# the two drift, `dist host --tag=v<version>` aborts with
+# "This workspace doesn't have anything for dist to Release!".
+if [[ -f "$CARGO_TOML" ]]; then
+    # Only the `[workspace.package]` version is a line that starts with
+    # `version = `; dependency versions are written inline.
+    sed -E "s/^version = \"[^\"]*\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML" > "$CARGO_TOML.tmp"
+    mv "$CARGO_TOML.tmp" "$CARGO_TOML"
+
+    # Refresh Cargo.lock so workspace member versions match the manifest
+    # (otherwise `cargo --locked` builds fail).
+    if [[ -f "$CARGO_LOCK" ]] && command -v cargo >/dev/null 2>&1; then
+        cargo update --workspace --offline || cargo update --workspace
+    fi
+    echo "Synced Cargo workspace version to $NEW_VERSION"
+else
+    echo "Warning: $CARGO_TOML not found; skipped Cargo version sync." >&2
+fi
+
+# ------------------------------------------------------------
 # Git operations
 # ------------------------------------------------------------
-git add "$VERSION_FILE"
+git add "$VERSION_FILE" "$CARGO_TOML"
+if [[ -f "$CARGO_LOCK" ]]; then
+    git add "$CARGO_LOCK"
+fi
 git commit -m "chore: bump version to $NEW_VERSION"
 git push
 # git tag "v$NEW_VERSION"

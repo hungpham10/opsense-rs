@@ -3777,7 +3777,7 @@ dependencies = [
 
 [[package]]
 name = "opsense"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "arrow-csv",
@@ -3829,7 +3829,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-components"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "async-trait",
  "futures",
@@ -3848,7 +3848,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-core"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "async-graphql",
  "config",
@@ -3861,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-echo"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3873,7 +3873,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-julia"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3883,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-python"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3893,7 +3893,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-macros"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "quote",
  "syn 3.0.6",
@@ -3901,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-mlib"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "aes-gcm",
  "arrow-array",
@@ -3929,7 +3929,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-model"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -3952,7 +3952,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-proto"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3968,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-qlib"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "async-trait",
  "csv",
@@ -3987,7 +3987,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-runner"
-version = "1.0.0"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "arrow-array",
