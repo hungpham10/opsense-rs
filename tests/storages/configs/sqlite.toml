@@ -1,0 +1,36 @@
+# Case: SQLite storage — một file riêng cho mỗi station.
+# Mục đích: verify persistence qua SQLite: WAL + checkpoint,
+# dữ liệu sống qua restart.
+
+[engine]
+poll_interval_seconds = 10
+cache_block_seconds = 5
+cache_max_blocks = 12
+
+[storage]
+backend = "sqlite"
+data_dir = "/app/.opsense/station.sqlite"
+
+[capacity]
+cpu_usage = 4.0
+mem_usage = 16.0
+disk_usage = 1.0
+
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 10
+
+[[pipeline.components]]
+type = "http_source"
+id = "sqlite-metrics"
+inputs = ["clock"]
+url = "http://local-metrics:8080/metrics"
+interval_secs = 10
+timeout_secs = 10
+station = true
+
+[[pipeline.components]]
+type = "timeseries_station_sink"
+id = "tsdb"
+inputs = ["sqlite-metrics"]

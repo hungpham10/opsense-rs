@@ -1,7 +1,7 @@
 # Overlay cho S3 lakehouse — thêm Prometheus + node-exporter + metrics-adapter.
-# Dùng kèm: docker compose -f docker-compose.yml -f tests/s3-lakehouse/docker-compose.s3.yml up -d --profile s3 --profile prometheus
+# Dùng kèm: docker compose -f docker-compose.yml -f tests/storages/docker-compose.s3.yml up -d --profile s3 --profile prometheus
 #
-# Hoặc: docker compose -f docker-compose.yml -f tests/s3-lakehouse/docker-compose.s3.yml --profile s3 --profile prometheus up -d
+# Hoặc: docker compose -f docker-compose.yml -f tests/storages/docker-compose.s3.yml --profile s3 --profile prometheus up -d
 
 services:
   prometheus:

@@ -1,5 +1,5 @@
 # Overlay cho local case — thêm local-metrics server (static observation JSON).
-# Dùng kèm: docker compose -f docker-compose.yml -f tests/s3-lakehouse/docker-compose.local.yml --profile local up -d
+# Dùng kèm: docker compose -f docker-compose.yml -f tests/storages/docker-compose.local.yml --profile local up -d
 
 services:
   local-metrics:

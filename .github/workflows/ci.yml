@@ -208,7 +208,7 @@ jobs:
         run: OPSENSE_TAG=${{ env.OPSENSE_TAG }} docker compose down -v
 
   # S3 lakehouse end-to-end — 3 cases (local / s3-minio / prometheus-real).
-  test-s3-lakehouse:
+  test-storages:
     name: S3 Lakehouse Tests
     needs: build
     runs-on: ubuntu-latest
@@ -279,7 +279,7 @@ jobs:
             --VERSION=${{ env.OPSENSE_TAG }} \
             --TARGET=${{ env.TARGET }}
 
-      - name: Run S3 lakehouse test cases
+      - name: Run storage backend test cases
         env:
           OPSENSE_TAG: ${{ env.OPSENSE_TAG }}
           OPSENSE_S3_ACCESS_KEY_ID: opsense
@@ -291,27 +291,5 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
         run: |
           set -e
-          CASES="local s3 prometheus"
-          for case in $$CASES; do
-            echo "=========================================="
-            echo "CASE: $case"
-            echo "=========================================="
-            case_up="test-s3-lake-${case}-up"
-            make "$$case_up"
-            make test-s3-lake-wait
-            # Đợi metrics-adapter có data (case s3/prom).
-            if [ "$$case" != "local" ]; then
-              for i in $$(seq 1 20); do
-                curl -fsS http://localhost:8081/metrics >/dev/null 2>&1 && break
-                sleep 3
-              done
-            fi
-            # Đợi opsense-serve healthy.
-            for i in $$(seq 1 20); do
-              curl -fsS http://localhost:8080/health >/dev/null 2>&1 && break
-              sleep 3
-            done
-            make test-s3-lake-validate
-            make test-s3-lake-down
-          done
-          echo "All S3 lakehouse cases passed."
+          make test-storage-run-all
+          echo "All storage backend cases passed."
