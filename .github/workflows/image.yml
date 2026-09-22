@@ -67,15 +67,21 @@ jobs:
       - name: Build cross-arch binary
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}
 
+      # Stage binaries in a neutral dir so the artifact layout is flat
+      # (same pattern as .github/workflows/ci.yml, which is proven to work).
+      - name: Prepare artifact directory
+        run: |
+          mkdir -p dist-bin
+          cp target/${{ matrix.target }}/release/opsense \
+             target/${{ matrix.target }}/release/opsense-kernel-echo \
+             target/${{ matrix.target }}/release/opsense-kernel-python \
+             target/${{ matrix.target }}/release/opsense-kernel-julia dist-bin/
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: rust-binaries-${{ matrix.target }}
-          path: |
-            target/${{ matrix.target }}/release/opsense
-            target/${{ matrix.target }}/release/opsense-kernel-echo
-            target/${{ matrix.target }}/release/opsense-kernel-python
-            target/${{ matrix.target }}/release/opsense-kernel-julia
+          path: dist-bin/*
           retention-days: 1
 
   # Job 2: Build & Push Container Images bang Earthly
@@ -91,16 +97,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: rust-binaries-x86_64-unknown-linux-gnu
-          path: target/x86_64-unknown-linux-gnu/release/
+          path: dist-bin-amd64/
 
       - name: Download ARM64 binaries
         uses: actions/download-artifact@v4
         with:
           name: rust-binaries-aarch64-unknown-linux-gnu
-          path: target/aarch64-unknown-linux-gnu/release/
-
-      - name: Set permissions
-        run: chmod +x target/*/release/*
+          path: dist-bin-arm64/
 
       - name: Set up QEMU & Earthly
         uses: docker/setup-qemu-action@v3
@@ -127,6 +130,15 @@ jobs:
           fi
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
+      # Stage pre-built binaries for Earthly. +build-binaries only looks for
+      # host binaries in <repo>/binaries/ (target/ is excluded by .earthignore),
+      # so without this step Earthly falls back to a full in-Earthly cargo build.
+      - name: Stage AMD64 binaries for Earthly
+        run: |
+          mkdir -p binaries
+          cp dist-bin-amd64/* binaries/
+          chmod +x binaries/*
+
       - name: Build and push AMD64 image
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -138,6 +150,14 @@ jobs:
             --build-arg REGISTRY="${REGISTRY}" \
             --build-arg IMAGE_PREFIX="${IMAGE_PREFIX}" \
             +all
+
+      # Overwrite binaries/ with the ARM64 build: each platform must have its
+      # own pre-built binaries staged when its Earthly run executes.
+      - name: Stage ARM64 binaries for Earthly
+        run: |
+          rm -f binaries/*
+          cp dist-bin-arm64/* binaries/
+          chmod +x binaries/*
 
       - name: Build and push ARM64 image
         env:
