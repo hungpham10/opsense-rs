@@ -21,7 +21,11 @@ permissions:
 jobs:
   build:
     name: Build Release Binaries
-    runs-on: ubuntu-latest
+    # Pin to ubuntu-22.04 (glibc 2.35) so prebuilt binaries run on the Debian
+    # bookworm-based runtime images (glibc 2.36). `ubuntu-latest` is 24.04
+    # (glibc 2.39) and produces binaries requiring GLIBC_2.38/2.39 symbols,
+    # which fail to load in the runner-julia / runner / serve containers.
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4

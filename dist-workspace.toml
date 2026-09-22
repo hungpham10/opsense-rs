@@ -26,3 +26,15 @@ targets = [
 ]
 # Where to host releases
 hosting = "github"
+
+# System dependencies that cargo-dist must install on each CI runner *before*
+# building. opsense-proto's build script compiles .proto files with protoc
+# (via tonic-prost-build), and protoc is not vendored by any crate.
+[dist.dependencies.apt]
+protobuf-compiler = '*'
+
+[dist.dependencies.homebrew]
+protobuf = '*'
+
+[dist.dependencies.chocolatey]
+protoc = '*'
