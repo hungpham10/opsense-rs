@@ -170,6 +170,46 @@ services:
       start_period: 30s
     networks: [opsense-net]
 
+  # MinIO — object store S3-compatible cho lakehouse parquet (local dev).
+  # Endpoint: http://minio:9000 (path-style, OPSENSE_S3_ENDPOINT).
+  # Bucket `opsense-lake` được tạo tự động bởi minio-bucket service.
+  minio:
+    image: minio/minio:latest
+    container_name: opsense-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Console (http://localhost:9001)
+    environment:
+      MINIO_ROOT_USER: ${OPSENSE_S3_ACCESS_KEY_ID:-opsense}
+      MINIO_ROOT_PASSWORD: ${OPSENSE_S3_SECRET_ACCESS_KEY:-opsense123}
+    volumes:
+      - minio-data:/data
+    profiles: [s3]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks: [opsense-net]
+
+  # Tạo bucket opsense-lake trên MinIO ngay khi MinIO sẵn sàng.
+  minio-bucket:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "mc alias set myminio http://minio:9000 opsense opsense123 &&
+      mc mb --ignore-existing myminio/opsense-lake &&
+      mc ls myminio/opsense-lake"
+    profiles: [s3]
+    networks: [opsense-net]
+
 networks:
   opsense-net:
     driver: bridge
+
+volumes:
+  minio-data:

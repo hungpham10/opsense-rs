@@ -96,6 +96,10 @@ internal-runner-tests = []
 # (see `.github/workflows/ci.yml`); they skip gracefully when the stack is
 # down (`OPSENSE_INTEGRATION` unset).
 [dev-dependencies]
+opsense-mlib = { path = "../opsense-mlib", features = ["json", "parquet"] }
+object_store = { workspace = true }
+tempfile = "3"
+futures-util = { workspace = true }
 rexpect = "0.5"
 nix = "0.25"
 jsonwebtoken = "9"

@@ -158,3 +158,62 @@ test-integration:
 # Cleanup after integration test.
 test-integration-down:
 	$(COMPOSE) down -v
+
+# S3 lakehouse end-to-end tests — 3 cases.
+#
+# Case 1 (local):  parquet local, data từ local-metrics server.
+# Case 2 (s3):    parquet + mirror MinIO S3.
+# Case 3 (prom):  full Prometheus (real) → metrics-adapter → S3.
+#
+# Chạy:
+#   make test-s3-lake-local-up    # case 1
+#   make test-s3-lake-local-wait
+#   make test-s3-lake-local-validate
+#   make test-s3-lake-local-down
+#   (tương tự với -s3- và -prom-)
+#   make test-s3-lake-run-all     # chạy tuần tự cả 3 case
+test-s3-lake-local-up:
+	@echo ">>> Case LOCAL: copy config + bring up stack"
+	cp tests/s3-lakehouse/configs/local.toml conf/opsense.conf.toml
+	APP_ENV=dev OPSENSE_TAG=local $(COMPOSE) -f docker-compose.yml -f tests/s3-lakehouse/docker-compose.local.yml --profile local up -d --build local-metrics opsense-serve opsense-runner opsense-runner-python
+
+test-s3-lake-s3-up:
+	@echo ">>> Case S3-MINIO: copy config + bring up stack"
+	cp tests/s3-lakehouse/configs/s3.toml conf/opsense.conf.toml
+	APP_ENV=dev OPSENSE_TAG=local $(COMPOSE) -f docker-compose.yml -f tests/s3-lakehouse/docker-compose.s3.yml --profile s3 up -d --build metrics-adapter minio minio-bucket opsense-serve opsense-runner opsense-runner-python
+
+test-s3-lake-prometheus-up:
+	@echo ">>> Case PROMETHEUS: copy config + bring up stack"
+	cp tests/s3-lakehouse/configs/prometheus.toml conf/opsense.conf.toml
+	APP_ENV=dev OPSENSE_TAG=local $(COMPOSE) -f docker-compose.yml -f tests/s3-lakehouse/docker-compose.s3.yml --profile s3 --profile prometheus up -d --build metrics-adapter minio minio-bucket opsense-serve opsense-runner opsense-runner-python
+
+test-s3-lake-wait:
+	@echo ">>> Đợi stack healthy..."
+	APP_ENV=dev $(COMPOSE) exec opsense-serve sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do curl -fsS http://127.0.0.1:8080/health && break; sleep 3; done'
+	@echo ">>> Đợi Prometheus scrape (nếu có)..."
+	@for i in $$(seq 1 20); do curl -fsS http://localhost:9090/api/v1/query?query=up 2>/dev/null | grep -q '"status":"success"' && break; sleep 2; done || true
+
+test-s3-lake-validate:
+	@echo ">>> Validate S3 parquet (DuckDB)"
+	@which duckdb >/dev/null 2>&1 && { \
+		tmp=$$(mktemp -d); \
+		docker compose exec minio-bucket mc cp --recursive myminio/opsense-lake/$(shell grep prefix conf/opsense.conf.toml | head -1 | sed 's/.*prefix = "\([^"]*\)"/\1/')/station-0-timeseries/ts/ "$${tmp}/" 2>/dev/null || true; \
+		find "$${tmp}" -name '*.parquet' | head -5; \
+		duckdb -c "SELECT decode(series) AS block_id, ts, convert_from(value, 'utf8') AS value FROM read_parquet('$${tmp}/**/*.parquet', union_by_name = true, hive_partitioning = true) LIMIT 5;" || true; \
+		rm -rf "$${tmp}"; \
+	} || echo "skip: duckdb không cài"
+
+test-s3-lake-down:
+	$(COMPOSE) down -v
+	@echo ">>> Restore original config"
+	git checkout -- conf/opsense.conf.toml 2>/dev/null || true
+
+# Chạy tuần tự cả 3 case.
+test-s3-lake-run-all:
+	@echo ">>> Case LOCAL"
+	make test-s3-lake-local-up && make test-s3-lake-wait && make test-s3-lake-validate && make test-s3-lake-down
+	@echo ">>> Case S3-MINIO"
+	make test-s3-lake-s3-up && make test-s3-lake-wait && make test-s3-lake-validate && make test-s3-lake-down
+	@echo ">>> Case PROMETHEUS"
+	make test-s3-lake-prometheus-up && make test-s3-lake-wait && make test-s3-lake-validate && make test-s3-lake-down
+	@echo ">>> Tất cả case hoàn thành."

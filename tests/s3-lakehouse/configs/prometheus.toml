@@ -1,0 +1,47 @@
+# Case 3: Full end-to-end — Prometheus (real metrics) → metrics-adapter
+# → opsense http_source → Lakehouse parquet → S3 (MinIO).
+# Dữ liệu thật: node_cpu_seconds_total, node_memory_MemAvailable_bytes, up.
+
+[engine]
+poll_interval_seconds = 10
+cache_block_seconds = 5
+cache_max_blocks = 12
+
+[storage]
+backend = "parquet"
+data_dir = "/app/.opsense/parquet"
+block_secs = 5
+retention_secs = 300
+# parquet_compression = "zstd"
+
+[storage.s3]
+bucket = "opsense-lake"
+prefix = "test-case-3"
+endpoint = "http://minio:9000"
+url_style = "path"
+s3_flush_interval_secs = 15
+s3_snapshot_interval_secs = 60
+
+[capacity]
+up = 1.0
+node_cpu_seconds_total = 4.0
+node_memory_MemAvailable_bytes = 16.0
+
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 10
+
+[[pipeline.components]]
+type = "http_source"
+id = "prom-metrics"
+inputs = ["clock"]
+url = "http://metrics-adapter:8080/metrics"
+interval_secs = 10
+timeout_secs = 10
+station = true
+
+[[pipeline.components]]
+type = "timeseries_station_sink"
+id = "tsdb"
+inputs = ["prom-metrics"]

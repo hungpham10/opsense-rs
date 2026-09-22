@@ -1,0 +1,18 @@
+# Overlay cho local case — thêm local-metrics server (static observation JSON).
+# Dùng kèm: docker compose -f docker-compose.yml -f tests/s3-lakehouse/docker-compose.local.yml --profile local up -d
+
+services:
+  local-metrics:
+    profiles: [local]
+    build:
+      context: ./local-metrics
+      dockerfile: Dockerfile
+    container_name: opsense-local-metrics
+    ports:
+      - "8082:8080"
+    networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/-/healthy || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
