@@ -231,7 +231,7 @@ const TABLES: &[(&str, &[Col])] = &[
             Col::I("id"),
             Col::B("series"),
             Col::I("ts"),
-            Col::B("value"),
+            Col::S("value"),
         ],
     ),
 ];
@@ -648,10 +648,10 @@ fn ts_row(row: &[Cell]) -> (u64, Vec<u8>, u64, Vec<u8>) {
         unreachable!()
     };
     let Cell::I(ts) = &row[2] else { unreachable!() };
-    let Cell::B(value) = &row[3] else {
+    let Cell::S(value) = &row[3] else {
         unreachable!()
     };
-    (*id, series.clone(), *ts, value.clone())
+    (*id, series.clone(), *ts, value.clone().into_bytes())
 }
 
 /// Biến một `WalOp` thành thay đổi state — dùng chung cho live ops và replay.
@@ -831,7 +831,7 @@ fn table_rows(s: &Inner, name: &str) -> Vec<Vec<Cell>> {
                     Cell::I(id),
                     Cell::B(series.clone()),
                     Cell::I(*ts),
-                    Cell::B(value.clone()),
+                    Cell::S(String::from_utf8(value.clone()).unwrap()),
                 ]);
             }
         }
@@ -1179,7 +1179,7 @@ impl LakehouseStorage {
                             Cell::I(*id),
                             Cell::B(series.clone()),
                             Cell::I(*ts),
-                            Cell::B(value.clone()),
+                            Cell::S(String::from_utf8(value.clone()).unwrap()),
                         ]
                     })
                     .collect::<Vec<_>>();

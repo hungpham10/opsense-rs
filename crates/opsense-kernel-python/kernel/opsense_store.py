@@ -110,12 +110,12 @@ def _query_parquet(
         _configure_s3(con)
         sql = f"""
         WITH blocks AS (
-            SELECT convert_from(value, 'utf8') AS blk
+            SELECT value AS block_json
             FROM read_parquet('{glob}', union_by_name = true, hive_partitioning = true)
             WHERE blk BETWEEN {first} AND {last}
               AND decode(series) IN ({block_list})
         ), items AS (
-            SELECT unnest(CAST(json_extract(blk, '$.items') AS JSON[])) AS j
+            SELECT unnest(CAST(json_extract(block_json, '$.items') AS JSON[])) AS j
             FROM blocks
         )
         SELECT
