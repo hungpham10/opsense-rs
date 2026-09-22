@@ -1,5 +1,5 @@
-# Case 1: Local parquet storage — không S3. Pipeline clock → local-metrics → station.
-# Mục đích: verify parquet lake time-partitioned chạy trên local, WAL + checkpoint.
+# Local parquet storage — không S3.
+# Pipeline: clock → timeseries_station_sink (station lưu vào local parquet).
 
 [engine]
 poll_interval_seconds = 10
@@ -24,15 +24,6 @@ id = "clock"
 interval_secs = 10
 
 [[pipeline.components]]
-type = "http_source"
-id = "local-metrics"
-inputs = ["clock"]
-url = "http://local-metrics:8080/metrics"
-interval_secs = 10
-timeout_secs = 10
-station = true
-
-[[pipeline.components]]
 type = "timeseries_station_sink"
 id = "tsdb"
-inputs = ["local-metrics"]
+inputs = ["clock"]

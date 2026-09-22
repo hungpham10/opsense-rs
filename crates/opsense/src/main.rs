@@ -46,6 +46,16 @@ enum Commands {
         runner: Option<String>,
     },
 
+    /// Validate config.toml without running the service.
+    ///
+    /// Reads config from `OPSENSE_CONFIG` (default `.opsense/config.toml`)
+    /// or explicit `--config` path, parses and validates it.
+    Validate {
+        /// Explicit config file path (overrides OPSENSE_CONFIG).
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+
     /// Run the opsense kernel runner: a standalone execution worker exposing
     /// the `KernelRunner` gRPC service, spawning one kernel process per
     /// session (echo / python / julia).
@@ -99,6 +109,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Err(e) = opsense::repl::run(endpoint, runner).await {
                         eprintln!("repl error: {e}");
                         std::process::exit(1);
+                    }
+                }
+                Some(Commands::Validate { config }) => {
+                    if let Err(e) = opsense::serve::validate_config(config).await {
+                        eprintln!("config validation failed: {e}");
+                        std::process::exit(1);
+                    } else {
+                        println!("config validation passed");
                     }
                 }
                 Some(Commands::Runner {

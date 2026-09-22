@@ -158,22 +158,31 @@ pub async fn routes(app_state: AppState) -> Result<Router, Error> {
     Ok(router)
 }
 
-fn config_path() -> String {
+fn config_path() -> PathBuf {
     if let Ok(p) = std::env::var("OPSENSE_CONFIG") {
-        return p;
+        return PathBuf::from(p);
     }
     let dot = Path::new(".opsense/config.toml");
     if dot.exists() {
-        return ".opsense/config.toml".to_string();
+        return PathBuf::from(".opsense/config.toml");
     }
-
-    "conf/opsense.conf.toml".to_string()
+    PathBuf::from("conf/opsense.conf.toml")
 }
 
 fn load_config() -> Result<Config, Error> {
     let config_path = config_path();
-    Config::load(Path::new(&config_path))
+    Config::load(&config_path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// Validate config.toml from path or OPSENSE_CONFIG env.
+pub async fn validate_config(opt_path: Option<PathBuf>) -> Result<(), Error> {
+    let path = opt_path.unwrap_or_else(config_path);
+    let cfg = Config::load(&path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    cfg.validate()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    Ok(())
 }
 
 pub async fn run() -> std::io::Result<()> {

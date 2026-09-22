@@ -174,7 +174,8 @@ services:
   # Endpoint: http://minio:9000 (path-style, OPSENSE_S3_ENDPOINT).
   # Bucket `opsense-lake` được tạo tự động bởi minio-bucket service.
   minio:
-    image: minio/minio:latest
+    # Use quay.io to avoid Docker Hub rate limits
+    image: quay.io/minio/minio:latest
     container_name: opsense-minio
     command: server /data --console-address ":9001"
     ports:
@@ -185,7 +186,6 @@ services:
       MINIO_ROOT_PASSWORD: ${OPSENSE_S3_SECRET_ACCESS_KEY:-opsense123}
     volumes:
       - minio-data:/data
-    profiles: [s3]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
       interval: 5s
@@ -195,17 +195,27 @@ services:
     networks: [opsense-net]
 
   # Tạo bucket opsense-lake trên MinIO ngay khi MinIO sẵn sàng.
+  # Run as init container that stays alive; healthcheck passes after bucket creation.
   minio-bucket:
-    image: minio/mc:latest
+    # Use quay.io to avoid Docker Hub rate limits
+    image: quay.io/minio/mc:latest
     depends_on:
       minio:
         condition: service_healthy
     entrypoint: >
       sh -c "mc alias set myminio http://minio:9000 opsense opsense123 &&
       mc mb --ignore-existing myminio/opsense-lake &&
-      mc ls myminio/opsense-lake"
-    profiles: [s3]
+      mc ls myminio/opsense-lake &&
+      touch /tmp/bucket-ready &&
+      echo 'Bucket ready, keeping container alive...' &&
+      sleep infinity"
     networks: [opsense-net]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/bucket-ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
 
 networks:
   opsense-net:
