@@ -195,45 +195,77 @@ pub struct PipelineConfig {
 /// Storage backend selection for the pipeline stores.
 ///
 /// `backend` selects the main store: `"memory"` (LRU, default — easiest for
-/// tests), `"duckdb"` (Parquet lakehouse via DuckDB) or `"lmdb"` (local
-/// key-value, range-scannable). `mirror` optionally double-writes to a second
-/// backend (e.g. duckdb + lmdb).
+/// tests), `"parquet"` (Parquet storage — canonical; local filesystem hoặc
+/// object store khi `data_dir` là `s3://…`) hoặc `"sqlite"` (local file).
+/// `mirror` optionally double-writes to a second backend.
+/// Tên backend cũ `"duckdb"`/`"s3"`/`"lakehouse"` vẫn được chấp nhận trong code
+/// như alias deprecated (tất cả mở cùng Parquet storage) nhưng không nên dùng
+/// trong config mới.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
     pub backend: String,
     pub data_dir: String,
 
-    /// When > 0, a background task trims the main store every minute: points
-    /// at or before `now - retention_secs` are dropped (whole block
-    /// partitions for the parquet lakehouse). 0 keeps history forever.
+    /// When > 0, a background task trims the main store every minute: whole
+    /// `ts/blk=<id>…` partitions whose data is older than `now - retention_secs`
+    /// are dropped. 0 keeps history forever.
     pub retention_secs: u64,
 
-    /// Width of one parquet block partition for the lakehouse backends
-    /// (`duckdb`, `s3`): points are bucketed into `floor(ts / block_secs)`
-    /// and written as `<stage>/blk=<start_ts>/batch_NNN.parquet`. Larger
-    /// blocks mean fewer files (cheaper listing) but coarser retention
-    /// granularity. Default 3600 (one hour).
+    /// Width of one timeseries block partition (seconds) for the `"parquet"`
+    /// backend: points are bucketed into `block_id = floor(ts / block_secs)`
+    /// and written as `ts/blk=<block_id>/batch-<millis>.parquet`. External
+    /// engines (Spark/DuckDB/Polars) prune on the `blk=` partition column.
+    /// Larger blocks mean fewer files (cheaper S3 listing) but coarser
+    /// retention granularity. Default 3600 (one hour).
     pub block_secs: u64,
 
     pub mirror: Option<StorageBackendConfig>,
 
-    /// Nén Parquet cho lakehouse writes: `zstd` (mặc định) | `snappy` |
+    /// Nén Parquet cho parquet writes: `zstd` (mặc định) | `snappy` |
     /// `gzip` | `uncompressed`. ZSTD giảm đáng kể dung lượng/chi phí S3.
     #[serde(default = "default_parquet_compression")]
     pub parquet_compression: String,
 
-    /// Kết nối S3 cho DuckDB httpfs khi backend/data_dir là `s3://`.
+    /// Kết nối S3 cho Parquet storage khi `data_dir` là `s3://`.
     /// Mỗi field thiếu trong TOML sẽ được bù bằng env `OPSENSE_S3_*`.
     #[serde(default)]
     pub s3: Option<S3Config>,
+
+    /// Khi bật `[storage].s3`: tần suất (giây) station tự flush buffer timeseries
+    /// ra lake parquet + mirror S3 (`ts/blk=…/batch-*.parquet`). 0 = tắt lịch
+    /// (chỉ flush khi buffer đạt ngưỡng `flush_threshold`). Mặc định 60.
+    #[serde(default = "default_s3_flush_interval_secs")]
+    pub s3_flush_interval_secs: u64,
+
+    /// Khi bật `[storage].s3`: tần suất (giây) snapshot/checkpoint định kỳ —
+    /// compact WAL + mirror state lên `state/` để process khác restore được.
+    /// Mặc định 600.
+    #[serde(default = "default_s3_snapshot_interval_secs")]
+    pub s3_snapshot_interval_secs: u64,
 }
 
-/// Kết nối S3 cho DuckDB httpfs. Các field đều Option để cho phép dùng biến
-/// môi trường AWS chuẩn của httpfs khi không khai báo gì.
+fn default_s3_flush_interval_secs() -> u64 {
+    60
+}
+
+fn default_s3_snapshot_interval_secs() -> u64 {
+    600
+}
+
+/// Kết nối S3 cho Parquet storage — nơi đặt lake: toàn bộ data-parquet sống ở
+/// `s3://{bucket}/{prefix}/{station}/ts/…` (timeseries, đọc được bởi
+/// Spark/Polars/DuckDB) và `…/{station}/state/…` (checkpoint để mở lại). Các
+/// field đều Option để cho phép dùng biến môi trường AWS chuẩn khi không khai
+/// báo gì.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct S3Config {
+    /// Bucket chứa lake (bắt buộc khi dùng S3). Bù bằng env `OPSENSE_S3_BUCKET`.
+    pub bucket: String,
+    /// Prefix gốc của lake, VD `"opsense/prod"` — không `/` ở hai đầu. Bù bằng
+    /// env `OPSENSE_S3_PREFIX`.
+    pub prefix: String,
     /// Endpoint tuỳ ý (MinIO/self-hosted). Bỏ trống = AWS public.
     pub endpoint: Option<String>,
     pub region: Option<String>,
@@ -252,12 +284,14 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             backend: "memory".to_string(),
-            data_dir: ".opsense/lakehouse".to_string(),
+            data_dir: ".opsense/parquet".to_string(),
             retention_secs: 0,
             block_secs: 3600,
             mirror: None,
             parquet_compression: default_parquet_compression(),
             s3: None,
+            s3_flush_interval_secs: default_s3_flush_interval_secs(),
+            s3_snapshot_interval_secs: default_s3_snapshot_interval_secs(),
         }
     }
 }
@@ -272,8 +306,8 @@ pub struct StorageBackendConfig {
 impl Default for StorageBackendConfig {
     fn default() -> Self {
         Self {
-            backend: "lmdb".to_string(),
-            data_dir: ".opsense/lmdb".to_string(),
+            backend: "parquet".to_string(),
+            data_dir: ".opsense/parquet".to_string(),
         }
     }
 }
@@ -290,7 +324,7 @@ pub struct Config {
     pub sources: SourcesConfig,
 
     /// Free-form key/values available to pipeline components as template
-    /// variables (`{{name}}` in an HTTP node's URL/headers/params/body).
+    /// variables (`{{name}}` in an HTTP node's URL/headers/body).
     /// Environment variables named `OPSENSE_ATTR_<NAME>` (uppercase) override
     /// the TOML values at resolution time.
     #[serde(default)]
@@ -301,7 +335,7 @@ pub struct Config {
     pub storage: StorageConfig,
 
     /// Optional explicit pipeline; when absent a default
-    /// `clock -> ingest -> processor -> persist` graph is built from
+    /// `clock -> null` graph is built from
     /// `engine.poll_interval_seconds`.
     #[serde(default)]
     pub pipeline: Option<PipelineConfig>,
@@ -346,6 +380,22 @@ impl Config {
         if self.capacity.is_empty() {
             return Err(ConfigError::Invalid(
                 "capacity must define at least one metric".into(),
+            ));
+        }
+        // S3 lake cần bucket — prefix (rỗng = gốc bucket) là tuỳ chọn.
+        if let Some(s3) = &self.storage.s3
+            && s3.bucket.is_empty()
+        {
+            return Err(ConfigError::Invalid(
+                "storage.s3.bucket must be set (VD `opsense-lake`)".into(),
+            ));
+        }
+        if self.storage.backend.trim().is_empty() {
+            return Err(ConfigError::Invalid("storage.backend must not be empty".into()));
+        }
+        if self.storage.block_secs == 0 {
+            return Err(ConfigError::Invalid(
+                "storage.block_secs must be > 0 (parquet block partition width)".into(),
             ));
         }
         Ok(())

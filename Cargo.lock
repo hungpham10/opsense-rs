@@ -3835,6 +3835,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",

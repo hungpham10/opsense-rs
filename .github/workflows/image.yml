@@ -65,7 +65,9 @@ jobs:
           shared-key: release-${{ matrix.target }}
 
       - name: Build cross-arch binary
-        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
+        # --features opsense-core/parquet bật backend Parquet storage vào binary
+        # (bắt buộc cho prod: station với backend="parquet" cần feature này).
+        run: cargo zigbuild --release --locked --features opsense-core/parquet --target ${{ matrix.target }}
 
       # Stage binaries in a neutral dir so the artifact layout is flat
       # (same pattern as .github/workflows/ci.yml, which is proven to work).

@@ -11,8 +11,9 @@ warnings = "deny"
 [features]
 default = []
 # Forwards the optional opsense-mlib persistence backends so `cfg(feature)`
-# works inside this crate. `duckdb`/lakehouse maps to the Parquet lakehouse;
-# `sqlite` maps to a local SQLite file. "memory" needs no feature.
+# works inside this crate. `parquet` maps to the Parquet storage (canonical
+# backend name là "parquet"); `sqlite` maps to a local SQLite file. "memory"
+# needs no feature.
 parquet = ["opsense-mlib/parquet"]
 sqlite = ["opsense-mlib/sqlite"]
 
@@ -28,5 +29,5 @@ tokio = { workspace = true }
 async-graphql = { workspace = true }
 
 # Store backends are optional and feature-forwarded from opsense-mlib (see
-# [features] above): "memory" uses only the bounded in-memory LRU; "duckdb"
-# uses the Parquet lakehouse; "sqlite" uses one file per station.
+# [features] above): "memory" uses only the bounded in-memory LRU; "parquet"
+# uses Parquet storage; "sqlite" uses one file per station.

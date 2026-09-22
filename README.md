@@ -2,7 +2,7 @@
 
 **Opsense** là engine phân tích hành vi metric & dung lượng cho SRE: kéo dữ liệu
 từ nguồn HTTP tuỳ ý (Prometheus, VictoriaMetrics, API nội bộ…), xử lý qua
-pipeline transform viết bằng Rhai, lưu vào lakehouse parquet, và chạy phân tích
+pipeline transform viết bằng Rhai, lưu vào parquet, và chạy phân tích
 nâng cao (pandas/scipy/sklearn) trong **kernel process riêng** nói framed IPC —
 với runner gRPC khi cần tách execution khỏi gateway.
 
@@ -41,7 +41,7 @@ OPSENSE_CONFIG=examples/prometheus-demo/config.toml \
 GATEWAY_LISTENER=http GATEWAY_ADDR=127.0.0.1:8123 \
 ./target/release/opsense serve
 # → curl http://127.0.0.1:8123/health  → OK
-# → parquet đổ vào .opsense/demo-lakehouse/ mỗi 20 giây
+# → parquet đổ vào .opsense/ parquet mỗi 20 giây
 ```
 
 ## `opsense serve` — một entry, mọi transport
@@ -103,9 +103,14 @@ Chi tiết: [`docs/GUIDE.md`](docs/GUIDE.md).
 
 ## Lưu trữ
 
-`[storage] backend = "duckdb" | "lmdb" | "memory" | "s3"` — lakehouse parquet
-chia block (`blk=<start>/batch_NNN.parquet`) có block-pruning khi query;
-retention `[storage] retention_secs`; mirror double-write tuỳ chọn.
+`[storage] backend = "memory" | "parquet" | "sqlite"` — parquet là
+lake time-partitioned: mỗi station có `<data_dir>/<id>-<kind>/` với `wal.log`
+(crash-safe), checkpoint state (`tables/*.parquet` + `_current`), và timeseries
+cắt theo block thời gian `ts/blk=<block_id>/batch-*.parquet` (block-pruning khi
+query; Spark/DuckDB/Polars đọc thẳng). Mirror lên S3 qua `[storage.s3]`
+(bucket + prefix) → `s3://<bucket>/<prefix>/<id>/ts/**/*.parquet`; retention
+`[storage] retention_secs`; auto flush/snapshot theo
+`s3_flush_interval_secs`/`s3_snapshot_interval_secs`.
 Trạm timeseries nội bộ (`station_sink`) mở endpoint tương thích Prometheus.
 
 ## Repo layout

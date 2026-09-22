@@ -44,3 +44,6 @@ tokio-util = { workspace = true, features = ["compat"] }
 log = { workspace = true }
 opsense-macros = { path = "../opsense-macros" }
 
+[dev-dependencies]
+tempfile = "3"
+

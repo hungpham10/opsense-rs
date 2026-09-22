@@ -55,7 +55,7 @@ script_path = "scripts/moving_avg.rhai"
 # input_stage  = "raw"           # raw | processed
 # output_stage = "processed"
 # write_lru    = true            # ghi vào working LRU
-# write_store  = false           # ghi thêm xuống persistence (duckdb/lmdb)
+# write_store  = false           # ghi thêm xuống persistence (parquet)
 ```
 
 Hoặc script inline ngay trong TOML (tiện thử nhanh):

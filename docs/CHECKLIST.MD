@@ -3,7 +3,7 @@
 Đối chiếu hiện trạng Opsense với hai bộ checklist:
 
 - **Part A — Audit kiến trúc (17 mục):** rà cốt lõi Station / Store / DAG /
-  Rhai / MCP / Lakehouse. Cập nhật sau đợt đóng 6 gap backend (2026-08-24).
+  Rhai / MCP / Parquet. Cập nhật sau đợt đóng 6 gap backend (2026-08-24).
 - **Part B — Interactive REPL & Data Analysis (23 mục):** checklist hướng
   người dùng cuối. Phần lớn ❌ — nền REPL chưa làm, chỉ có nền tảng backend
   (MCP stdio + Rhai read/sandbox một phần) làm "bản xem trước" thay thế.
@@ -18,10 +18,10 @@ Chú giải trạng thái: ✅ xong · ⚠️ một phần / thiếu góc · ❌
 |---|---|---|---|
 | 1 | Station registry toàn cục (OnceLock + dependencies) | ✅ | `register_station` first-wins; `set_station_dependencies(cfg.inputs)`; `describe_station` cộng `latest_raw/processed`. |
 | 2 | Hợp đồng `ObservationStore` (append/query/query_all/latest_ts/delete_before/invalidate_from/describe) | ✅ | Trait `Send+Sync`; `describe`/`invalidate_from` có default (`unknown` / `Err`). |
-| 3 | Backend lưu trữ: memory / duckdb / lmdb / s3 | ✅ | `backend(name, data_dir, block_secs)`; mirror double-write. |
-| 4 | Lakehouse block layout + block-pruning khi query | ✅ | `<stage>/blk=<start>/batch_NNN.parquet`; prune đúng block, fallback full-list nếu >10k block. |
-| 5 | Read-compat layout cũ (`dt=/hour=`) | ✅ | `DuckdbStore::parquet_all` quét đệ quy, đọc cả thư mục cũ không migrate. |
-| 6 | Retention / `delete_before` thật | ✅ | task nền 60s; xoá nguyên block/partition đã già. |
+| 3 | Backend lưu trữ: memory / parquet / sqlite | ✅ | `open_backend(id, cfg, kind)`; `"parquet"` canonical (alias cũ `duckdb`/`s3`/`lakehouse`); per-station dir `<data_dir>/<id>-<kind>/`. |
+| 4 | Parquet lake time-partitioned + block-pruning khi query | ✅ | `ts/blk=<block_id>/batch-<millis>.parquet` (Hive partition `blk=`); prune qua partition khi query; Spark/DuckDB/Polars đọc thẳng. |
+| 5 | Lakehouse layout trên S3 | ✅ | `flush_timeseries` → `s3://bucket/prefix/<id>/ts/**`; `snapshot` → `<id>/state/`; restore khi local trống; manifest `ts/manifest.json`. |
+| 6 | Retention / xoá block cũ | ✅ | `retain_block_partitions` (trait `retain_older_than`); xoá nguyên `blk=` partition (local + S3) qua background task 60s. |
 | 7 | Watermarks journal + sống qua restart | ✅ | `<data_dir>/watermarks.json` tmp+rename; file hỏng → sạch. |
 | 8 | Vector runtime DAG + chặn cycle | ✅ | `validate_no_cycles` (DFS 3 màu) trong `reload()`. |
 | 9 | Backpressure trên kênh node | ✅ | mpsc bound 1024 + `.await`; counter `channel_full_waits`. |
@@ -31,7 +31,7 @@ Chú giải trạng thái: ✅ xong · ⚠️ một phần / thiếu góc · ❌
 | 13 | Thư viện toán tử time-series Rhai (`ts_*`) | ✅ | rate/moving_avg/resample/quantile/p95/p99/delta/pct_change. |
 | 14 | Schema / metadata discovery (`describe`) | ✅ | `opsense_describe`/`opsense_list_stations` + `GET /describe`. |
 | 15 | Metrics nội bộ của store (`StoreMetrics`) | ✅ | atomic counters, `snapshot()` skip số 0. |
-| 16 | Lineage / invalidation tức thì (`invalidate_from`) | ✅ | RAM/LMDB ngay; duckdb/s3 trả `Err` (chỉ qua retention). |
+| 16 | Lineage / invalidation tức thì (`invalidate_from`) | ✅ | RAM/parquet ngay; xoá theo retention. |
 | 17 | Capacity engine (ngưỡng dung lượng) | ✅ | `capacity` map + `CapacityMap`; breach ngưỡng được đánh giá trong `anomaly_station_transform` (2026-09-12). |
 
 Kết luận Part A: 16/17 ✅, 1 ⚠️. 6 gap chặn DoD đã đóng.
@@ -61,10 +61,10 @@ Kết luận Part A: 16/17 ✅, 1 ⚠️. 6 gap chặn DoD đã đóng.
 | 13 | Scripting (Rhai) | ✅ | `register_fn` + `fn process(...)`. |
 | 14 | Sandbox an toàn (max ops / timeout) | ✅ | max_ops 1M + `OPSENSE_RHAI_TIMEOUT_SECS`. |
 | 15 | Visualization (biểu đồ) | ❌ | |
-| 16 | Export (CSV/Parquet/JSON) | ⚠️ | ghi parquet (lakehouse) sẵn; chưa có export CLI tuỳ ý. |
+| 16 | Export (CSV/Parquet/JSON) | ⚠️ | ghi parquet sẵn; chưa có export CLI tuỳ ý. |
 | 17 | Macros / saved queries | ❌ | |
 | 18 | Pipeline realtime (edit / reload) | ✅ | `opsense_edit` diff thêm/sửa/xoá node. |
-| 19 | Persistence / lakehouse | ✅ | duckdb + s3 + lmdb + memory. |
+| 19 | Persistence / parquet | ✅ | parquet (canonical) + s3 (data_dir `s3://`) + sqlite + memory. |
 | 20 | Backpressure / streaming | ✅ | mpsc bound 1024. |
 | 21 | Timeout / cancellation | ✅ | `OPSENSE_QUERY_TIMEOUT_SECS` + Rhai timeout. |
 | 22 | Lineage / invalidation | ✅ | tầng nóng `invalidate_from`. |

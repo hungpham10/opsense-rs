@@ -159,6 +159,24 @@ pub trait TimeseriesStorage: Send + Sync {
     async fn clear_all_series(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Ép flush buffer ra data files (Parquet lake / S3). Được gọi định kỳ bởi
+    /// station lifecycle; default no-op cho backend giữ full trong cache.
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Ép checkpoint/compact định kỳ (atomic pointer + truncate WAL + mirror
+    /// state lên S3 khi cấu hình). Default no-op.
+    async fn checkpoint(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Retention: xoá toàn bộ dữ liệu có `ts < keep_after_ts` (nguyên block
+    /// partition cho Parquet). Default no-op (giữ mãi).
+    async fn retain_older_than(&self, _keep_after_ts: u64) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// PatternStorage — persistence surface cho các pattern đã đăng ký trong

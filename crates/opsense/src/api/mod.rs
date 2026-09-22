@@ -171,8 +171,8 @@ impl AppState {
     /// Build a minimal default pipeline (`clock -> null`) when no `[pipeline]`
     /// section is present in the config. This matches the documented behaviour
     /// promised in `opsense_core::Config`:
-    ///   "when absent a default `clock -> ingest -> processor -> persist` graph
-    ///   is built from `engine.poll_interval_seconds`"
+    ///   "when absent a default `clock -> null` graph is built from
+    ///   `engine.poll_interval_seconds`"
     fn default_pipeline(cfg: &Config) -> Vec<Arc<dyn Component>> {
         let interval_secs = cfg.engine.poll_interval_seconds.max(1);
         vec![

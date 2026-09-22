@@ -21,23 +21,31 @@
 //!   được truncate (bằng chính checkpoint), cơ chế giống compact data files của
 //!   lakehouse.
 //! - **S3 mirror (lakehouse trên object storage)**: khi cấu hình `S3Config`,
-//!   `snapshot()` upload các Parquet checkpoint lên `s3://bucket/prefix/lakehouse/`
-//!   kèm `manifest.json` (gen hiện tại + danh sách bảng). Một local lake mới tinh
-//!   (chưa từng checkpoint, WAL trống) mà S3 đã có snapshot → **restore** toàn bộ
-//!   trạng thái lúc `open`. Local đã có dữ liệu giữ nguyên, không bị đè bởi S3.
-//! - **Timeseries**: local buffer (`ts` map) là lớp mới nhất. Khi S3 bật và số
-//!   điểm vượt `flush_threshold`, `append` tự đẩy buffer ra một **delta file
-//!   Parquet** `ts_points/<millis>.parquet` (giữ local cache + mirror S3), ghi
-//!   tên file vào `ts_manifest.json`, rồi dọn buffer. Mọi lần đọc
-//!   (`range`/`latest`/`first`/`last`) là UNION của các delta file (theo thứ tự
-//!   cũ → mới, file sau thắng) và buffer local (luôn thắng), dedup theo
-//!   `(series, ts)` — y hệt UNION + QUALIFY của bản DuckDB.
+//!   `flush_timeseries()` upload delta files lên `s3://bucket/prefix/{station}/
+//!   ts/blk=<id>/batch-*.parquet` kèm `ts/manifest.json`; `snapshot()` upload
+//!   checkpoint state lên `s3://bucket/prefix/{station}/state/`. Một local lake
+//!   mới tinh (chưa từng checkpoint, WAL trống) mà S3 đã có snapshot → **restore**
+//!   toàn bộ trạng thái (state + ts files) lúc `open`. Local đã có dữ liệu giữ
+//!   nguyên, không bị đè bởi S3.
+//! - **Timeseries lake (time-partitioned Parquet)**: mọi điểm timeseries vượt
+//!   `flush_threshold` (hoặc theo lịch định kỳ / trước khi shutdown) được gom
+//!   theo block của nó — `block_id = floor(ts / block_secs)`, hoặc đọc thẳng từ
+//!   series dạng `blk:<id>` — và viết thành **file Parquet riêng từng block**:
+//!   `ts/blk=<block_id>/batch-<epoch_millis>.parquet`, row `(id, series, ts,
+//!   value)`. Buffer đã flush được đánh dấu trong WAL (`TsFlush`) nên replay
+//!   không lặp. Đây chính là nơi các hệ thống data processing
+//!   (Spark/Polars/DuckDB…) đọc trực tiếp — local hay S3 đều cùng 1 cấu trúc.
 //!
 //! Không cấu hình S3 (`LakehouseStorage::open`) → chỉ dùng local lake: timeseries
-//! giữ full trong local checkpoint/WAL, `flush_timeseries` là no-op, snapshot vẫn
-//! compact WAL xuống Parquet local.
+//! vẫn được cắt block partition ngay trên local (đúng 1 cấu trúc với S3, nên
+//! công cụ ngoài process này đọc local cũng được), WAL/checkpoint giữ
+//! crash-safety, `flush_timeseries` ghi file local (không upload).
+//!
+//! `block_id` của mỗi row quyết định partition:
+//! - Series có dạng `blk:<id>` (luồng block của `TimeseriesStation`) → `<id>`.
+//! - Series thường → `floor(ts / block_secs)`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -67,8 +75,10 @@ pub struct S3Config {
     /// Custom endpoint (VD `http://minio:9000`). `None` = AWS S3 mặc định.
     pub endpoint: Option<String>,
     pub region: Option<String>,
-    pub access_key_id: String,
-    pub secret_access_key: String,
+    /// `None` = để `object_store` tự rút từ env AWS chuẩn
+    /// (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/…) hoặc instance role.
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
     pub session_token: Option<String>,
 }
 
@@ -396,8 +406,8 @@ impl Inner {
         self.local.join("tables")
     }
 
-    fn ts_cache_dir(&self) -> PathBuf {
-        self.local.join("ts_cache")
+    fn ts_dir(&self) -> PathBuf {
+        self.local.join("ts")
     }
 
     fn current_path(&self) -> PathBuf {
@@ -417,7 +427,7 @@ impl Inner {
     fn open(local: &Path) -> Result<Self> {
         std::fs::create_dir_all(local).map_err(internal)?;
         std::fs::create_dir_all(local.join("tables")).map_err(internal)?;
-        std::fs::create_dir_all(local.join("ts_cache")).map_err(internal)?;
+        std::fs::create_dir_all(local.join("ts")).map_err(internal)?;
 
         let mut s = Inner {
             local: local.to_path_buf(),
@@ -595,8 +605,8 @@ impl Inner {
     /// Đọc điểm timeseries sau khi merge (buffer local thắng files cũ).
     fn merged_ts(&self) -> Result<Vec<MergedTsRow>> {
         let mut map: MergedTsMap = HashMap::new();
-        for (fi, name) in self.ts_manifest.iter().enumerate() {
-            let path = self.ts_cache_dir().join(name);
+        for (fi, rel) in self.ts_manifest.iter().enumerate() {
+            let path = self.ts_dir().join(rel);
             if !path.exists() {
                 continue;
             }
@@ -959,10 +969,13 @@ fn block_on<T: Send>(fut: impl std::future::Future<Output = T> + Send) -> T {
 }
 
 fn s3_store(cfg: &S3Config) -> Result<Arc<dyn object_store::ObjectStore>> {
-    let mut b = object_store::aws::AmazonS3Builder::new()
-        .with_bucket_name(&cfg.bucket)
-        .with_access_key_id(&cfg.access_key_id)
-        .with_secret_access_key(&cfg.secret_access_key);
+    let mut b = object_store::aws::AmazonS3Builder::new().with_bucket_name(&cfg.bucket);
+    if let Some(key) = &cfg.access_key_id {
+        b = b.with_access_key_id(key);
+    }
+    if let Some(secret) = &cfg.secret_access_key {
+        b = b.with_secret_access_key(secret);
+    }
     if let Some(r) = &cfg.region {
         b = b.with_region(r);
     }
@@ -1010,123 +1023,208 @@ fn s3_delete(store: &Arc<dyn object_store::ObjectStore>, key: &str) -> Result<()
 
 // ==================== LakehouseStorage ====================
 
+/// `block_id` của một row timeseries — quyết định partition `ts/blk=<id>/`.
+/// Series của luồng block (`TimeseriesStation`) đã mang sẵn `blk:<id>` → dùng
+/// thẳng; series thường lấy `floor(ts / block_secs)`.
+fn block_id_of(series: &[u8], ts: u64, block_secs: i64) -> u64 {
+    if let Some(rest) = series.strip_prefix(b"blk:") {
+        if let Ok(id) = std::str::from_utf8(rest)
+            .unwrap_or_default()
+            .trim()
+            .parse::<u64>()
+        {
+            return id;
+        }
+    }
+    if block_secs > 0 {
+        ts / block_secs as u64
+    } else {
+        ts
+    }
+}
+
+/// Timestamp hiện tại (millis) — làm batch name cho delta file.
+fn now_millis() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+        .to_string()
+}
+
+/// Lake key trên S3 cho station này — lấy từ tên thư mục local, bỏ hậu tố
+/// `-<kind>` (`-timeseries`/`-pattern`/`-category`) nếu có, nên key ổn định cho
+/// cả 3 loại station của cùng một `id`.
+fn lake_key_of(local: &str) -> String {
+    let name = Path::new(local)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| local.to_string());
+    for kind in ["-timeseries", "-pattern", "-category"] {
+        if let Some(stripped) = name.strip_suffix(kind) {
+            return stripped.to_string();
+        }
+    }
+    name
+}
+
 /// Parquet lakehouse storage — thay thế `DuckS3Storage`.
 pub struct LakehouseStorage {
     inner: Arc<Mutex<Inner>>,
     s3: Option<S3Config>,
+    /// 0 = tắt auto-flush theo ngưỡng (chỉ flush khi station lifecycle gọi);
+    /// >0 = `append` tự flush khi buffer đạt ngưỡng.
     flush_threshold: usize,
+    /// Độ rộng một block timeseries (giây) — quyết định partition `blk=`.
+    block_secs: i64,
+    /// Không gian key trên S3 cho riêng station này (VD id station).
+    lake_key: String,
 }
 
 impl LakehouseStorage {
     /// Mở (hoặc tạo mới) local lake tại `local` (một thư mục, không phải file)
-    /// — không cấu hình S3.
+    /// — không cấu hình S3. `block_secs` mặc định 3600, timeseries vẫn được cắt
+    /// partition `ts/blk=<id>/…` ngay trên local.
     pub async fn open(local: &str) -> Result<Self> {
-        Self::open_inner(local, None, 0).await
+        Self::open_inner(local, None, 0, 3600, None).await
     }
 
     /// Mở local lake + cấu hình S3 (lakehouse mirror). Nếu local còn trống
     /// (chưa từng checkpoint, WAL rỗng) và S3 đã có snapshot → restore trạng
     /// thái từ S3.
     ///
-    /// `flush_threshold` = số điểm timeseries buffer local trước khi tự flush
-    /// ra delta file Parquet trên S3 (mặc định 4096 nếu truyền 0).
-    pub async fn open_with_s3(local: &str, s3: S3Config, flush_threshold: usize) -> Result<Self> {
-        Self::open_inner(local, Some(s3), flush_threshold).await
+    /// - `flush_threshold` = số điểm timeseries buffer local trước khi tự flush
+    ///   (0 = tắt auto-flush; khuyến nghị 4096).
+    /// - `block_secs` = độ rộng block partition (giây).
+    /// - `lake_key` = namespace trên S3 cho riêng station (VD id station).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_with_s3(
+        local: &str,
+        s3: S3Config,
+        flush_threshold: usize,
+        block_secs: i64,
+        lake_key: String,
+    ) -> Result<Self> {
+        Self::open_inner(local, Some(s3), flush_threshold, block_secs, Some(lake_key)).await
     }
 
-    async fn open_inner(local: &str, s3: Option<S3Config>, flush_threshold: usize) -> Result<Self> {
+    async fn open_inner(
+        local: &str,
+        s3: Option<S3Config>,
+        flush_threshold: usize,
+        block_secs: i64,
+        lake_key: Option<String>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(local).map_err(internal)?;
         let mut inner = Inner::open(Path::new(local))?;
         if let Some(cfg) = &s3
             && inner.fresh
-            && let Some(restore_gen) = restore_from_s3(cfg, Path::new(local))?
+            && let Some(_gen) = restore_from_s3(cfg, Path::new(local), lake_key.as_deref())?
         {
-            // S3 có snapshot → load lại checkpoint vừa restore.
+            // S3 có snapshot → load lại checkpoint + ts lake vừa restore.
             inner = Inner::open(Path::new(local))?;
-            let _ = restore_gen;
         }
         Ok(LakehouseStorage {
             inner: Arc::new(Mutex::new(inner)),
             s3,
-            flush_threshold: flush_threshold.max(1),
+            flush_threshold,
+            block_secs: block_secs.max(1),
+            lake_key: lake_key.unwrap_or_else(|| lake_key_of(local)),
         })
     }
 
-    /// Flush toàn bộ buffer timeseries local ra một delta file Parquet
-    /// (local cache + mirror S3). No-op khi không cấu hình S3 (timeseries giữ
-    /// full trong local WAL/checkpoint).
+    /// Flush toàn bộ buffer timeseries local ra các **file Parquet tách theo
+    /// block**: `ts/blk=<block_id>/batch-<millis>.parquet` (local + mirror S3).
+    /// Row giữ schema `(id, series, ts, value)` với `series='blk:<block_id>'`
+    /// cho luồng block; partition `blk=` để Spark/DuckDB/Polars prune theo thời
+    /// gian. Windows rỗng là no-op. Không cấu hình S3 vẫn ghi file local.
     pub fn flush_timeseries(&self) -> Result<()> {
-        let Some(s3) = self.s3.clone() else {
-            return Ok(());
-        };
-        let store = s3_store(&s3)?;
-        let local = {
+        let s3 = self.s3.clone();
+        let lake_key = self.lake_key.clone();
+        let block_secs = self.block_secs;
+
+        // 1. Snapshot buffer → nhóm theo block partition (trong lock).
+        let files: Vec<String> = {
             let mut inner = self.inner.lock();
             if inner.ts.is_empty() {
                 return Ok(());
             }
-            // Snapshot buffer (sắp theo id tăng) → file delta.
-            let mut pts: Vec<(u64, Vec<u8>, u64, Vec<u8>)> = Vec::new(); // (id, series, ts, value)
-            let mut max_id = 0;
-            for ((series, ts), (id, value)) in &inner.ts {
-                pts.push((*id, series.clone(), *ts, value.clone()));
-                max_id = max_id.max(*id);
-            }
-            pts.sort_by_key(|(id, _, _, _)| *id);
-
-            let name = format!(
-                "{}.parquet",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0)
-            );
-            let path = inner.ts_cache_dir().join(&name);
-            let cols = cols_of("ts_points");
-            let rows = pts
+            let mut pts: Vec<(u64, Vec<u8>, u64, Vec<u8>)> = inner
+                .ts
                 .iter()
-                .map(|(id, series, ts, value)| {
-                    vec![
-                        Cell::I(*id),
-                        Cell::B(series.clone()),
-                        Cell::I(*ts),
-                        Cell::B(value.clone()),
-                    ]
-                })
-                .collect::<Vec<_>>();
-            write_parquet(&path, cols, &rows)?;
+                .map(|((series, ts), (id, value))| (*id, series.clone(), *ts, value.clone()))
+                .collect();
+            pts.sort_by_key(|(id, _, _, _)| *id);
+            let max_id = pts.last().map(|(id, _, _, _)| *id).unwrap_or(0);
 
-            inner.ts_manifest.push(name.clone());
+            let mut by_block: BTreeMap<u64, Vec<(u64, Vec<u8>, u64, Vec<u8>)>> = BTreeMap::new();
+            for (id, series, ts, value) in pts {
+                by_block
+                    .entry(block_id_of(&series, ts, block_secs))
+                    .or_default()
+                    .push((id, series, ts, value));
+            }
+            let stamp = now_millis();
+            let mut written = Vec::with_capacity(by_block.len());
+            for (block_id, rows) in &by_block {
+                let rel = format!("blk={block_id}/batch-{stamp}.parquet");
+                let path = inner.ts_dir().join(&rel);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(internal)?;
+                }
+                let cell_rows = rows
+                    .iter()
+                    .map(|(id, series, ts, value)| {
+                        vec![
+                            Cell::I(*id),
+                            Cell::B(series.clone()),
+                            Cell::I(*ts),
+                            Cell::B(value.clone()),
+                        ]
+                    })
+                    .collect::<Vec<_>>();
+                write_parquet(&path, cols_of("ts_points"), &cell_rows)?;
+                written.push(rel);
+            }
+
+            inner.ts_manifest.extend(written.iter().cloned());
             inner.ts.retain(|_, (id, _)| *id > max_id);
 
-            // Manifest (danh sách file) durable local — atomic qua tmp+rename.
+            // Manifest (danh sách relative key) durable local — atomic.
             let manifest_json = serde_json::to_string(&inner.ts_manifest).map_err(internal)?;
             atomic_write(&inner.ts_manifest_path(), manifest_json.as_bytes())?;
 
             // WAL: đánh dấu buffer đã flush (replay sẽ bỏ các điểm <= max_id).
             inner.mutate(&WalOp::TsFlush { max_id })?;
             inner.generation += 1;
-            (inner.generation, name)
+            written
         };
 
-        // Upload delta file + manifest lên S3 (bên ngoài lock).
-        let (generation, name) = local;
-        let mut bytes =
-            std::fs::read(self.inner.lock().ts_cache_dir().join(&name)).map_err(internal)?;
-        s3_put(&store, &s3.key(&format!("ts_points/{name}")), bytes)?;
-        bytes = serde_json::to_vec(&self.inner.lock().ts_manifest).map_err(internal)?;
-        s3_put(
-            &store,
-            &s3.key(&format!("ts_manifest_{generation}.json")),
-            bytes,
-        )?;
+        // 2. Upload delta files + manifest lên S3 (bên ngoài lock).
+        if let Some(s3) = s3 {
+            let store = s3_store(&s3)?;
+            for rel in &files {
+                let bytes =
+                    std::fs::read(self.inner.lock().ts_dir().join(rel)).map_err(internal)?;
+                s3_put(&store, &s3.key(&format!("{lake_key}/ts/{rel}")), bytes)?;
+            }
+            let manifest = serde_json::to_vec(&self.inner.lock().ts_manifest).map_err(internal)?;
+            s3_put(
+                &store,
+                &s3.key(&format!("{lake_key}/ts/manifest.json")),
+                manifest,
+            )?;
+        }
         Ok(())
     }
 
-    /// Snapshot toàn bộ bảng ra Parquet checkpoint (local) + mirror lên S3
-    /// (lakehouse). Gọi định kỳ hoặc trước khi tắt để db khác restore được
-    /// trạng thái; local checkpoint cũng compact WAL.
+    /// Snapshot toàn bộ bảng ra Parquet checkpoint (local) + mirror state lên S3
+    /// (`{lake_key}/state/`). Flush lake trước để checkpoint không còn mang
+    /// buffer timeseries và S3 tiến tới trạng thái mới nhất. Gọi định kỳ hoặc
+    /// trước khi tắt để process khác restore được trạng thái; local checkpoint
+    /// cũng compact WAL.
     pub fn snapshot(&self) -> Result<()> {
+        self.flush_timeseries()?;
         let mut inner = self.inner.lock();
         inner.checkpoint()?;
         let generation = inner.generation;
@@ -1134,12 +1232,13 @@ impl LakehouseStorage {
 
         if let Some(s3) = &self.s3 {
             let store = s3_store(s3)?;
+            let lake_key = self.lake_key.clone();
             for (name, _) in TABLES {
                 let bytes = std::fs::read(self.inner.lock().table_file(name, generation))
                     .map_err(internal)?;
                 s3_put(
                     &store,
-                    &s3.key(&format!("lakehouse/{name}-{generation}.parquet")),
+                    &s3.key(&format!("{lake_key}/state/{name}-{generation}.parquet")),
                     bytes,
                 )?;
             }
@@ -1149,19 +1248,78 @@ impl LakehouseStorage {
             });
             s3_put(
                 &store,
-                &s3.key("lakehouse/manifest.json"),
+                &s3.key(&format!("{lake_key}/state/manifest.json")),
                 serde_json::to_vec(&manifest).map_err(internal)?,
             )?;
+        }
+        Ok(())
+    }
+
+    /// Retention: xoá toàn bộ partition `blk=<id>` chứa dữ liệu `ts < keep_after_ts`
+    /// (local + S3). Dữ liệu vẫn nằm trong buffer (chưa flush) không bị động tới.
+    pub fn retain_block_partitions(&self, keep_after_ts: u64) -> Result<()> {
+        let block_secs = self.block_secs;
+        let keep_block = if block_secs > 0 {
+            (keep_after_ts / block_secs as u64).min(u64::MAX)
+        } else {
+            keep_after_ts
+        };
+        let removed: Vec<String> = {
+            let mut inner = self.inner.lock();
+            // Giữ những entry có block_id >= keep_block; hủy file local của cái cũ.
+            let mut kept = Vec::new();
+            let mut removed = Vec::new();
+            for rel in &inner.ts_manifest {
+                let id = rel.split_once('/').map(|(p, _)| p).unwrap_or(rel);
+                let block = id
+                    .strip_prefix("blk=")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if block < keep_block {
+                    let path = inner.ts_dir().join(rel);
+                    let _ = std::fs::remove_file(&path);
+                    // Dọn cả partition dir (blk=<id>) nếu giờ rỗng.
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                    removed.push(rel.clone());
+                } else {
+                    kept.push(rel.clone());
+                }
+            }
+            if removed.is_empty() {
+                return Ok(());
+            }
+            inner.ts_manifest = kept;
+            let manifest_json = serde_json::to_string(&inner.ts_manifest).map_err(internal)?;
+            atomic_write(&inner.ts_manifest_path(), manifest_json.as_bytes())?;
+            removed
+        };
+
+        if let Some(s3) = &self.s3 {
+            let store = s3_store(&s3)?;
+            let lake_key = self.lake_key.clone();
+            for rel in &removed {
+                let _ = s3_delete(&store, &s3.key(&format!("{lake_key}/ts/{rel}")));
+            }
+            let manifest = serde_json::to_vec(&self.inner.lock().ts_manifest).map_err(internal)?;
+            let _ = s3_put(
+                &store,
+                &s3.key(&format!("{lake_key}/ts/manifest.json")),
+                manifest,
+            );
         }
         Ok(())
     }
 }
 
 /// Restore checkpoint từ S3 vào local (đk: local trống). Trả về `Some(gen)`
-/// nếu S3 có snapshot, `None` nếu chưa có gì.
-fn restore_from_s3(cfg: &S3Config, local: &Path) -> Result<Option<u64>> {
+/// nếu S3 có snapshot, `None` nếu chưa có gì. Restore cả state (`{lake_key}/
+/// state/`) lẫn ts lake (`{lake_key}/ts/`) để cold-read ngay trên node mới.
+fn restore_from_s3(cfg: &S3Config, local: &Path, lake_key: Option<&str>) -> Result<Option<u64>> {
+    let lake_key = lake_key.unwrap_or("station");
     let store = s3_store(cfg)?;
-    let manifest_key = cfg.key("lakehouse/manifest.json");
+    let manifest_key = cfg.key(&format!("{lake_key}/state/manifest.json"));
     let raw = match s3_get(&store, &manifest_key) {
         Ok(b) => b,
         Err(_) => return Ok(None), // chưa từng snapshot trên S3.
@@ -1187,7 +1345,7 @@ fn restore_from_s3(cfg: &S3Config, local: &Path) -> Result<Option<u64>> {
     std::fs::create_dir_all(local).map_err(internal)?;
     std::fs::create_dir_all(local.join("tables")).map_err(internal)?;
     for name in &tables {
-        let key = cfg.key(&format!("lakehouse/{name}-{generation}.parquet"));
+        let key = cfg.key(&format!("{lake_key}/state/{name}-{generation}.parquet"));
         let bytes = s3_get(&store, &key)?;
         let tmp = local
             .join("tables")
@@ -1203,6 +1361,27 @@ fn restore_from_s3(cfg: &S3Config, local: &Path) -> Result<Option<u64>> {
     }
     let current = local.join("_current");
     atomic_write(&current, generation.to_string().as_bytes())?;
+
+    // Restore cả ts lake (delta files + manifest) — cold-read không mất block.
+    let ts_key = cfg.key(&format!("{lake_key}/ts/manifest.json"));
+    if let Ok(raw_ts) = s3_get(&store, &ts_key) {
+        if let Ok(list) = serde_json::from_slice::<Vec<String>>(&raw_ts) {
+            std::fs::create_dir_all(local.join("ts")).map_err(internal)?;
+            for rel in &list {
+                let key = cfg.key(&format!("{lake_key}/ts/{rel}"));
+                let Ok(bytes) = s3_get(&store, &key) else {
+                    continue; // file đã bị dọn giữa chừng (retention) — bỏ qua.
+                };
+                let dst = local.join("ts").join(rel);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).map_err(internal)?;
+                }
+                std::fs::write(&dst, &bytes).map_err(internal)?;
+            }
+            atomic_write(&local.join("ts_manifest.json"), &raw_ts)?;
+        }
+    }
+
     Ok(Some(generation))
 }
 
@@ -1475,7 +1654,7 @@ impl TimeseriesStorage for LakehouseStorage {
                 value: value.to_vec(),
             })?;
             inner.ts_next_id = id + 1;
-            self.s3.is_some() && inner.ts.len() >= self.flush_threshold
+            self.flush_threshold > 0 && inner.ts.len() >= self.flush_threshold
         };
         if should_flush {
             self.flush_timeseries()?;
@@ -1554,9 +1733,9 @@ impl TimeseriesStorage for LakehouseStorage {
             }
 
             let old = std::mem::take(&mut inner.ts_manifest);
-            // Xoá local cache files cũ.
-            for name in &old {
-                let _ = std::fs::remove_file(inner.ts_cache_dir().join(name));
+            // Xoá local lake files cũ.
+            for rel in &old {
+                let _ = std::fs::remove_file(inner.ts_dir().join(rel));
             }
             let manifest_json = serde_json::to_string(&Vec::<String>::new()).map_err(internal)?;
             atomic_write(&inner.ts_manifest_path(), manifest_json.as_bytes())?;
@@ -1571,12 +1750,12 @@ impl TimeseriesStorage for LakehouseStorage {
         // Dọn file trên S3 (nếu có).
         if let Some(s3) = &self.s3 {
             let store = s3_store(s3)?;
-            for name in &old_files {
-                let _ = s3_delete(&store, &s3.key(&format!("ts_points/{name}")));
+            let lake_key = self.lake_key.clone();
+            for rel in &old_files {
+                let _ = s3_delete(&store, &s3.key(&format!("{lake_key}/ts/{rel}")));
             }
         }
-        // Flush lại remainders thành một delta file duy nhất (chỉ khi S3 bật;
-        // local-only thì remainders đã an toàn trong WAL).
+        // Flush lại remainders thành delta file (local lake + S3).
         self.flush_timeseries()?;
         Ok(())
     }
@@ -1585,8 +1764,8 @@ impl TimeseriesStorage for LakehouseStorage {
         let old_files = {
             let mut inner = self.inner.lock();
             let old = std::mem::take(&mut inner.ts_manifest);
-            for name in &old {
-                let _ = std::fs::remove_file(inner.ts_cache_dir().join(name));
+            for rel in &old {
+                let _ = std::fs::remove_file(inner.ts_dir().join(rel));
             }
             let manifest_json = serde_json::to_string(&Vec::<String>::new()).map_err(internal)?;
             atomic_write(&inner.ts_manifest_path(), manifest_json.as_bytes())?;
@@ -1597,11 +1776,24 @@ impl TimeseriesStorage for LakehouseStorage {
         };
         if let Some(s3) = &self.s3 {
             let store = s3_store(s3)?;
-            for name in &old_files {
-                let _ = s3_delete(&store, &s3.key(&format!("ts_points/{name}")));
+            let lake_key = self.lake_key.clone();
+            for rel in &old_files {
+                let _ = s3_delete(&store, &s3.key(&format!("{lake_key}/ts/{rel}")));
             }
         }
         Ok(())
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.flush_timeseries()
+    }
+
+    async fn checkpoint(&self) -> Result<()> {
+        self.snapshot()
+    }
+
+    async fn retain_older_than(&self, keep_after_ts: u64) -> Result<()> {
+        self.retain_block_partitions(keep_after_ts)
     }
 }
 
@@ -1970,6 +2162,77 @@ mod tests {
         let s = LakehouseStorage::open(&path).await.unwrap();
         assert_eq!(s.first(b"cpu").await.unwrap(), Some((100, b"a".to_vec())));
         assert_eq!(s.last(b"cpu").await.unwrap(), Some((200, b"b".to_vec())));
+    }
+
+    #[tokio::test]
+    async fn test_timeseries_lake_partitioned_by_block() {
+        use crate::storage::TimeseriesStorage;
+
+        let (_d, path) = tmp_path();
+        // block_secs=100 → blk=1..10; series blk:N dùng thẳng id trong series.
+        let mut s = LakehouseStorage::open(&path).await.unwrap();
+        s.block_secs = 100;
+        s.append(b"blk:3", 1, b"v3").await.unwrap();
+        s.append(b"blk:7", 1, b"v7").await.unwrap();
+        s.append(b"cpu", 250, b"v250").await.unwrap(); // 250/100 → blk=2
+        s.flush_timeseries().unwrap();
+
+        let ts_root = Path::new(&path).join("ts");
+        // Hai block riêng biệt → hai partition khác nhau.
+        assert!(ts_root.join("blk=3").read_dir().unwrap().count() >= 1);
+        assert!(ts_root.join("blk=7").read_dir().unwrap().count() >= 1);
+        assert!(ts_root.join("blk=2").read_dir().unwrap().count() >= 1);
+
+        // Partition file là Parquet thật (đọc lại được đúng rows).
+        let cols = cols_of("ts_points");
+        let file = ts_root
+            .join("blk=3")
+            .read_dir()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let rows = read_parquet(&file, cols).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(&rows[0][1], &Cell::B(b"blk:3".to_vec()));
+
+        // Buffer đã được dọn → dữ liệu chỉ ở lake files.
+        assert!(s.inner.lock().ts.is_empty());
+        assert_eq!(s.range(b"blk:3", 0, 100).await.unwrap(), vec![(1, b"v3".to_vec())]);
+
+        // Reopen: restore từ lake files (merged_ts).
+        drop(s);
+        let mut s = LakehouseStorage::open(&path).await.unwrap();
+        s.block_secs = 100;
+        s.append(b"blk:3", 2, b"v3b").await.unwrap(); // cùng partition, điểm mới hơn
+        s.append(b"cpu", 105, b"v105").await.unwrap();
+        assert_eq!(
+            s.latest(b"blk:3", 10).await.unwrap(),
+            vec![(1, b"v3".to_vec()), (2, b"v3b".to_vec())]
+        );
+        assert_eq!(s.latest(b"cpu", 10).await.unwrap(), vec![(105, b"v105".to_vec()), (250, b"v250".to_vec())]);
+    }
+
+    #[tokio::test]
+    async fn test_timeseries_lake_retention() {
+        use crate::storage::TimeseriesStorage;
+
+        let (_d, path) = tmp_path();
+        let mut s = LakehouseStorage::open(&path).await.unwrap();
+        s.block_secs = 100;
+        // blk:1, blk:2, blk:5 (block_secs=100 giây; keep_after=250 → giữ blk>=2).
+        s.append(b"blk:1", 1, b"a").await.unwrap();
+        s.append(b"blk:2", 1, b"b").await.unwrap();
+        s.append(b"blk:5", 1, b"c").await.unwrap();
+        s.flush_timeseries().unwrap();
+        s.retain_block_partitions(250).unwrap();
+
+        let ts_root = Path::new(&path).join("ts");
+        assert!(!ts_root.join("blk=1").exists());
+        assert!(ts_root.join("blk=2").exists());
+        let kept: Vec<String> = s.inner.lock().ts_manifest.clone();
+        assert!(kept.iter().all(|rel| rel.starts_with("blk=2/") || rel.starts_with("blk=5/")));
     }
 
     #[tokio::test]
