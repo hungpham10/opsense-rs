@@ -142,19 +142,19 @@ jobs:
           cp dist-bin-arm64/* binaries/aarch64/
           chmod +x binaries/aarch64/*
 
-      # Single Earthly run for linux/amd64 + linux/arm64. Earthly builds each
-      # platform and pushes them under one tag as a manifest list — no manual
-      # per-platform tags or merge step needed.
+      # Single Earthly run (`+multi` target) for linux/amd64 + linux/arm64.
+      # Earthly 0.8.x requires multi-platform via `BUILD --platform ... --platform ...`
+      # in the Earthfile, not on the command line; the target pushes ONE
+      # multi-arch manifest list under the single tag — no manual merge step.
       - name: Build and push multi-arch images
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           earthly --push --ci \
-            --platform linux/amd64,linux/arm64 \
             --build-arg VERSION="${VERSION}" \
             --build-arg REGISTRY="${REGISTRY}" \
             --build-arg IMAGE_PREFIX="${IMAGE_PREFIX}" \
-            +all
+            +multi
 
       - name: Verify multi-arch manifests
         env:

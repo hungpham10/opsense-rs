@@ -224,6 +224,14 @@ all:
     BUILD +runner-julia
 
 # -----------------------------------------------------------------------
+# multi — build & push 4 images cho cả 2 platform dưới MỘT tag.
+# Earthly 0.8.x KHÔNG hỗ trợ `--platform a,b` trên command line; phải dùng
+# BUILD --platform ... --platform ... +target (mỗi target tự push manifest list).
+# -----------------------------------------------------------------------
+multi:
+    BUILD --platform linux/amd64 --platform linux/arm64 +all
+
+# -----------------------------------------------------------------------
 # integration-images — build 4 images locally (no registry push)
 # -----------------------------------------------------------------------
 integration-images:

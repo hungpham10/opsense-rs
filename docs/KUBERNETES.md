@@ -78,9 +78,10 @@ Trước đây workflow chạy `earthly --push` **2 lần** (amd64 → arm64) c�
 1. CI stage binaries thành `binaries/<arch>/` (`x86_64/`, `aarch64/`);
 2. `+build-binaries` tự chọn đúng bộ binaries theo `uname -m` (Earthly build
    `linux/arm64` chạy dưới QEMU nên trả `aarch64`);
-3. Workflow chạy **một lần** `earthly --push --platform linux/amd64,linux/arm64`
+3. Workflow chạy **một lần** `earthly --push ... +multi` (target `multi` trong
+   Earthfile dùng `BUILD --platform linux/amd64 --platform linux/arm64 +all`)
    → Earthly tự push manifest list multi-arch cho **đúng tag `v1.0.10`** của cả 4
-   image (không còn tag `-amd64`/`-arm64`, không bước ghép tay);
+   image (không tag `-amd64`/`-arm64`, không bước ghép tay);
 4. Step cuối tự verify bằng `docker manifest inspect`.
 
 **Còn một việc bắt buộc trước go-live:** chạy lại workflow `push-image` cho tag
@@ -739,10 +740,11 @@ forward-only; dự phòng bằng backup trước nâng.
 
 ## 14. Known gaps cần xử lý trong sprint tới
 
-1. **Multi-arch tag** — **đã sửa** trong `image.yml` + `Earthfile`: build 1 lần,
-   `--platform linux/amd64,linux/arm64`, static binaries theo `binaries/<arch>/`
-   và chọn theo `uname -m` → Earthly push 1 tag duy nhất là manifest list (xem
-   §3). Còn lại: chạy lại workflow `push-image` cho tag `v1.0.10`.
+1. **Multi-arch tag** — **đã sửa** trong `image.yml` + `Earthfile`: target
+   `+multi` build 1 lần (`BUILD --platform linux/amd64 --platform linux/arm64
+   +all`), static binaries theo `binaries/<arch>/` và chọn theo `uname -m` →
+   Earthly push 1 tag duy nhất là manifest list (xem §3). Còn lại: chạy lại
+   workflow `push-image` cho tag `v1.0.10`.
 2. **Supervisor hardcode `OPSENSE_RUNNER_GRPC=opsense-runner:50051`** — không
    cho phép serve chọn runner theo env. Fix: config supervisor qua ConfigMap
    (mẫu `conf/supervisor/opsense.conf`) hoặc `serve` đọc env thay vì ép cứng.
