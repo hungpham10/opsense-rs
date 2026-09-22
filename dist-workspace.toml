@@ -5,9 +5,9 @@ members = ["cargo:."]
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
-# Allow release.yml to be hand-edited (we append the codesign + cosign jobs
-# after the generated `host` job). Without this, cargo-dist aborts the release
-# because the committed release.yml no longer matches its generated output.
+# Keep `allow-dirty` for CI: it lets a release proceed even if the working
+# tree is dirty or the config drifted at tag time. `release.yml` is kept in
+# sync with this file via `cargo dist generate`.
 allow-dirty = ["ci"]
 # CI backends to support
 ci = "github"
@@ -22,7 +22,6 @@ targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
-    "x86_64-pc-windows-msvc",
 ]
 # Where to host releases
 hosting = "github"
@@ -35,6 +34,3 @@ protobuf-compiler = '*'
 
 [dist.dependencies.homebrew]
 protobuf = '*'
-
-[dist.dependencies.chocolatey]
-protoc = '*'
