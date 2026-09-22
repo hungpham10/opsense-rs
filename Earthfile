@@ -25,7 +25,8 @@ build-binaries:
 
     # 2. Copy binaries từ host nếu đã build sẵn ở CI runner (dùng --if-exists thay cho --ignore-missing)
     # Lưu ý: Earthly sẽ không fail nếu các đường dẫn dưới đây chưa tồn tại
-    # KHÔNG dùng --dir để nội dung binaries/ được copy thẳng vào /src/bin/ (không tạo thư mục con binaries/)
+    # CI stage binaries theo sub-dir binaries/<arch>/ (x86_64, aarch64) để build
+    # multi-platform một lần; bước RUN bên dưới tự chọn theo `uname -m`.
     COPY --if-exists binaries/ /src/bin/
     # target/ bị .earthignore chặn; giữ lại dòng dưới làm fallback nhưng thực tế không bao giờ copy được
     COPY --dir --if-exists target/${TARGET}/release target/release /src/bin/
@@ -33,13 +34,21 @@ build-binaries:
     # 3. Copy toàn bộ source code vào để phục vụ fallback build
     COPY . /src/code/
 
-    # 4. Kiểm tra & log: Nếu có binary từ host thì copy ra /out, ngược lại tiến hành cargo build
+    # 4. Kiểm tra & log: Nếu có binary từ host thì copy ra /out, ngược lại tiến hành cargo build.
+    #    Với multi-platform (--platform linux/amd64,linux/arm64), Earthly chạy target này riêng
+    #    cho từng platform; `uname -m` trả arch đang build (x86_64/aarch64) nên CI stage binaries
+    #    dưới binaries/<arch>/ để mỗi platform tự chọn đúng bộ (compat: binaries/ phẳng vẫn OK).
     RUN sh -c '\
       mkdir -p /out && \
+      ARCH="$(uname -m)" && \
+      echo "=== Platform arch: ${ARCH} ===" && \
       echo "=== Verifying pre-built binaries in /src/bin ===" && \
-      if [ -d "/src/bin" ]; then ls -la /src/bin/; else echo "/src/bin does not exist (no pre-built binaries copied)"; fi && \
-      if [ -f "/src/bin/opsense" ]; then \
-        echo "--> Found pre-built binaries from host!"; \
+      ls -la /src/bin/ 2>/dev/null || echo "/src/bin does not exist (no pre-built binaries copied)" && \
+      if [ -f "/src/bin/${ARCH}/opsense" ]; then \
+        echo "--> Found host pre-built binaries for ${ARCH}!"; \
+        cp /src/bin/${ARCH}/opsense* /out/; \
+      elif [ -f "/src/bin/opsense" ]; then \
+        echo "--> Found flat pre-built binaries from host!"; \
         cp /src/bin/opsense* /out/; \
       elif [ -f "/src/bin/release/opsense" ]; then \
         echo "--> Found pre-built binaries in release folder!"; \
