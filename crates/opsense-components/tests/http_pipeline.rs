@@ -20,8 +20,8 @@ use std::time::Duration;
 use opsense_components::http::HttpSource;
 use opsense_components::signal;
 use opsense_components::vector::runtime::{Component, Event, Runtime};
-use opsense_libs::vector::components::clock::Clock;
-use opsense_libs::vector::components::output::Output;
+use opsense_mlib::vector::components::clock::Clock;
+use opsense_mlib::vector::components::output::Output;
 
 use opsense_core::Config;
 use opsense_core::Context;

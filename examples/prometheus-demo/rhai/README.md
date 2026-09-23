@@ -172,7 +172,7 @@ step  = "60"
 ```
 
 Response map thành observations bằng bộ khai báo `items` + `fields` +
-`constants` (engine jq của `opsense-libs`) — không cần viết script hay code
+`constants` (engine jq của `opsense-mlib`) — không cần viết script hay code
 Rust: thêm node config là xong. Body observation-shape sẵn thì bỏ trống
 `items`/`fields`, node parse thẳng. Lỗi fetch/map → cửa sổ giữ cursor, tự
 retry ở tick kế. Chi tiết: [`docs/GUIDE.md`](../docs/GUIDE.md) mục 5.

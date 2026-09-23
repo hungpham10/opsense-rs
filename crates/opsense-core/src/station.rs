@@ -265,9 +265,9 @@ impl TimeseriesStation {
     fn spawn_bg_sync(station: &mut Self, cfg: &StorageConfig, ts: Arc<dyn TimeseriesStorage>) {
         use std::time::{Duration, SystemTime};
 
-        let flush_every = cfg.s3_flush_interval_secs as u64;
-        let snapshot_every = cfg.s3_snapshot_interval_secs as u64;
-        let retention_secs = cfg.retention_secs as u64;
+        let flush_every = cfg.s3_flush_interval_secs;
+        let snapshot_every = cfg.s3_snapshot_interval_secs;
+        let retention_secs = cfg.retention_secs;
         if flush_every == 0 && snapshot_every == 0 && retention_secs == 0 {
             return;
         }

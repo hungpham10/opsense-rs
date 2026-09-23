@@ -1027,15 +1027,14 @@ fn s3_delete(store: &Arc<dyn object_store::ObjectStore>, key: &str) -> Result<()
 /// Series của luồng block (`TimeseriesStation`) đã mang sẵn `blk:<id>` → dùng
 /// thẳng; series thường lấy `floor(ts / block_secs)`.
 fn block_id_of(series: &[u8], ts: u64, block_secs: i64) -> u64 {
-    if let Some(rest) = series.strip_prefix(b"blk:") {
-        if let Ok(id) = std::str::from_utf8(rest)
+    if let Some(rest) = series.strip_prefix(b"blk:")
+        && let Ok(id) = std::str::from_utf8(rest)
             .unwrap_or_default()
             .trim()
             .parse::<u64>()
         {
             return id;
         }
-    }
     if block_secs > 0 {
         ts / block_secs as u64
     } else {
@@ -1260,7 +1259,7 @@ impl LakehouseStorage {
     pub fn retain_block_partitions(&self, keep_after_ts: u64) -> Result<()> {
         let block_secs = self.block_secs;
         let keep_block = if block_secs > 0 {
-            (keep_after_ts / block_secs as u64).min(u64::MAX)
+            keep_after_ts / block_secs as u64
         } else {
             keep_after_ts
         };
@@ -1297,7 +1296,7 @@ impl LakehouseStorage {
         };
 
         if let Some(s3) = &self.s3 {
-            let store = s3_store(&s3)?;
+            let store = s3_store(s3)?;
             let lake_key = self.lake_key.clone();
             for rel in &removed {
                 let _ = s3_delete(&store, &s3.key(&format!("{lake_key}/ts/{rel}")));
@@ -1364,8 +1363,8 @@ fn restore_from_s3(cfg: &S3Config, local: &Path, lake_key: Option<&str>) -> Resu
 
     // Restore cả ts lake (delta files + manifest) — cold-read không mất block.
     let ts_key = cfg.key(&format!("{lake_key}/ts/manifest.json"));
-    if let Ok(raw_ts) = s3_get(&store, &ts_key) {
-        if let Ok(list) = serde_json::from_slice::<Vec<String>>(&raw_ts) {
+    if let Ok(raw_ts) = s3_get(&store, &ts_key)
+        && let Ok(list) = serde_json::from_slice::<Vec<String>>(&raw_ts) {
             std::fs::create_dir_all(local.join("ts")).map_err(internal)?;
             for rel in &list {
                 let key = cfg.key(&format!("{lake_key}/ts/{rel}"));
@@ -1380,7 +1379,6 @@ fn restore_from_s3(cfg: &S3Config, local: &Path, lake_key: Option<&str>) -> Resu
             }
             atomic_write(&local.join("ts_manifest.json"), &raw_ts)?;
         }
-    }
 
     Ok(Some(generation))
 }

@@ -7,6 +7,92 @@ use crate::grid::AnalysisGrid;
 ///
 /// Hỗ trợ tính xác suất sau `n` interval (dùng iterative vector-matrix
 /// multiplication với ma trận chuyển dạng sparse).
+#[cfg_attr(
+    feature = "rhai",
+    opsense_macros::rhai_class(
+        constructor = "transition_analysis",
+        accessors(
+            "num_buckets" -> |t: &mut Self| -> i64 { t.num_buckets() as i64 },
+            "num_cells" -> |t: &mut Self| -> i64 { t.num_cells() as i64 },
+            "interval_secs" -> |t: &mut Self| -> i64 { t.interval_secs() },
+            "grid" -> |t: &mut Self| -> AnalysisGrid { t.grid().clone() },
+            "down_probability" -> |t: &mut Self| -> f64 { t.down_probability() },
+            "up_probability" -> |t: &mut Self| -> f64 { t.up_probability() },
+            "stay_probability" -> |t: &mut Self| -> f64 { t.stay_probability() },
+            "down_probabilities" -> |t: &mut Self| -> rhai::Dynamic {
+                let v = t.down_probabilities();
+                let mut arr = rhai::Array::new();
+                for x in v { arr.push(rhai::Dynamic::from(x)); }
+                rhai::Dynamic::from(arr)
+            },
+            "up_probabilities" -> |t: &mut Self| -> rhai::Dynamic {
+                let v = t.up_probabilities();
+                let mut arr = rhai::Array::new();
+                for x in v { arr.push(rhai::Dynamic::from(x)); }
+                rhai::Dynamic::from(arr)
+            },
+            "stay_probabilities" -> |t: &mut Self| -> rhai::Dynamic {
+                let v = t.stay_probabilities();
+                let mut arr = rhai::Array::new();
+                for x in v { arr.push(rhai::Dynamic::from(x)); }
+                rhai::Dynamic::from(arr)
+            },
+            "transitions" -> |t: &mut Self| -> rhai::Dynamic {
+                let trans = t.transitions();
+                let mut arr = rhai::Array::new();
+                for from_list in trans {
+                    let mut sub = rhai::Array::new();
+                    for (to, cnt) in from_list {
+                        let mut m = rhai::Map::new();
+                        m.insert("from".into(), rhai::Dynamic::from(*to as i64));
+                        m.insert("to".into(), rhai::Dynamic::from(*cnt as i64));
+                        sub.push(rhai::Dynamic::from(m));
+                    }
+                    arr.push(rhai::Dynamic::from(sub));
+                }
+                rhai::Dynamic::from(arr)
+            },
+            "interval_cells" -> |t: &mut Self, i: i64| -> rhai::Dynamic {
+                let idx = i as usize;
+                let cells = t.interval_cells(idx);
+                let mut arr = rhai::Array::new();
+                for (cell, cnt) in cells {
+                    let mut m = rhai::Map::new();
+                    m.insert("cell".into(), rhai::Dynamic::from(*cell as i64));
+                    m.insert("count".into(), rhai::Dynamic::from(*cnt as i64));
+                    arr.push(rhai::Dynamic::from(m));
+                }
+                rhai::Dynamic::from(arr)
+            },
+            "dwell_times" -> |t: &mut Self, cell: i64| -> rhai::Dynamic {
+                let idx = cell as usize;
+                let times = t.dwell_times(idx);
+                let mut arr = rhai::Array::new();
+                for d in times { arr.push(rhai::Dynamic::from(*d as i64)); }
+                rhai::Dynamic::from(arr)
+            },
+            "mean_dwell" -> |t: &mut Self, cell: i64| -> rhai::Dynamic {
+                let idx = cell as usize;
+                match t.mean_dwell(idx) {
+                    Some(v) => rhai::Dynamic::from(v),
+                    None => rhai::Dynamic::UNIT,
+                }
+            },
+            "max_dwell" -> |t: &mut Self, cell: i64| -> i64 {
+                let idx = cell as usize;
+                t.max_dwell(idx) as i64
+            },
+            "has_transitions_from" -> |t: &mut Self, cell: i64| -> bool {
+                let idx = cell as usize;
+                t.has_transitions_from(idx)
+            },
+            "total_from" -> |t: &mut Self, cell: i64| -> i64 {
+                let idx = cell as usize;
+                t.total_from(idx) as i64
+            }
+        )
+    )
+)]
 #[derive(Debug, Clone)]
 pub struct TransitionAnalysis {
     grid: AnalysisGrid,
@@ -319,6 +405,24 @@ impl fmt::Display for TransitionAnalysis {
         }
         writeln!(f, "}}")?;
         Ok(())
+    }
+}
+
+#[cfg(feature = "rhai")]
+impl TransitionAnalysis {
+    /// Rhai constructor: `transition_analysis(grid, data, interval_secs)`.
+    /// Takes an AnalysisGrid, an Array of observation maps, and interval_secs.
+    pub fn transition_analysis(
+        grid: AnalysisGrid,
+        data: rhai::Array,
+        interval_secs: i64,
+    ) -> rhai::Dynamic {
+        let pts = crate::script::parse_points(&data).unwrap_or_default();
+        if pts.len() < 2 {
+            return rhai::Dynamic::UNIT;
+        }
+        let ta = TransitionAnalysis::new(grid, &pts, interval_secs);
+        rhai::Dynamic::from(ta)
     }
 }
 

@@ -34,3 +34,6 @@ pub mod jq;
 
 #[cfg(feature = "json")]
 pub mod vector;
+
+#[cfg(feature = "rhai")]
+pub mod script;

@@ -15,12 +15,6 @@ pub mod repl;
 pub mod runner;
 pub mod serve;
 
-/// Alias `opsense-mlib` under its pre-refactor name `opsense_libs`, matching
-/// the forms used by `opsense-components` and by the runner-client code
-/// (`opsense_libs::sops::{decrypt,encrypt}`, challenge-response handshake).
-#[allow(unused_imports)]
-use opsense_mlib as opsense_libs;
-
 /// Link the `opsense-qlib` crate so its typetag-registered pipeline
 /// components join the component inventory deserialized from
 /// pipeline TOML. Same mechanism as `opsense-components`.

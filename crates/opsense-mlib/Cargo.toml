@@ -12,6 +12,7 @@ default = []
 bloom-search = []
 sops = ["rand", "aes-gcm"]
 json = []
+rhai = ["dep:rhai"]
 parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:object_store"]
 sqlite = ["dep:sqlx"]
 redis = ["dep:redis"]
@@ -32,6 +33,9 @@ parking_lot = { workspace = true }
 # sops (AES-GCM challenge encryption)
 aes-gcm = { version = "0.10", optional = true }
 rand = { workspace = true, optional = true }
+
+# rhai scripting (optional)
+rhai = { workspace = true, optional = true }
 
 # --- vector subsystem ---
 tokio = { workspace = true }

@@ -1,30 +1,33 @@
 //! Rhai transform: process each observation window with a sandboxed Rhai
-//! script (`scripts/` holds examples).
+//! script (`examples/prometheus-demo/rhai/` holds examples).
 //!
-//! Data flows exactly like the built-in processor: any signal carrying `ts`
-//! advances this node's own watermark cursor (keyed by `id`), the window
-//! `(cursor, ts]` is read from the upstream station's `input_stage`, handed to
-//! the script's `process(observations)` function, and results are written to
-//! `output_stage` in this node's own station (the only store since the
-//! persistence tier was removed). Downstream receives `processed(ts)`, so a
-//! node can be chained after it unchanged.
+//! Data flow follows the modern component pattern:
+//!  1. A message with `event: "data_ready"` (or similar) arrives from upstream.
+//!  2. Extract observations from the message payload.
+//!  3. Run the script's `process(observations)` function.
+//!  4. Append script output to this node's own `TimeseriesStation`.
+//!  5. Forward a `processed(ts)` message downstream.
 //!
 //! The script comes from `script` (inline) or `script_path` (.rhai file,
-//! recompiled on change). Exactly one of the two must be set.
+//! recompiled on mtime change). Exactly one of the two must be set.
+//!
+//! Configurable parameters (via `params` map in the pipeline config) are
+/// exposed to the script as global variables.
 
 use std::collections::BTreeMap;
 use std::io::Error;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use opsense_core::Context;
-use opsense_core::Observation;
-use opsense_core::Stage;
+use opsense_components::signal;
+use opsense_components::station::{downcast_ctx, extract_observations};
+use opsense_core::{Observation, Station, TimeseriesStation};
+use opsense_macros::transform;
+use serde_json::Value;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::runtime::ScriptSource;
 use crate::vector::runtime::{Component, Identify, Message, Outbound};
-use opsense_components::{OpsenseContext, signal};
-use opsense_macros::transform;
-use tokio::sync::mpsc;
 
 #[transform]
 pub struct RhaiTransform {
@@ -36,38 +39,12 @@ pub struct RhaiTransform {
     /// Path to a `.rhai` file instead of an inline script.
     #[serde(default)]
     pub script_path: String,
-    /// Stage read from the working LRU.
-    #[serde(default = "default_input_stage")]
-    pub input_stage: Stage,
-    /// Stage written with the script output.
-    #[serde(default = "default_output_stage")]
-    pub output_stage: Stage,
-    /// Append the script output to the working LRU.
-    #[serde(default = "default_true")]
-    pub write_lru: bool,
-    /// Also append the script output to the persistent store.
+    /// Script parameters exposed as global variables.
     #[serde(default)]
-    pub write_store: bool,
-    /// Config parameters exposed to the script as `param_<name>` global
-    /// variables (e.g. `factor` becomes `param_factor`).
-    #[serde(default)]
-    pub params: BTreeMap<String, serde_json::Value>,
-}
-
-fn default_input_stage() -> Stage {
-    Stage::Processed
-}
-
-fn default_output_stage() -> Stage {
-    Stage::Processed
-}
-
-fn default_true() -> bool {
-    true
+    pub params: BTreeMap<String, Value>,
 }
 
 impl RhaiTransform {
-    /// Node driven by an inline script.
     #[must_use]
     pub fn new_inline(id: &str, inputs: &[&str], script: &str) -> Self {
         Self {
@@ -75,15 +52,10 @@ impl RhaiTransform {
             inputs: inputs.iter().map(|s| (*s).to_string()).collect(),
             script: script.to_string(),
             script_path: String::new(),
-            input_stage: default_input_stage(),
-            output_stage: default_output_stage(),
-            write_lru: true,
-            write_store: false,
             params: BTreeMap::new(),
         }
     }
 
-    /// Node driven by a `.rhai` file.
     #[must_use]
     pub fn new_file(id: &str, inputs: &[&str], script_path: &str) -> Self {
         Self {
@@ -91,21 +63,17 @@ impl RhaiTransform {
             inputs: inputs.iter().map(|s| (*s).to_string()).collect(),
             script: String::new(),
             script_path: script_path.to_string(),
-            input_stage: default_input_stage(),
-            output_stage: default_output_stage(),
-            write_lru: true,
-            write_store: false,
             params: BTreeMap::new(),
         }
     }
 
-    fn script_source(&self) -> Result<ScriptSource, Error> {
-        match (!self.script.is_empty(), !self.script_path.is_empty()) {
-            (true, false) => Ok(ScriptSource::Inline(self.script.clone())),
-            (false, true) => Ok(ScriptSource::File(PathBuf::from(&self.script_path))),
-            _ => Err(Error::other(
-                "rhai transform needs exactly one of `script` or `script_path`",
-            )),
+    fn script_source(&self) -> Result<ScriptSource, String> {
+        if !self.script.is_empty() {
+            Ok(ScriptSource::Inline(self.script.clone()))
+        } else if !self.script_path.is_empty() {
+            Ok(ScriptSource::File(PathBuf::from(&self.script_path)))
+        } else {
+            Err("rhai_transform: exactly one of `script` or `script_path` must be set".into())
         }
     }
 }
@@ -117,84 +85,95 @@ impl_rhai_transform!(
         rx: &mut mpsc::Receiver<Message>,
         tx: Outbound,
     ) -> Result<(), Error> {
+        let ctx = downcast_ctx(&tx)?;
+        let station = TimeseriesStation::from_storage(&self.id, ctx.storage()).await?;
+        ctx.registry(
+            &self.id,
+            Station::Timeseries(Arc::new(RwLock::new(station))),
+        )
+        .await
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
+
+        let me = ctx
+            .station::<Arc<RwLock<TimeseriesStation>>>(&self.id)
+            .await?
+            .clone();
+
         while let Some(msg) = rx.recv().await {
-            // Any signal with a timestamp drives the node (tick from a clock,
-            // data_ready/processed when chained after another transform).
             let Some(ts) = signal::ts(&msg) else {
                 continue;
             };
 
-            // Fail fast on a misconfigured node before touching any state.
-            let source = self.script_source()?;
-
-            let ctx = tx
-                .ctx
-                .as_ref()
-                .and_then(|c| c.as_any().downcast_ref::<OpsenseContext>())
-                .ok_or_else(|| Error::other("OpsenseContext not injected into Runtime"))?;
-
-            let from = ctx.get_node_watermark(&self.id);
-            if ts <= from {
-                continue; // nothing new since the last cycle
+            // Extract observations from the upstream message payload
+            let batch = extract_observations(&msg.payload);
+            if batch.is_empty() {
+                // Forward processed signal even for empty batch to advance downstream watermarks
+                let done = signal::tagged(signal::processed(ts), &self.id);
+                for s in &tx.streams {
+                    let _ = s.send(done.clone()).await;
+                }
+                continue;
             }
 
-            match self.process_window(ctx, &msg, &source, from, ts).await {
-                Ok(()) => ctx.set_node_watermark(&self.id, ts),
-                // Keep the cursor: the window is retried on the next signal so
-                // fixing the script recovers without data loss.
-                Err(e) => tracing::warn!("rhai {} skipped batch at ts {ts}: {e}", self.id),
+            let source = match self.script_source() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("rhai {}: {}", self.id, e);
+                    continue;
+                }
+            };
+
+            // Fetch attributes for this call (async, so do it per-batch)
+            let attributes = ctx.get_attributes().await;
+
+            // Run the script
+            let items = match crate::call_process_with(
+                source,
+                serde_json::to_value(&batch).unwrap(),
+                self.params.clone(),
+                attributes,
+            )
+            .await
+            {
+                Ok(items) => items,
+                Err(e) => {
+                    tracing::warn!("rhai {} skipped batch at ts {ts}: {e}", self.id);
+                    // Still forward processed to not stall downstream
+                    let done = signal::tagged(signal::processed(ts), &self.id);
+                    for s in &tx.streams {
+                        let _ = s.send(done.clone()).await;
+                    }
+                    continue;
+                }
+            };
+
+            // Convert script output back to Observations and write to own station
+            let mut processed = Vec::with_capacity(items.len());
+            for item in items {
+                match serde_json::from_value::<Observation>(item) {
+                    Ok(obs) => processed.push(obs),
+                    Err(e) => tracing::warn!("rhai {}: script output parse error: {e}", self.id),
+                }
             }
 
+            if !processed.is_empty() {
+                let from = batch.iter().map(|o| o.ts).min().unwrap_or(ts);
+                let to = batch.iter().map(|o| o.ts).max().unwrap_or(ts);
+                me.write().await.update_range(&processed, from, to, ts);
+            }
+
+            // Forward processed signal downstream
             let done = signal::tagged(signal::processed(ts), &self.id);
-            for stream in &tx.streams {
-                let _ = stream.send(done.clone()).await;
+            for s in &tx.streams {
+                let _ = s.send(done.clone()).await;
             }
         }
         Ok(())
     }
 );
-
-impl RhaiTransform {
-    async fn process_window(
-        &self,
-        ctx: &OpsenseContext,
-        msg: &Message,
-        source: &ScriptSource,
-        from: i64,
-        ts: i64,
-    ) -> Result<(), String> {
-        // Đọc cửa sổ từ station của upstream (merge cả hai stage).
-        let batch = ctx
-            .read_window(&self.inputs, signal::src(msg), from, ts, None)
-            .await;
-        if batch.is_empty() {
-            return Ok(());
-        }
-
-        let input_json = serde_json::to_value(&batch).map_err(|e| e.to_string())?;
-        let items = crate::call_process_with(
-            source.clone(),
-            input_json,
-            self.params.clone(),
-            (*ctx.attributes()).clone(),
-        )
-        .await?;
-
-        let mut processed = Vec::with_capacity(items.len());
-        for item in items {
-            let obs: Observation =
-                serde_json::from_value(item).map_err(|e| format!("script output: {e}"))?;
-            processed.push(obs);
-        }
-
-        if !processed.is_empty() {
-            // Output nằm trong station riêng của node (nơi lưu duy nhất;
-            // persistence tier đã bị gỡ, nên station là kho duy nhất).
-            let cache =
-                opsense_components::own_station(&self.id, &self.inputs, &[self.output_stage]).await;
-            let mut g = cache.write().await;
-            g.append(self.output_stage, &processed).await;
-        }
-        Ok(())
-    }
-}

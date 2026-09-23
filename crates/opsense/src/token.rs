@@ -9,7 +9,7 @@
 //!
 //!   opsense token decrypt 000000000000000000000000a1...
 
-use opsense_libs::sops::{decrypt, encrypt};
+use opsense_mlib::sops::{decrypt, encrypt};
 use std::io::{Error, ErrorKind};
 
 pub async fn run(master_key: &str, action: &str, payload: &str) -> std::io::Result<()> {

@@ -16,10 +16,10 @@ use opsense_components::vector::runtime::{Event, Runtime};
 use opsense_components::{QlibEngine, TelegramSink};
 use opsense_core::Config;
 use opsense_core::Context;
-use opsense_libs::vector::components::CaptureSink;
-use opsense_libs::vector::components::input::Input;
-use opsense_libs::vector::components::output::Output;
-use opsense_libs::vector::runtime::{Component, Message};
+use opsense_mlib::vector::components::CaptureSink;
+use opsense_mlib::vector::components::input::Input;
+use opsense_mlib::vector::components::output::Output;
+use opsense_mlib::vector::runtime::{Component, Message};
 use opsense_model::secret::Secret;
 use opsense_qlib::{
     CandleStick, CryptoCalendar, GridStrategy, OrderEvent, SimpleFixedFee, StreamingPortfolio,

@@ -26,6 +26,53 @@ impl Default for SieveConfig {
 ///
 /// Dùng cho phân tích occupancy, transition, crossings.
 /// **Không phải** trading grid — trading grid là lưới lệnh cố định K bậc trong strategy.
+#[cfg_attr(
+    feature = "rhai",
+    opsense_macros::rhai_class(
+        constructor = "grid_fit",
+        accessors(
+            "num_cells" -> |g: &mut Self| -> i64 { g.num_cells() as i64 },
+            "num_lines" -> |g: &mut Self| -> i64 { g.num_lines() as i64 },
+            "grid_step" -> |g: &mut Self| -> f64 { g.step },
+            "grid_cell" -> |g: &mut Self, y: f64| -> i64 { g.cell(y) as i64 },
+            "grid_crossings" -> |g: &mut Self, values: rhai::Array| -> i64 {
+                let pts: Vec<f64> = values.iter().filter_map(|v| v.clone().try_cast::<f64>()).collect();
+                g.crossings(&pts) as i64
+            },
+            "grid_occupancy" -> |g: &mut Self, data: rhai::Array, interval_secs: i64| -> rhai::Dynamic {
+                let pts = crate::script::parse_points(&data).unwrap_or_default();
+                let occ = g.occupancy(&pts, interval_secs);
+                let mut arr = rhai::Array::new();
+                for bucket in occ {
+                    let mut sub = rhai::Array::new();
+                    for cnt in bucket {
+                        sub.push(rhai::Dynamic::from(cnt as i64));
+                    }
+                    arr.push(rhai::Dynamic::from(sub));
+                }
+                rhai::Dynamic::from(arr)
+            },
+            "grid_ranges" -> |g: &mut Self| -> rhai::Dynamic {
+                let ranges = g.cell_ranges();
+                let mut arr = rhai::Array::new();
+                for (idx, lo, hi) in ranges {
+                    let mut m = rhai::Map::new();
+                    m.insert("index".into(), rhai::Dynamic::from(idx as i64));
+                    m.insert("low".into(), rhai::Dynamic::from(lo));
+                    m.insert("high".into(), rhai::Dynamic::from(hi));
+                    arr.push(rhai::Dynamic::from(m));
+                }
+                rhai::Dynamic::from(arr)
+            },
+            "grid_fit_values" -> |values: rhai::Array, min: f64, max: f64, max_bit: i64| -> rhai::Dynamic {
+                let pts: Vec<f64> = values.iter().filter_map(|v| v.clone().try_cast::<f64>()).collect();
+                if pts.is_empty() { return rhai::Dynamic::UNIT; }
+                let grid = AnalysisGrid::new(&pts, min, max, max_bit as usize);
+                rhai::Dynamic::from(grid)
+            }
+        )
+    )
+)]
 #[derive(Debug, Clone, Copy)]
 pub struct AnalysisGrid {
     pub step: f64,
@@ -234,6 +281,21 @@ impl AnalysisGrid {
         (0..self.num_cells())
             .filter_map(|i| self.cell_range(i).map(|(lo, hi)| (i, lo, hi)))
             .collect()
+    }
+}
+
+#[cfg(feature = "rhai")]
+impl AnalysisGrid {
+    /// Rhai constructor: `grid_fit(points, min, max, max_bit)`.
+    /// Takes an Array of observation maps with `value` field, extracts values, and builds the grid.
+    pub fn grid_fit(points: rhai::Array, min: f64, max: f64, max_bit: i64) -> rhai::Dynamic {
+        let pts = crate::script::parse_points(&points).unwrap_or_default();
+        if pts.is_empty() {
+            return rhai::Dynamic::UNIT;
+        }
+        let values: Vec<f64> = pts.into_iter().map(|(_, v)| v).collect();
+        let grid = AnalysisGrid::new(&values, min, max, max_bit as usize);
+        rhai::Dynamic::from(grid)
     }
 }
 

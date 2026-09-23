@@ -21,6 +21,7 @@ sqlite = ["opsense-mlib/sqlite"]
 opsense-mlib = { path = "../opsense-mlib", features = ["json"] }
 opsense-model = { path = "../opsense-model" }
 
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

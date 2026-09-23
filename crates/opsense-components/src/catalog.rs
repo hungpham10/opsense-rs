@@ -1,12 +1,12 @@
 //! [`CatalogTool`] — key/value catalog backed by Radix substring search
-//! (`Search<u8>` from opsense-libs). Mỗi node có một index riêng; transform
+//! (`Search<u8>` from opsense-mlib). Mỗi node có một index riêng; transform
 //! nhận observations, insert key/value vào đây; REPL/MCP search trả matching
 //! entries.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use opsense_libs::search::Search;
+use opsense_mlib::search::Search;
 
 pub struct CatalogTool {
     pub id: String,

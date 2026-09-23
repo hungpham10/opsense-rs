@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use opsense_components::vector::runtime::{Event, Runtime};
 use opsense_components::{QlibEngine, TelegramSink};
-use opsense_libs::vector::components::CaptureSink;
-use opsense_libs::vector::components::input::Input;
-use opsense_libs::vector::components::output::Output;
-use opsense_libs::vector::runtime::Message;
+use opsense_mlib::vector::components::CaptureSink;
+use opsense_mlib::vector::components::input::Input;
+use opsense_mlib::vector::components::output::Output;
+use opsense_mlib::vector::runtime::Message;
 use opsense_qlib::{CandleStick, OrderEvent};
 use serde_json::Value;
 

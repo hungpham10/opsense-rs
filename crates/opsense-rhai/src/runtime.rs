@@ -149,7 +149,7 @@ fn thread_engine() -> std::cell::RefCell<rhai::Engine> {
     eng.set_max_expr_depths(256, 256);
 
     // Every script-facing native function lives in one place: `tools`.
-    crate::tools::register_all(&mut eng);
+    crate::tools::register_all(&mut eng, std::collections::BTreeMap::new());
     std::cell::RefCell::new(eng)
 }
 
@@ -241,7 +241,7 @@ pub async fn call_process_with(
                     Some(rhai::Dynamic::UNIT)
                 }
             });
-            crate::tools::register_attributes(eng, attributes);
+            crate::attributes::register(eng, attributes);
             eng.call_fn(&mut scope, &ast, "process", (arg,))
                 .map_err(|e| format!("script error: {e}"))
         })?;

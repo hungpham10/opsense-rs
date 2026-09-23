@@ -62,7 +62,7 @@ tự diff, validate liên kết + chu trình DFS trước khi apply).
 
 | Crate | Trách nhiệm |
 |---|---|
-| `opsense-libs` | LRU sharded, jq, Aho-Corasick, Radix + KMP, vector runtime subsystem |
+| `opsense-mlib` | LRU sharded, jq, Aho-Corasick, Radix + KMP, vector runtime subsystem |
 | `opsense-core` | Domain: `Config`, `Context`, `Station` (3 loại) |
 | `opsense-components` | Component chuẩn: clock, ingest, processor, http, collector, station |
 | `opsense-rhai` | Rhai sandbox + `RhaiTransform` component + `register_ts_ops` |
@@ -494,7 +494,7 @@ type Mutation {
 - **3 query tách theo kind**: client biết query nào cho station nào nhờ
   `stations[].kind`. Sai kind → GraphQL error rõ ràng.
 - **Không có `Query.nodeTypes`**: `typetag::serde` ở
-  `opsense-libs/src/vector/runtime/models.rs:133` tự fail khi deserialize
+  `opsense-mlib/src/vector/runtime/models.rs:133` tự fail khi deserialize
   `ComponentInput.type` không tồn tại → GraphQL trả error. Validate miễn phí.
 - **AppState siêu gọn** (chỉ `context` + `runtime`): process chạy 1 pipeline
   duy nhất, không cần session map hay event ring buffer.
@@ -726,7 +726,7 @@ Còn lại **chỉ 4 bảng** (`sys_tenant`, `sys_oidc`, `sys_token_map`,
 > Audit ngày 2026-09-04. Phase 5 build infra + CI unit test workflow đã xong;
 > Phase 2 GraphQL bridge vẫn cần wrap RunnerClient qua resolvers.
 
-- ✅ Phase scaffolding (Cargo, opsense-libs, opsense-core rewrite, opsense-components)
+- ✅ Phase scaffolding (Cargo, opsense-mlib, opsense-core rewrite, opsense-components)
 - ✅ `init` subcommand (tạo config mẫu)
 - ✅ `serve` subcommand (axum + UDS/HTTP, GraphQL skeleton)
 - 🟡 **Phase 1 (đang làm)**: GraphQL schema + resolvers cho Tầng 1
@@ -990,7 +990,7 @@ vẫn build nó (artifact `+binaries/opsense-kernel-echo` + image
 |---|---|---|
 | `test` (Setup & Unit Tests) | `ubuntu-latest` | Build + test workspace |
 
-Service đi kèm: `redis:7` (port 6379, healthcheck) cho `opsense-libs`
+Service đi kèm: `redis:7` (port 6379, healthcheck) cho `opsense-mlib`
 test cần Redis backend.
 
 Toolchains cài trong job:

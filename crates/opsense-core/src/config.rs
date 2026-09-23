@@ -152,7 +152,7 @@ impl Default for ReplConfig {
 pub struct VectorSourceConfig {
     pub url: String,
 
-    /// jq-style filter applied to the Vector payload (uses `opsense_libs::jq::JsonQuery`).
+    /// jq-style filter applied to the Vector payload (uses `opsense_mlib::jq::JsonQuery`).
     #[serde(default)]
     pub jq_filter: Option<String>,
 

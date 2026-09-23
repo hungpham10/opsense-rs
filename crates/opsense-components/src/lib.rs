@@ -1,7 +1,7 @@
 //! Opsense components: the vector dataflow [`Component`]s that drive collection.
 //!
 //! This crate holds every Opsense-specific component registered into the
-//! `opsense_libs::vector` [`Runtime`]. It is split from `opsense-core` so the
+//! `opsense_mlib::vector` [`Runtime`]. It is split from `opsense-core` so the
 //! growing pile of components cannot bloat the pure domain crate.
 //!
 //! Nodes register their own stations into the process-wide
@@ -142,9 +142,9 @@ pub fn render(template: &str, vars: &BTreeMap<String, String>) -> Result<String,
 /// `opsense-macros`' `#[source]`/`#[sink]`/`#[transform]`/`#[input]`/`#[output]`
 /// attributes expand to code that refers to `crate::vector::runtime::*`; this
 /// mirror lets those macros be used from this crate exactly as they are from
-/// `opsense-libs`.
+/// `opsense-mlib`.
 pub mod vector {
-    pub use opsense_libs::vector::runtime;
+    pub use opsense_mlib::vector::runtime;
 }
 
 #[cfg(test)]
