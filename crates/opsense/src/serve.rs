@@ -176,11 +176,21 @@ fn load_config() -> Result<Config, Error> {
 }
 
 /// Validate config.toml from path or OPSENSE_CONFIG env.
+///
+/// Besides the config invariants from `cfg.validate()`, this also builds the
+/// pipeline component graph — the same deserialization `serve` performs — so
+/// configs referencing a component type that isn't compiled into the binary
+/// (e.g. `unknown variant 'timeseries_station_sink'`) fail *here* instead of
+/// crash-looping the container.
 pub async fn validate_config(opt_path: Option<PathBuf>) -> Result<(), Error> {
     let path = opt_path.unwrap_or_else(config_path);
     let cfg = Config::load(&path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     cfg.validate()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    // Deserialize the pipeline components (typetag registry) exactly like
+    // `AppState::new` does when serve starts.
+    crate::api::pipeline_from_config(&cfg)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     Ok(())
 }

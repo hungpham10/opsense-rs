@@ -268,10 +268,14 @@ jobs:
           echo "=== Config for ${{ matrix.strategy }} ==="
           cat conf/opsense.conf.toml
 
-      - name: Validate strategy config.toml
-        if: matrix.strategy != 'default'
+      - name: Validate config.toml (before compose starts)
         run: |
-          cargo run -p opsense -- validate --config "strategies/${{ matrix.strategy }}/config.toml"
+          # Validates what opsense-serve will actually mount: for non-default
+          # strategies this is the copied strategy config; for `default` it is
+          # the repo conf/opsense.conf.toml unchanged. Uses the release binary
+          # downloaded above — the exact binary baked into the serve image —
+          # instead of `cargo run` (which would compile a cold debug profile).
+          ./target/release/opsense validate --config conf/opsense.conf.toml
           echo "Config validation passed for ${{ matrix.strategy }}"
 
       - name: Start Compose stack
@@ -298,34 +302,6 @@ jobs:
             | jq -s -e 'length > 0 and all(.Health == "healthy")' \
             > /dev/null \
             || (echo "FAIL: not all services healthy" && cat compose-health.txt && exit 1)
-
-      - name: Run integration tests
-        env:
-          OPSENSE_SERVE_URL: http://localhost:8080
-          OPSENSE_RUNNER_ECHO: 127.0.0.1:50051
-          OPSENSE_RUNNER_PYTHON: 127.0.0.1:50052
-          OPSENSE_RUNNER_JULIA: 127.0.0.1:50053
-          DB_DSN: postgres://opsense:opsense123@127.0.0.1:5432/opsense
-          OPSENSE_INTEGRATION: 'true'
-          VALKEY_PORT: "6380"
-          REDIS_HOST: "127.0.0.1"
-          REDIS_PORT: "6380"
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        run: |
-          # Bỏ dòng --config 'profile.ci-test...' đi vì nó ép Cargo compile lại lần nữa
-          cargo test --workspace --locked --release \
-            --test integration_health \
-            --test integration_oauth \
-            --test integration_runner_grpc \
-            --test integration_repl_pty \
-            --test integration_storage \
-            --test integration_s3_lake \
-            -- --test-threads=1 --nocapture
-
-      - name: Cleanup Compose stack
-        if: always()
-        run: OPSENSE_TAG=${{ env.OPSENSE_TAG }} docker compose down -v
 
       - name: Run integration tests for ${{ matrix.strategy }}
         env:

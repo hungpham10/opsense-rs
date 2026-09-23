@@ -96,7 +96,7 @@ impl AppState {
             runtime.set_context(context.clone());
             runtime
                 .reload(
-                    Self::pipeline_from_config(config)
+                    pipeline_from_config(config)
                         .map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
                 )
                 .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
@@ -151,28 +151,6 @@ impl AppState {
         self.context.remove_attribute(name).await
     }
 
-    fn pipeline_from_config(cfg: &Config) -> Result<Vec<Arc<dyn Component>>, Error> {
-        match &cfg.pipeline {
-            Some(p) if !p.components.is_empty() => p
-                .components
-                .iter()
-                .map(|value| {
-                    serde_json::from_value::<Box<dyn Component>>(value.clone())
-                        .map(Arc::from)
-                        .map_err(|e| {
-                            Error::new(ErrorKind::BrokenPipe, format!("component `{value}`: {e}"))
-                        })
-                })
-                .collect(),
-            _ => Ok(Self::default_pipeline(cfg)),
-        }
-    }
-
-    /// Build a minimal default pipeline (`clock -> null`) when no `[pipeline]`
-    /// section is present in the config. This matches the documented behaviour
-    /// promised in `opsense_core::Config`:
-    ///   "when absent a default `clock -> null` graph is built from
-    ///   `engine.poll_interval_seconds`"
     fn default_pipeline(cfg: &Config) -> Vec<Arc<dyn Component>> {
         let interval_secs = cfg.engine.poll_interval_seconds.max(1);
         vec![
@@ -185,6 +163,32 @@ impl AppState {
                 inputs: vec!["clock".to_string()],
             }) as Arc<dyn Component>,
         ]
+    }
+}
+
+/// Build the pipeline component graph from `[pipeline]` (or the default
+/// `clock -> null` graph when absent). Deserializes every component through
+/// the typetag registry — this is where configs fail with e.g.
+/// `unknown variant 'timeseries_station_sink'` when a component crate is not
+/// linked into the binary. Used by [`AppState::new`] and exposed so
+/// `opsense validate` catches the same failures before serve starts.
+pub fn pipeline_from_config(cfg: &Config) -> Result<Vec<Arc<dyn Component>>, Error> {
+    match &cfg.pipeline {
+        Some(p) if !p.components.is_empty() => p
+            .components
+            .iter()
+            .map(|value| {
+                serde_json::from_value::<Box<dyn Component>>(value.clone())
+                    .map(Arc::from)
+                    .map_err(|e| {
+                        Error::new(
+                            ErrorKind::BrokenPipe,
+                            format!("component `{value}`: {e}"),
+                        )
+                    })
+            })
+            .collect(),
+        _ => Ok(AppState::default_pipeline(cfg)),
     }
 }
 

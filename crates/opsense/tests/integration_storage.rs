@@ -130,9 +130,17 @@ async fn storage_query_timeseries_returns_data() {
     if !ensure_pipeline(&client, &id_token).await {
         return;
     }
-    if !ensure_stations(&client, &id_token).await {
-        return;
-    }
+    let stations = match common::wait_for_stations(&client, 60, &id_token).await {
+        Ok(s) => s,
+        Err(e) if common::integration_mode() => {
+            panic!("no stations registered: {e} — CI requires pipeline with timeseries_station_sink")
+        }
+        Err(e) => {
+            eprintln!("skipping: no stations registered ({e})");
+            return;
+        }
+    };
+    let station_id = stations.first().map(String::as_str).unwrap_or("tsdb");
 
     // Wait for clock to generate observations.
     tokio::time::sleep(Duration::from_secs(15)).await;
@@ -145,9 +153,9 @@ async fn storage_query_timeseries_returns_data() {
         .post(format!("{}/api/repl/graphql", serve_url()))
         .bearer_auth(&id_token)
         .json(&serde_json::json!({
-            "query": "query QueryTimeseries($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { ts value metric_id } }",
+            "query": "query QueryTimeseries($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { ts value metricId } }",
             "variables": {
-                "node": "clock",
+                "node": station_id,
                 "fromTs": from_ts,
                 "toTs": to_ts
             }
@@ -163,10 +171,13 @@ async fn storage_query_timeseries_returns_data() {
         eprintln!("queryTimeseries returned {} points", data.len());
         if !data.is_empty() {
             let last_point = &data[data.len() - 1];
-            eprintln!("last point: ts={} metric_id={}", 
-                last_point.get("ts").unwrap_or(&Value::Null), 
-                last_point.get("metric_id").unwrap_or(&Value::Null));
+            eprintln!("last point: ts={} metric_id={}",
+                last_point.get("ts").unwrap_or(&Value::Null),
+                last_point.get("metricId").unwrap_or(&Value::Null));
         }
+    }
+    if let Some(errors) = body.get("errors") {
+        eprintln!("queryTimeseries errors: {errors:?}");
     }
     // Don't assert on data presence — the pipeline may not have generated
     // enough data yet. The test proves the endpoint works and returns valid JSON.
@@ -242,7 +253,7 @@ async fn storage_data_integrity_metric_ids() {
             .post(format!("{}/api/repl/graphql", serve_url()))
             .bearer_auth(&id_token)
             .json(&serde_json::json!({
-                "query": "query Q($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { ts value metric_id } }",
+                "query": "query Q($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { ts value metricId } }",
                 "variables": {
                     "node": station_id,
                     "fromTs": from_ts,
@@ -280,7 +291,7 @@ async fn storage_query_timeseries_invalid_node() {
         .post(format!("{}/api/repl/graphql", serve_url()))
         .bearer_auth(&id_token)
         .json(&serde_json::json!({
-            "query": "query Q($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { ts value metric_id } }",
+            "query": "query Q($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { ts value metricId } }",
             "variables": {
                 "node": "nonexistent-station-xyz",
                 "fromTs": now - 60,

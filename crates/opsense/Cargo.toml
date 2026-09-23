@@ -71,6 +71,12 @@ opsense-mlib = { path = "../opsense-mlib", features = ["json"] }
 # gRPC service).
 opsense-proto = { path = "../opsense-proto" }
 opsense-runner = { path = "../opsense-runner" }
+# Links `timeseries_station_sink`, `http`, `telegram`, `qlib` etc. —
+# typetag-registered pipeline components — into the serve binary so configs
+# using them deserialize. Must be a *regular* dependency: dev-dependencies
+# are not linked into the binary and `opsense serve` then rejects any
+# pipeline using these component types (`unknown variant …`).
+opsense-components = { path = "../opsense-components" }
 tonic = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
@@ -96,8 +102,9 @@ internal-runner-tests = []
 # (see `.github/workflows/ci.yml`); they skip gracefully when the stack is
 # down (`OPSENSE_INTEGRATION` unset).
 [dev-dependencies]
+# mlib is already a regular dependency (features=["json"]); the parquet
+# feature is only needed by the storage/s3-lake integration test harness.
 opsense-mlib = { path = "../opsense-mlib", features = ["json", "parquet"] }
-opsense-components = { path = "../opsense-components" }
 object_store = { workspace = true }
 tempfile = "3"
 futures-util = { workspace = true }

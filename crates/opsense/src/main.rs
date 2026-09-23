@@ -5,6 +5,15 @@ use std::path::PathBuf;
 
 use opsense::serve;
 
+// Force `opsense-components` to be linked into the binary: its pipeline
+// components (`timeseries_station_sink`, `http`, `telegram`, …) are
+// registered with typetag via `#[used]`-style statics, which rustc/linker
+// strips when no code path references the crate. Without this, configs that
+// use those component types fail to deserialize at runtime:
+//   unknown variant `timeseries_station_sink`, expected one of `clock`, ...
+#[allow(unused_imports)]
+use opsense_components as _;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "opsense",
