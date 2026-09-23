@@ -58,7 +58,12 @@ rmcp = { version = "=0.8.0", features = ["transport-io"] }
 
 # Workspace crates
 opsense-model = { path = "../opsense-model" }
-opsense-core = { path = "../opsense-core" }
+# `parquet` + `sqlite` storage backends: strategy configs in
+# strategies/<name>/config.toml use these, so the serve/runner binaries must
+# link them or stations fail to open (`storage backend 'parquet' … requires
+# opsense-core feature 'parquet'`). Other crates pull opsense-core without
+# features; feature unification enables both on the single shared copy.
+opsense-core = { path = "../opsense-core", features = ["parquet", "sqlite"] }
 # `json` links qlib's typetag-registered pipeline components (Calendar, grid
 # strategies, …) into the component inventory deserialized from pipeline TOML.
 opsense-qlib = { path = "../opsense-qlib", features = ["json"] }
