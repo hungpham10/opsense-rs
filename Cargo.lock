@@ -3764,6 +3764,7 @@ name = "opsense-components"
 version = "1.0.11"
 dependencies = [
  "async-trait",
+ "csv",
  "futures",
  "opsense-core",
  "opsense-macros",
