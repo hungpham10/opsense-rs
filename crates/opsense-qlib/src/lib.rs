@@ -20,22 +20,10 @@ pub use fee::{
 pub use grid::TradingGrid;
 
 #[cfg(feature = "json")]
-mod loader;
-
-#[cfg(feature = "json")]
-mod ohcl;
-
-#[cfg(feature = "json")]
 mod streaming;
 
 #[cfg(feature = "graph")]
 mod graph;
-
-#[cfg(feature = "json")]
-pub use loader::{FromCsv, FromQueryCandleSticks};
-
-#[cfg(feature = "json")]
-pub use ohcl::QueryCandleSticks;
 
 pub use portfolio::{DEFAULT_SETTLEMENT_CANDLES, Order, OrderType, Portfolio, Report};
 
@@ -114,7 +102,6 @@ pub type NotifyFn<'a> = &'a mut (
 
 pub type ParamFn<'a> = &'a (dyn Fn(usize) -> f64 + Send + Sync);
 
-#[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
 #[async_trait]
 pub trait DataLoader: Sync + Send {
     async fn range(&self, from: u64, to: u64, resolution: &str) -> Result<Vec<CandleStick>, Error>;

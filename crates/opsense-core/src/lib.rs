@@ -8,10 +8,12 @@
 //! `config` would shadow the external `config` crate, so the dependency is
 //! renamed to `config_crate` (`package = "config"`) in `Cargo.toml`.
 
+mod candles;
 mod config;
 mod context;
 mod station;
 
+pub use candles::{OHLCV_FIELDS, TimeseriesStationHandle, candles_from_observations};
 pub use config::Config;
 pub use context::{Context, Stations};
 pub use station::{CategoryStation, PatternStation, Station, StationKind, TimeseriesStation};

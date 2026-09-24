@@ -3787,6 +3787,7 @@ dependencies = [
  "config",
  "opsense-mlib",
  "opsense-model",
+ "opsense-qlib",
  "serde",
  "serde_json",
  "tokio",

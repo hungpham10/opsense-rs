@@ -20,6 +20,10 @@ sqlite = ["opsense-mlib/sqlite"]
 [dependencies]
 opsense-mlib = { path = "../opsense-mlib", features = ["json"] }
 opsense-model = { path = "../opsense-model" }
+# `json` exposes the qlib `DataLoader` trait; the timeseries station
+# implements it (via `TimeseriesStationHandle`) so stations can be read back
+# as candles by scripts and the trading domain.
+opsense-qlib = { path = "../opsense-qlib", features = ["json"] }
 
 async-trait = { workspace = true }
 serde = { workspace = true }

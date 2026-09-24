@@ -209,6 +209,7 @@ impl Display for Report {
 #[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
 pub struct Portfolio {
     /// define environment
+    #[cfg_attr(feature = "json", serde(skip, default = "default_loader"))]
     loader: Arc<dyn DataLoader + Sync + Send>,
     strategy: Arc<dyn Strategy + Sync + Send>,
     score: Arc<dyn Score + Sync + Send>,
@@ -235,6 +236,30 @@ pub const DEFAULT_SETTLEMENT_CANDLES: u64 = 0;
 #[cfg(feature = "json")]
 fn default_block_cache() -> Arc<RwLock<HashMap<String, BlockLru>>> {
     Arc::new(RwLock::new(HashMap::new()))
+}
+
+/// DataLoader rỗng — default của field `loader` khi `Portfolio` được
+/// deserialize (loader là runtime, chỉ `Portfolio::new` gán loader thật).
+#[cfg(feature = "json")]
+#[derive(Default)]
+struct EmptyDataLoader;
+
+#[cfg(feature = "json")]
+#[async_trait::async_trait]
+impl DataLoader for EmptyDataLoader {
+    async fn range(
+        &self,
+        _from: u64,
+        _to: u64,
+        _resolution: &str,
+    ) -> Result<Vec<CandleStick>, Error> {
+        Ok(Vec::new())
+    }
+}
+
+#[cfg(feature = "json")]
+fn default_loader() -> Arc<dyn DataLoader + Sync + Send> {
+    Arc::new(EmptyDataLoader)
 }
 
 impl Portfolio {
