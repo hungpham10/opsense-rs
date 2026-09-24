@@ -9,7 +9,6 @@
 use std::io::Error;
 use std::sync::Arc;
 
-use serde_json::Value;
 use tokio::sync::{RwLock, mpsc};
 
 use opsense_core::Station;
@@ -82,8 +81,9 @@ impl_processor_transform!(
                 continue;
             };
 
-            // The payload may already carry an `observations` array (set by
-            // the upstream source) — extract it and write into our station.
+            // The payload may carry observations in any shape — the generic
+            // sniffer (array / `data` envelope / `observations` key / single
+            // observation object) extracts and writes into our station.
             let batch = extract_observations(&msg.payload);
             if batch.is_empty() {
                 let _ = ts;
@@ -92,18 +92,6 @@ impl_processor_transform!(
             let from = batch.iter().map(|o| o.ts).min().unwrap_or(ts);
             let to = batch.iter().map(|o| o.ts).max().unwrap_or(ts);
             me.write().await.update_range(&batch, from, to, to);
-
-            // Hint: payload could also be a single observation-shaped object
-            // for sources that emit one item per cycle.
-            if let Some(obj) = msg.payload.as_object()
-                && obj.contains_key("metric_id")
-                && !obj.contains_key("observations")
-                && let Ok(obs) =
-                    serde_json::from_value::<opsense_core::Observation>(Value::Object(obj.clone()))
-            {
-                let ts = obs.ts;
-                me.write().await.update_range(&[obs], ts, ts, ts);
-            }
 
             let done = signal::tagged(signal::processed(ts), &self.id);
             for s in &tx.streams {

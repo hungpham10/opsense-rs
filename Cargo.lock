@@ -3738,6 +3738,7 @@ dependencies = [
  "opsense-model",
  "opsense-proto",
  "opsense-qlib",
+ "opsense-rhai",
  "opsense-runner",
  "parquet",
  "rand 0.8.8",

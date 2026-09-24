@@ -14,6 +14,13 @@ use opsense::serve;
 #[allow(unused_imports)]
 use opsense_components as _;
 
+// Same force-link for `opsense-rhai`: it registers `rhai_transform` via the
+// same typetag/inventory mechanism, so configs like
+// strategies/prometheus/config.toml (clock → http → rhai → tsdb) must be
+// able to deserialize it in `opsense serve` / `opsense validate`.
+#[allow(unused_imports)]
+use opsense_rhai as _;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "opsense",

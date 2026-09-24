@@ -42,10 +42,30 @@ pub mod signal {
         }
     }
 
+    /// `data_ready` mang theo một JSON body bất kỳ — contract transit generic.
+    /// Body có thể là array observation, object đơn, hay payload tuỳ ý;
+    /// consumer phía sau tự extract theo shape và passthrough phần còn lại.
+    /// Cycle control-only chỉ dùng [`data_ready`].
+    #[must_use]
+    pub fn data_ready_with(ts: i64, body: Value) -> Message {
+        Message {
+            payload: json!({"event": DATA_READY, "ts": ts, "data": body}),
+        }
+    }
+
     #[must_use]
     pub fn processed(ts: i64) -> Message {
         Message {
             payload: json!({"event": PROCESSED, "ts": ts}),
+        }
+    }
+
+    /// `processed` mang kết quả của node dưới dạng body opaque, để output của
+    /// transform tiếp tục chảy xuống sink/transform phía sau một cách generic.
+    #[must_use]
+    pub fn processed_with(ts: i64, body: Value) -> Message {
+        Message {
+            payload: json!({"event": PROCESSED, "ts": ts, "data": body}),
         }
     }
 

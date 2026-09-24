@@ -31,6 +31,10 @@ pub enum Signal {
     Errors,
     Duration,
     Raw,
+    /// Derived/rolling statistics (summary từ script.rhai: mean/variance/min/
+    /// max per metric) — không phải sample gốc; giữ riêng để consumer phân biệt
+    /// telemetry tính toán với dữ liệu nguồn.
+    Summary,
 }
 
 /// Severity for `Log` observations (used to derive error-rate).

@@ -358,8 +358,16 @@ impl_http_source!(
                 me.write().await.update_range(&batch, from, to, to);
             }
 
-            // 6. forward so downstream nodes see this cycle.
-            let ready = signal::tagged(signal::data_ready(ts), &self.id);
+            // 6. forward so downstream nodes see this cycle. Batch đã parse đi
+            //    kèm theo dưới dạng body `data` opaque — consumer tự extract
+            //    theo shape (không còn contract magic-key `payload["observations"]`),
+            //    node trung gian passthrough nguyên vẹn.
+            let out = if batch.is_empty() {
+                signal::data_ready(ts)
+            } else {
+                signal::data_ready_with(ts, serde_json::to_value(&batch).unwrap_or(Value::Null))
+            };
+            let ready = signal::tagged(out, &self.id);
             for s in &tx.streams {
                 let _ = s.send(ready.clone()).await;
             }

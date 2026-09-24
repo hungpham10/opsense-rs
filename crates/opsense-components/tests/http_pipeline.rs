@@ -20,6 +20,7 @@ use std::time::Duration;
 use opsense_components::http::HttpSource;
 use opsense_components::signal;
 use opsense_components::vector::runtime::{Component, Event, Runtime};
+use opsense_components::TimeseriesStationSink;
 use opsense_mlib::vector::components::clock::Clock;
 use opsense_mlib::vector::components::output::Output;
 
@@ -193,6 +194,65 @@ async fn http_component_deserializes_from_config() {
         "wat": 1,
     });
     assert!(serde_json::from_value::<Box<dyn Component>>(unknown).is_err());
+}
+
+#[tokio::test]
+async fn http_forwarded_batch_reaches_station_sink() {
+    // clock -> http(mock) -> timeseries_station_sink: batch đã parse phải đi
+    // kèm trên message data_ready (body `data` opaque) và rơi vào station của
+    // sink — dữ liệu transit theo shape generic, KHÔNG còn phụ thuộc một key
+    // hard-coded `payload["observations"]`.
+    let (addr, requests) = spawn_mock("HTTP/1.1 200 OK", BODY).await;
+    let ctx = context_with_attributes(HashMap::new()).await;
+
+    let mut fetch = HttpSource::new("fetch-sink", &["clock"], &format!("http://{addr}/metrics"));
+    fetch.interval_secs = 1;
+    fetch.timeout_secs = 5;
+
+    let sink = TimeseriesStationSink::new("sink", &["fetch-sink"]);
+
+    let mut runtime = Runtime::new();
+    runtime.set_context(ctx.clone());
+    let components: Vec<Arc<dyn Component>> = vec![
+        Arc::new(Clock::new(Duration::from_millis(100))),
+        Arc::new(fetch),
+        Arc::new(sink),
+    ];
+    runtime.reload(components).expect("valid graph");
+    let _handle = runtime.start(|_event: Event| async {}).expect("start");
+
+    // Wait for the fetch + sink propagation (poll, no fixed sleep).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut rows = Vec::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(station) = ctx
+            .station::<Arc<tokio::sync::RwLock<opsense_core::TimeseriesStation>>>("sink")
+            .await
+        {
+            let seen = station
+                .write()
+                .await
+                .query_range(1700000001, 1700000001)
+                .await
+                .unwrap_or_default();
+            if !seen.is_empty() {
+                rows = seen;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    runtime.stop().expect("stop");
+    runtime.wait_for_shutdown().await.expect("shutdown");
+
+    assert!(
+        !requests.lock().unwrap().is_empty(),
+        "mock endpoint must have been called"
+    );
+    assert_eq!(rows.len(), 1, "sink station must receive the forwarded batch");
+    assert_eq!(rows[0].metric_id, "api_rps");
+    assert_eq!(rows[0].value, 42.0);
 }
 
 // Touch the symbol so dead-code lints stay quiet on the smoke test.

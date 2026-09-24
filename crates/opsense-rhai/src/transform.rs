@@ -168,8 +168,14 @@ impl_rhai_transform!(
                 me.write().await.update_range(&processed, from, to, ts);
             }
 
-            // Forward processed signal downstream
-            let done = signal::tagged(signal::processed(ts), &self.id);
+            // Forward processed downstream; script output đi kèm dưới dạng
+            // body `data` opaque để sink/transform phía sau tiêu thụ generic.
+            let out = if processed.is_empty() {
+                signal::processed(ts)
+            } else {
+                signal::processed_with(ts, serde_json::to_value(&processed).unwrap_or(Value::Null))
+            };
+            let done = signal::tagged(out, &self.id);
             for s in &tx.streams {
                 let _ = s.send(done.clone()).await;
             }

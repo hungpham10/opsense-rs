@@ -128,13 +128,32 @@ async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<Backe
                 // xuất ra `s3://{bucket}/{prefix}/{id}/ts/blk=…` + state → chính
                 // là nơi Spark/DuckDB/Polars query trực tiếp.
                 Some(s3) => {
+                    // Creds/region có thể bỏ qua trong `[storage.s3]` (giữ file
+                    // config sạch): fallback theo env `OPSENSE_S3_*` rồi `AWS_*`
+                    // chuẩn. Đây là cách host (docker-compose / CI) cấp
+                    // credential cho MinIO mà không cần hardcode trong config.
+                    let access_key_id = s3
+                        .access_key_id
+                        .clone()
+                        .or_else(|| std::env::var("OPSENSE_S3_ACCESS_KEY_ID").ok())
+                        .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok());
+                    let secret_access_key = s3
+                        .secret_access_key
+                        .clone()
+                        .or_else(|| std::env::var("OPSENSE_S3_SECRET_ACCESS_KEY").ok())
+                        .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok());
+                    let region = s3
+                        .region
+                        .clone()
+                        .or_else(|| std::env::var("OPSENSE_S3_REGION").ok())
+                        .or_else(|| std::env::var("AWS_REGION").ok());
                     let mlib_s3 = opsense_mlib::storage::parquet::S3Config {
                         bucket: s3.bucket.clone(),
                         prefix: s3.prefix.clone(),
                         endpoint: s3.endpoint.clone(),
-                        region: s3.region.clone(),
-                        access_key_id: s3.access_key_id.clone(),
-                        secret_access_key: s3.secret_access_key.clone(),
+                        region,
+                        access_key_id,
+                        secret_access_key,
                         session_token: s3.session_token.clone(),
                     };
                     LakehouseStorage::open_with_s3(
@@ -286,8 +305,16 @@ impl TimeseriesStation {
         let mut last_retention = now_secs();
 
         let handle = rt.spawn(async move {
-            // Chu kỳ cơ bản: phút một lần; kiểm tra từng mốc theo lịch cấu hình.
-            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            // Chu kỳ cơ bản: mỗi phút một lần, nhưng KHÔNG được chậm hơn cadence
+            // nhỏ nhất được cấu hình (VD `s3_flush_interval_secs = 15`) — nếu
+            // không, lịch < 60s bị đè thành nhịp 60s trong thực tế.
+            let mut base = 60u64;
+            for cadence in [flush_every, snapshot_every] {
+                if cadence > 0 {
+                    base = base.min(cadence);
+                }
+            }
+            let mut ticker = tokio::time::interval(Duration::from_secs(base.max(1)));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             ticker.tick().await; // bỏ tick đầu tiên tức thì.
             loop {

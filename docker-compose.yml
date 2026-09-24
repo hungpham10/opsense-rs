@@ -146,6 +146,11 @@ services:
       POSTGRES_DATABASE: opsense
       # Runner discovery
       OPSENSE_RUNNER_GRPC: opsense-runner:50051
+      # S3/object-store creds — strategy config như prometheus không hardcode key;
+      # `opsense serve` fallback theo env (opsense-core station.rs open_backend)
+      # nên mirror parquet → S3 hoạt động với MinIO mặc định.
+      OPSENSE_S3_ACCESS_KEY_ID: ${OPSENSE_S3_ACCESS_KEY_ID:-opsense}
+      OPSENSE_S3_SECRET_ACCESS_KEY: ${OPSENSE_S3_SECRET_ACCESS_KEY:-opsense123}
       # Nginx / supervisor boot (release.sh sed)
       NGINX_DIR: /usr/local/openresty/nginx/conf
       NGINX_LOG: main
