@@ -21,6 +21,14 @@ use opsense_components as _;
 #[allow(unused_imports)]
 use opsense_rhai as _;
 
+// Same force-link for `opsense-mlib`'s declarative converter transforms
+// (`websocket_2_json`, `json_2_json` — see strategies/binance/config.toml).
+// They are typetag-registered inside the `converters` module, which nothing
+// else in the binary constructs directly; without this `opsense serve` would
+// reject configs using them (`unknown variant 'websocket_2_json'`).
+#[allow(unused_imports)]
+use opsense_mlib as _;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "opsense",

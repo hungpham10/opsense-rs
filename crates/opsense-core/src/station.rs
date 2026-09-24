@@ -478,9 +478,13 @@ impl TimeseriesStation {
                 }
             }
 
-            // Sap xep va xoa trung lặp
+            // Sap xep va xoa trung lặp — chỉ xoá observation giống hệt nhau
+            // (ts + metric + kind + signal + value + labels). `dedup_by_key(ts)`
+            // trước đây đè 4/5 field OHLCV dùng chung một ts (cùng ts ≠ trùng
+            // dữ liệu); với các dòng cùng (ts, field) khác giá trị, stable-sort
+            // giữ thứ tự ghi (mới append sau cũ) nên đọc lại lấy bản mới nhất.
             block.items.sort_by_key(|x| x.ts);
-            block.items.dedup_by_key(|x| x.ts);
+            block.items.dedup_by(|a, b| a == b);
 
             // Cập nhật range bao phủ và timestamp sửa đổi
             let eff_from = query_from.max(block_start);

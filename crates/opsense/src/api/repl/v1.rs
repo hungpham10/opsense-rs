@@ -129,7 +129,9 @@ impl QueryRoot {
         let from = from_ts.unwrap_or(i64::MIN);
         let to = to_ts.unwrap_or(i64::MAX);
 
-        let mut station = station.write().await;
+        // `query_range` takes `&self` (the LRU cache is interior-mutable), so a
+        // read lock is enough — no writer contention against collectors.
+        let station = station.read().await;
         Ok(station.query_range(from, to).await.unwrap_or_else(|| {
             tracing::warn!(node = %node, "timeseries cache miss");
             Vec::new()

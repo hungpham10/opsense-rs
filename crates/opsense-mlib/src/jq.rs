@@ -81,6 +81,13 @@ impl JsonQuery {
         Self { operators }
     }
 
+    /// The parsed operator chain. Lets declarative configs (`json_2_json`)
+    /// round-trip a jq path string into the operator form the executor takes.
+    #[must_use]
+    pub fn operators(&self) -> &[Operator] {
+        &self.operators
+    }
+
     /// Parse a jq-style path or an assignment expression.
     ///
     /// Path syntax (legacy): `.field.sub[0][]` etc.

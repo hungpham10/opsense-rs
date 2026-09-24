@@ -10,6 +10,6 @@ pub mod file;
 
 mod converters;
 pub use capture::CaptureSink;
-pub use converters::{WebSocketClient, WebSocketPolling};
+pub use converters::{Json2Json, WebSocketClient, WebSocketPolling, Websocket2Json};
 
 pub fn used() {}
