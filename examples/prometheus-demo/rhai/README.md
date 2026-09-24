@@ -55,7 +55,7 @@ script_path = "scripts/moving_avg.rhai"
 # input_stage  = "raw"           # raw | processed
 # output_stage = "processed"
 # write_lru    = true            # ghi vào working LRU
-# write_store  = false           # ghi thêm xuống persistence (duckdb/lmdb)
+# write_store  = false           # ghi thêm xuống persistence (parquet)
 ```
 
 Hoặc script inline ngay trong TOML (tiện thử nhanh):
@@ -172,7 +172,7 @@ step  = "60"
 ```
 
 Response map thành observations bằng bộ khai báo `items` + `fields` +
-`constants` (engine jq của `opsense-libs`) — không cần viết script hay code
+`constants` (engine jq của `opsense-mlib`) — không cần viết script hay code
 Rust: thêm node config là xong. Body observation-shape sẵn thì bỏ trống
 `items`/`fields`, node parse thẳng. Lỗi fetch/map → cửa sổ giữ cursor, tự
 retry ở tick kế. Chi tiết: [`docs/GUIDE.md`](../docs/GUIDE.md) mục 5.

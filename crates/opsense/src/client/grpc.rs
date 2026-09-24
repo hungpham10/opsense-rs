@@ -194,7 +194,7 @@ impl RunnerClient {
     /// }
     /// ```
     pub fn decrypt_challenge(&self, ciphertext: &[u8], master_key: &[u8]) -> Result<Vec<u8>> {
-        let hex_string = crate::opsense_libs::sops::decrypt(master_key, ciphertext)
+        let hex_string = opsense_mlib::sops::decrypt(master_key, ciphertext)
             .map_err(|e| anyhow!("challenge decrypt: {e}"))?;
         hex_decode(&hex_string)
     }

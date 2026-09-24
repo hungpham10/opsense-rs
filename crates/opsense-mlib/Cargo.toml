@@ -12,6 +12,7 @@ default = []
 bloom-search = []
 sops = ["rand", "aes-gcm"]
 json = []
+rhai = ["dep:rhai"]
 parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:object_store"]
 sqlite = ["dep:sqlx"]
 redis = ["dep:redis"]
@@ -33,6 +34,9 @@ parking_lot = { workspace = true }
 aes-gcm = { version = "0.10", optional = true }
 rand = { workspace = true, optional = true }
 
+# rhai scripting (optional)
+rhai = { workspace = true, optional = true }
+
 # --- vector subsystem ---
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -43,4 +47,7 @@ tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }
 log = { workspace = true }
 opsense-macros = { path = "../opsense-macros" }
+
+[dev-dependencies]
+tempfile = "3"
 

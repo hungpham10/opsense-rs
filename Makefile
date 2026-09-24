@@ -158,3 +158,4 @@ test-integration:
 # Cleanup after integration test.
 test-integration-down:
 	$(COMPOSE) down -v
+

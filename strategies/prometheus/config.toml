@@ -1,0 +1,66 @@
+# Parquet + S3 (MinIO) — full Prometheus demo → clock → station → S3.
+# Pipeline: clock → http prom-explore → rhai stats-summary(script.rhai) →
+# tsdb (parquet local + mirror s3://opsense-lake/test-case-prom/).
+# Data thật (up{job=...}, node_cpu_seconds_total, node_memory_MemAvailable_bytes)
+# từ https://prometheus.demo.prometheus.io — endpoint demo trả Prometheus JSON
+# (không phải observations array), nên `prom-explore` log-warn bình thường khi
+# dùng demo; e2e test re-point `url` về mock deterministic.
+# Sau khi flush, file ts/blk=<id>/batch-*.parquet ở
+# s3://opsense-lake/test-case-prom/tsdb/ts/**.
+
+[engine]
+poll_interval_seconds = 10
+cache_block_seconds = 5
+cache_max_blocks = 12
+
+[storage]
+backend = "parquet"
+data_dir = "/app/.opsense/parquet"
+block_secs = 5
+retention_secs = 300
+# s3_flush_interval_secs / s3_snapshot_interval_secs là lịch sync của
+# [storage] (KHÔNG nằm trong [storage.s3] — config cũ để lệch schema nên
+# bị serde bỏ qua âm thầm, flush rơi về default 60s/600s).
+s3_flush_interval_secs = 15
+s3_snapshot_interval_secs = 60
+# parquet_compression = "zstd"
+
+[storage.s3]
+bucket = "opsense-lake"
+prefix = "test-case-prom"
+endpoint = "http://minio:9000"
+url_style = "path"
+# Creds/region KHÔNG khai ở đây — fallback theo env `OPSENSE_S3_*` rồi `AWS_*`
+# (xem opsense-core station.rs open_backend).
+
+[capacity]
+up = 1.0
+node_cpu_seconds_total = 4.0
+node_memory_MemAvailable_bytes = 16.0
+
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 10
+
+[[pipeline.components]]
+type = "http_source"
+id = "prom-explore"
+inputs = ["clock"]
+# Endpoint demo Prometheus — khi dùng demo thì parse log-warn (body là
+# Prometheus JSON); e2e test re-point url này về mock observations array.
+url = "https://prometheus.demo.prometheus.io/api/v1/query_range?query=up"
+interval_secs = 10
+timeout_secs = 5
+station = true
+
+[[pipeline.components]]
+type = "rhai_transform"
+id = "stats-summary"
+inputs = ["prom-explore"]  # nhận observations từ http_source phía trên
+script_path = "strategies/prometheus/script.rhai"
+
+[[pipeline.components]]
+type = "timeseries_station_sink"
+id = "tsdb"
+inputs = ["stats-summary"]  # summaries từ script.rhai → tsdb → parquet → S3

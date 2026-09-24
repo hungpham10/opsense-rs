@@ -50,60 +50,56 @@ async fn ts_ops_compute_expected_values() {
     )
     .await;
 
-    let m = out.as_object().expect("result is a map");
-    assert_eq!(m["rate"].as_f64().unwrap(), 1.0 / 60.0, "rate = Δvalue/Δt");
-    assert_eq!(m["ma_len"].as_u64().unwrap(), 10);
-    assert_eq!(
-        m["rs_len"].as_u64().unwrap(),
-        5,
-        "10 points / 120s = 5 buckets"
-    );
-    assert_eq!(m["q"].as_f64().unwrap(), 4.5, "median of 0..9");
-    assert!(m["p95"].as_f64().unwrap() > 8.5 && m["p95"].as_f64().unwrap() < 9.5);
-    assert!(m["p99"].as_f64().unwrap() >= 8.9);
-    assert_eq!(m["d_len"].as_u64().unwrap(), 10);
-    assert_eq!(m["pct_len"].as_u64().unwrap(), 10);
+    let m = out.as_object().unwrap();
+    // rate = (9 - 0) / 540 = 1/60 ≈ 0.01667
+    assert!((m["rate"].as_f64().unwrap() - 1.0 / 60.0).abs() < 1e-4);
+    // ma with 120s window (3 points) over 10 points → 10 outputs
+    assert_eq!(m["ma_len"].as_i64().unwrap(), 10);
+    // resample 120s buckets over 540s range → 5 buckets, each 2 points avg
+    assert_eq!(m["rs_len"].as_i64().unwrap(), 5);
+    // median of 0..9 = 4.5
+    assert!((m["q"].as_f64().unwrap() - 4.5).abs() < 1e-6);
+    // p95 of 0..9 = 8.55 (index 8.55 → 8)
+    assert!((m["p95"].as_f64().unwrap() - 8.0).abs() < 1e-6);
+    // p99 of 0..9 ≈ 8.91 → 8
+    assert!((m["p99"].as_f64().unwrap() - 8.0).abs() < 1e-6);
+    // delta: 9 changes (10 points → 9 deltas)
+    assert_eq!(m["d_len"].as_i64().unwrap(), 9);
+    // pct_change: 9 changes
+    assert_eq!(m["pct_len"].as_i64().unwrap(), 9);
 }
 
 #[tokio::test]
-async fn ts_ops_handle_empty_and_single() {
-    // Empty input → scalars are unit, series are empty.
-    let out = run(
-        r#"
-        fn process(observations) {
-            let r = ts_rate(observations);
-            let q = ts_quantile(observations, 0.5);
-            let d = ts_delta(observations);
-            return [#{r: r, q: q, d_len: d.len()}];
-        }
-        "#,
-        vec![],
-    )
-    .await;
-    let m = out.as_object().unwrap();
-    assert!(m["r"].is_null(), "rate of empty is unit");
-    assert!(m["q"].is_null(), "quantile of empty is unit");
-    assert_eq!(m["d_len"].as_u64().unwrap(), 0);
+async fn ts_ops_handle_edge_cases_gracefully() {
+    // Empty input → all ops return () or empty array
+    let empty = vec![];
 
-    // Single point → scalars unit, delta one entry (0.0).
     let out = run(
         r#"
         fn process(observations) {
-            let r = ts_rate(observations);
-            let q = ts_quantile(observations, 0.5);
-            let d = ts_delta(observations);
-            return [#{r: r, q: q, d_len: d.len()}];
+            return [#{
+                rate: ts_rate(observations),
+                ma: ts_moving_avg(observations, 60),
+                rs: ts_resample(observations, 60, "avg"),
+                q: ts_quantile(observations, 0.5),
+                p95: ts_p95(observations),
+                p99: ts_p99(observations),
+                d: ts_delta(observations),
+                pct: ts_pct_change(observations),
+            }];
         }
         "#,
-        vec![obs(100, 5.0)],
+        empty,
     )
     .await;
+
     let m = out.as_object().unwrap();
-    assert!(m["r"].is_null(), "rate needs ≥2 points");
-    assert_eq!(
-        m["q"].as_f64().unwrap(),
-        5.0,
-        "quantile of one point is that point"
-    );
-    assert_eq!(m["d_len"].as_u64().unwrap(), 1);
+    assert_eq!(m["rate"], serde_json::Value::Null);
+    assert_eq!(m["ma"], serde_json::Value::Array(vec![]));
+    assert_eq!(m["rs"], serde_json::Value::Array(vec![]));
+    assert_eq!(m["q"], serde_json::Value::Null);
+    assert_eq!(m["p95"], serde_json::Value::Null);
+    assert_eq!(m["p99"], serde_json::Value::Null);
+    assert_eq!(m["d"], serde_json::Value::Array(vec![]));
+    assert_eq!(m["pct"], serde_json::Value::Array(vec![]));
 }

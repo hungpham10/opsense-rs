@@ -1,0 +1,39 @@
+# Parquet + S3 (MinIO) — mirror lakehouse lên object store.
+# Pipeline: clock → timeseries_station_sink → S3 mirror.
+# Sau khi flush, file ts/blk=<id>/batch-*.parquet xuất hiện ở
+# s3://opsense-lake/test-case-s3/<id>/ts/**
+
+[engine]
+poll_interval_seconds = 10
+cache_block_seconds = 5
+cache_max_blocks = 12
+
+[storage]
+backend = "parquet"
+data_dir = "/app/.opsense/parquet"
+block_secs = 5
+retention_secs = 300
+# parquet_compression = "zstd"
+
+[storage.s3]
+bucket = "opsense-lake"
+prefix = "test-case-s3"
+endpoint = "http://minio:9000"
+url_style = "path"
+s3_flush_interval_secs = 15
+s3_snapshot_interval_secs = 60
+
+[capacity]
+cpu_usage = 4.0
+mem_usage = 16.0
+disk_usage = 1.0
+
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 10
+
+[[pipeline.components]]
+type = "timeseries_station_sink"
+id = "tsdb"
+inputs = ["clock"]

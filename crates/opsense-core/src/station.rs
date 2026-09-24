@@ -12,11 +12,11 @@ use opsense_mlib::ahocorasick::AhoCorasick;
 use opsense_mlib::lru::LruCache;
 use opsense_mlib::search::Search;
 use opsense_mlib::snowflake_id::SnowflakeId;
-use opsense_mlib::storage::{CategoryStorage, PatternStorage, TimeseriesStorage};
 #[cfg(feature = "parquet")]
 use opsense_mlib::storage::LakehouseStorage;
 #[cfg(feature = "sqlite")]
 use opsense_mlib::storage::SqliteStorage;
+use opsense_mlib::storage::{CategoryStorage, PatternStorage, TimeseriesStorage};
 use opsense_model::events::Observation;
 
 use crate::config::StorageConfig;
@@ -25,9 +25,11 @@ use crate::config::StorageConfig;
 //
 // Dựng storage backend từ `[storage]` config, dùng chung cho cả 3 station
 // (timeseries / pattern / category). Backend `"memory"` (mặc định) trả về
-// station thuần memory; `"duckdb"`/`"s3"`/`"lakehouse"` mở Parquet lakehouse;
+// station thuần memory; `"parquet"` (canonical) mở Parquet storage;
 // `"sqlite"` mở một file riêng cho từng station. Backend nhận diện nhưng
 // chưa được biên dịch (feature tắt) báo lỗi rõ ràng thay vì lặng lẽ hạ cấp.
+// Tên cũ `"duckdb"`/`"s3"`/`"lakehouse"` vẫn được chấp nhận như alias
+// deprecated — tất cả đều mở cùng một Parquet storage (xem `open_backend`).
 
 /// Số block tối đa giữ trong LRU hot của một [`TimeseriesStation`].
 const HOT_BLOCKS: usize = 32;
@@ -116,12 +118,58 @@ async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<Backe
     match backend {
         "memory" => Ok(BackendStorage::Memory),
 
-        // Parquet lakehouse (thay thế DuckDB cũ).
+        // Parquet storage — canonical (`"parquet"`); "duckdb"/"s3"/"lakehouse"
+        // là alias cũ (deprecated) nhưng vẫn mở cùng một trình điều khiển.
         #[cfg(feature = "parquet")]
-        "duckdb" | "s3" | "lakehouse" => {
-            let storage = LakehouseStorage::open(&format!("{data_dir}/{segment}-{kind}"))
-                .await
-                .map_err(|e| backend_error(id, backend, e))?;
+        "parquet" | "duckdb" | "s3" | "lakehouse" => {
+            let local = format!("{data_dir}/{segment}-{kind}");
+            let storage = match &cfg.s3 {
+                // Cấu hình `[storage].s3` → lakehouse mirror: dữ liệu parquet
+                // xuất ra `s3://{bucket}/{prefix}/{id}/ts/blk=…` + state → chính
+                // là nơi Spark/DuckDB/Polars query trực tiếp.
+                Some(s3) => {
+                    // Creds/region có thể bỏ qua trong `[storage.s3]` (giữ file
+                    // config sạch): fallback theo env `OPSENSE_S3_*` rồi `AWS_*`
+                    // chuẩn. Đây là cách host (docker-compose / CI) cấp
+                    // credential cho MinIO mà không cần hardcode trong config.
+                    let access_key_id = s3
+                        .access_key_id
+                        .clone()
+                        .or_else(|| std::env::var("OPSENSE_S3_ACCESS_KEY_ID").ok())
+                        .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok());
+                    let secret_access_key = s3
+                        .secret_access_key
+                        .clone()
+                        .or_else(|| std::env::var("OPSENSE_S3_SECRET_ACCESS_KEY").ok())
+                        .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok());
+                    let region = s3
+                        .region
+                        .clone()
+                        .or_else(|| std::env::var("OPSENSE_S3_REGION").ok())
+                        .or_else(|| std::env::var("AWS_REGION").ok());
+                    let mlib_s3 = opsense_mlib::storage::parquet::S3Config {
+                        bucket: s3.bucket.clone(),
+                        prefix: s3.prefix.clone(),
+                        endpoint: s3.endpoint.clone(),
+                        region,
+                        access_key_id,
+                        secret_access_key,
+                        session_token: s3.session_token.clone(),
+                    };
+                    LakehouseStorage::open_with_s3(
+                        &local,
+                        mlib_s3,
+                        4096,
+                        cfg.block_secs as i64,
+                        segment.clone(),
+                    )
+                    .await
+                    .map_err(|e| backend_error(id, backend, e))?
+                }
+                None => LakehouseStorage::open(&local)
+                    .await
+                    .map_err(|e| backend_error(id, backend, e))?,
+            };
             Ok(BackendStorage::Parquet(storage))
         }
 
@@ -136,19 +184,15 @@ async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<Backe
 
         // Backend nhận diện nhưng feature tương ứng chưa được biên dịch.
         #[cfg(not(feature = "parquet"))]
-        "duckdb" | "s3" | "lakehouse" => Err(unsupported(
-            id,
-            backend,
-            "opsense-core feature 'parquet'",
-        )),
+        "parquet" | "duckdb" | "s3" | "lakehouse" => {
+            Err(unsupported(id, backend, "opsense-core feature 'parquet'"))
+        }
         #[cfg(not(feature = "sqlite"))]
         "sqlite" => Err(unsupported(id, backend, "opsense-core feature 'sqlite'")),
 
         other => Err(Error::new(
             ErrorKind::InvalidInput,
-            format!(
-                "unsupported storage backend '{other}' for station '{id}' (kind '{kind}')"
-            ),
+            format!("unsupported storage backend '{other}' for station '{id}' (kind '{kind}')"),
         )),
     }
 }
@@ -176,6 +220,9 @@ pub struct TimeseriesStation {
     caches: LruCache<i64, Block, 32>,
     block_duration: i64,
     storage: Option<Arc<dyn TimeseriesStorage>>,
+    /// Background sync task (flush lake + snapshot + retention theo
+    /// `[storage]`). `None` khi không có storage hoặc không cấu hình lịch.
+    bg: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Default for TimeseriesStation {
@@ -193,16 +240,22 @@ impl TimeseriesStation {
             caches: LruCache::new(capacity),
             block_duration: block_duration_secs.unwrap_or(SECONDS_IN_WEEK),
             storage: None,
+            bg: None,
         }
     }
 
-    /// Constructor theo `[storage]` config: `backend = "duckdb"` → lakehouse
-    /// (LRU hot + Parquet qua lakehouse cho block lạnh — evict/update/remove tự
+    /// Constructor theo `[storage]` config: `backend = "parquet"` → Parquet
+    /// storage (LRU hot + Parquet cho block lạnh — evict/update/remove tự
     /// persist qua hook `attach_timeseries` của LruCache, miss tự read-through
     /// từ storage), `backend = "sqlite"` → một file sqlite riêng, còn lại
     /// (mặc định `"memory"`) memory-only. Series key của một block là
     /// `blk:<block_id>`, value là Block serialize JSON; `block_duration` lấy từ
     /// `cfg.block_secs`.
+    ///
+    /// Khi có storage và cấu hình lịch (`s3_flush_interval_secs` /
+    /// `s3_snapshot_interval_secs` / `retention_secs`), spawn một background
+    /// task: flush buffer ra lake parquet + snapshot/compact + retention trim
+    /// định kỳ, để S3 luôn tiến tới trạng thái mới nhất.
     pub async fn from_storage(id: &str, cfg: &StorageConfig) -> Result<Self, Error> {
         let mut station = Self::new(HOT_BLOCKS, Some(cfg.block_secs as i64));
 
@@ -212,10 +265,83 @@ impl TimeseriesStation {
                 Arc::new(|key: &i64| format!("blk:{key}").into_bytes()),
                 Arc::new(|block: &Block| serde_json::to_vec(block).unwrap_or_default()),
             );
-            station.storage = Some(ts);
+            station.storage = Some(Arc::clone(&ts));
+            Self::spawn_bg_sync(&mut station, cfg, ts);
         }
 
         Ok(station)
+    }
+
+    /// Spawn background task đồng bộ station (nếu có lịch cấu hình). Spawn được
+    /// skip khi không có tokio runtime (test thuần) — buffer vẫn được persist
+    /// qua WAL/evict hook.
+    fn spawn_bg_sync(station: &mut Self, cfg: &StorageConfig, ts: Arc<dyn TimeseriesStorage>) {
+        use std::time::{Duration, SystemTime};
+
+        let flush_every = cfg.s3_flush_interval_secs;
+        let snapshot_every = cfg.s3_snapshot_interval_secs;
+        let retention_secs = cfg.retention_secs;
+        if flush_every == 0 && snapshot_every == 0 && retention_secs == 0 {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return; // không có runtime — bỏ lịch.
+        };
+
+        let now_secs = || {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        };
+        let mut last_flush = now_secs();
+        let mut last_snapshot = now_secs();
+        let mut last_retention = now_secs();
+
+        let handle = rt.spawn(async move {
+            // Chu kỳ cơ bản: mỗi phút một lần, nhưng KHÔNG được chậm hơn cadence
+            // nhỏ nhất được cấu hình (VD `s3_flush_interval_secs = 15`) — nếu
+            // không, lịch < 60s bị đè thành nhịp 60s trong thực tế.
+            let mut base = 60u64;
+            for cadence in [flush_every, snapshot_every] {
+                if cadence > 0 {
+                    base = base.min(cadence);
+                }
+            }
+            let mut ticker = tokio::time::interval(Duration::from_secs(base.max(1)));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await; // bỏ tick đầu tiên tức thì.
+            loop {
+                ticker.tick().await;
+                let now = now_secs();
+                if flush_every > 0 && now.saturating_sub(last_flush) >= flush_every {
+                    let _ = ts.flush().await;
+                    last_flush = now;
+                }
+                if snapshot_every > 0 && now.saturating_sub(last_snapshot) >= snapshot_every {
+                    let _ = ts.checkpoint().await;
+                    last_snapshot = now;
+                }
+                if retention_secs > 0 && now.saturating_sub(last_retention) >= 60 {
+                    let keep_after = now.saturating_sub(retention_secs);
+                    let _ = ts.retain_older_than(keep_after).await;
+                    last_retention = now;
+                }
+            }
+        });
+        station.bg = Some(handle);
+    }
+
+    /// Flush buffer ra lake + snapshot/compact một lần (dùng trước khi tắt
+    /// process để S3 tiến tới trạng thái mới nhất), rồi dừng background task.
+    pub async fn shutdown(&self) {
+        if let Some(storage) = &self.storage {
+            let _ = storage.flush().await;
+            let _ = storage.checkpoint().await;
+        }
+        if let Some(bg) = &self.bg {
+            bg.abort();
+        }
     }
 
     #[inline]
@@ -277,6 +403,52 @@ impl TimeseriesStation {
             if !covered {
                 return None;
             }
+            result.extend(items);
+        }
+
+        Some(result)
+    }
+
+    /// Query dữ liệu mà station thực sự có trong cửa sổ — chịu được coverage
+    /// hổng.
+    ///
+    /// Duyệt mọi block từ `from_ts` tới `to_ts`, gom observation nằm trong
+    /// khoảng yêu cầu của từng block; block không tồn tại (chưa ghi, đã
+    /// evict/retention) chỉ bị bỏ qua — KHÔNG dừng quét, vì dữ liệu có thể nằm
+    /// rải rác ở block phía trước/sau lỗ hổng (vd station chỉ mới có một cửa
+    /// sổ vài chục giây dưới `to_ts`). Không như [`query_range`] (trả `None`
+    /// nếu BẤT KỲ block nào trong cửa sổ chưa cover trọn), method này trả
+    /// *những gì thực sự có* — dùng cho script-facing `station_query`: script
+    /// hỏi cửa sổ rộng mà không cần biết chính xác vùng dữ liệu được cover.
+    pub async fn query_recent(&mut self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
+        let start_block = self.get_block_id(from_ts);
+        let end_block = self.get_block_id(to_ts);
+        let mut result = Vec::new();
+
+        for block_id in start_block..=end_block {
+            let block_start = block_id * self.block_duration;
+            let block_end = (block_id + 1) * self.block_duration - 1;
+
+            let block = match self.caches.get(&block_id) {
+                Some(b) => b.clone(),
+                None => match self.load_cold_block(block_id).await {
+                    Some(b) => {
+                        self.caches.put(block_id, b.clone());
+                        b
+                    }
+                    // Block không có dữ liệu — lỗ hổng của cửa sổ, bỏ qua.
+                    None => continue,
+                },
+            };
+
+            let req_start = from_ts.max(block_start);
+            let req_end = to_ts.min(block_end);
+            let items: Vec<Observation> = block
+                .items
+                .iter()
+                .filter(|o| o.ts >= req_start && o.ts <= req_end)
+                .cloned()
+                .collect();
             result.extend(items);
         }
 
@@ -436,10 +608,10 @@ impl CategoryStation {
         }
     }
 
-    /// Constructor theo `[storage]` config: `backend = "duckdb"` → radix tree
-    /// persists qua `CategoryStorage` của Parquet lakehouse (mỗi `insert_chain`
+    /// Constructor theo `[storage]` config: `backend = "parquet"` → radix tree
+    /// persists qua `CategoryStorage` của Parquet storage (mỗi `insert_chain`
     /// commit thẳng vào storage; mở lại có sẵn dữ liệu — snapshot/restore S3
-    /// theo cơ chế riêng của lakehouse), `backend = "sqlite"` → file sqlite
+    /// theo cơ chế riêng), `backend = "sqlite"` → file sqlite
     /// riêng, còn lại (mặc định `"memory"`) memory-only.
     pub async fn from_storage(id: &str, cfg: &StorageConfig) -> Result<Self, Error> {
         let Some(storage) = open_backend(id, cfg, "category").await?.into_category() else {
@@ -565,3 +737,35 @@ impl TryFrom<&Station> for Arc<RwLock<PatternStation>> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opsense_model::events::{Signal, TelemetryKind};
+
+    fn obs(ts: i64, value: f64) -> Observation {
+        Observation::new(ts, "cpu".into(), TelemetryKind::Metric, Signal::Raw, value)
+    }
+
+    /// `query_range` trả None khi bất kỳ block nào trong cửa sổ chưa cover
+    /// trọn; `query_recent` trả vùng dữ liệu gần nhất dù cửa sổ hổng.
+    #[tokio::test]
+    async fn query_recent_returns_latest_suffix_over_holes() {
+        let mut st = TimeseriesStation::new(32, Some(300)); // block 300s
+
+        // Block 0 chỉ cover [100, 110].
+        let batch = vec![obs(100, 1.0), obs(105, 2.0), obs(110, 3.0)];
+        st.update_range(&batch, 100, 110, 200);
+
+        // Cửa sổ rộng [0, 200]: block 0 không cover trọn bên trái → None.
+        assert!(st.query_range(0, 200).await.is_none());
+
+        // query_recent: đuôi [100, 110] vẫn trả về (dù từ_ts hổng).
+        let got = st.query_recent(0, 200).await.unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].value, 1.0);
+        assert_eq!(got[2].value, 3.0);
+
+        // Phần tương lai chưa ghi: block mới nhất không tồn tại → kết quả rỗng.
+        assert!(st.query_recent(400, 2000).await.unwrap().is_empty());
+    }
+}

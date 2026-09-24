@@ -16,5 +16,4 @@ playground/
 pkgs/
 sql/
 *.db
-*.duckdb
 *.parquet

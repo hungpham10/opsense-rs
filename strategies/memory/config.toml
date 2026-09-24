@@ -1,0 +1,25 @@
+# Memory storage — thuần RAM, không persistence.
+# Pipeline: clock → timeseries_station_sink (station lưu trong memory).
+
+[engine]
+poll_interval_seconds = 10
+cache_block_seconds = 5
+cache_max_blocks = 12
+
+[storage]
+backend = "memory"
+
+[capacity]
+cpu_usage = 4.0
+mem_usage = 16.0
+disk_usage = 1.0
+
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 10
+
+[[pipeline.components]]
+type = "timeseries_station_sink"
+id = "tsdb"
+inputs = ["clock"]

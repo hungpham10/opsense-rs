@@ -6,6 +6,7 @@ members = [
 	"crates/opsense-model",
 	"crates/opsense-macros",
 	"crates/opsense-mlib",
+	"crates/opsense-rhai",
 	"crates/opsense-qlib",
 	"crates/opsense-components",
 	"crates/opsense-proto",
@@ -16,7 +17,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.10"
+version = "1.0.11"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
@@ -39,6 +40,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 # Debuging
 log = "0.4.29"
 tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
 # TLS via rustls (not OpenSSL) so cross builds don't need libssl-dev;
 # keep the remaining default features (charset/http2/macos-system-configuration)
 # for parity with the old default-tls build.
@@ -59,10 +61,15 @@ typetag = "0.2.21"
 parking_lot = "0.12"
 dashmap = "6"
 
+# Scripting: Rhai transform engine for opsense-components. `serde` enables
+# `rhai::serde::to_dynamic`/`from_dynamic` (observation-map <-> JSON bridge);
+# `sync` makes the engine Send/Sync so spawn_blocking shares it across threads.
+rhai = { version = "1.21", features = ["serde", "sync"] }
+
 # Dependencies
-# Parquet lakehouse backend (replaces DuckDB): arrow-array/arrow-schema +
+# Parquet storage backend: arrow-array/arrow-schema +
 # parquet for data files, object_store for the S3 mirror. We use the split
-# sub-crates directly (not the `arrow` facade) since the lakehouse code only
+# sub-crates directly (not the `arrow` facade) since the parquet code only
 # needs schemas + arrays + RecordBatch, and the facade pulls `arrow-arith`
 # which breaks against chrono >= 0.4.42.
 base64 = { version = "=0.22.1" }

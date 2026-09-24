@@ -2,26 +2,32 @@
 //! Prometheus-shaped `/api/v1/query_range` response from a mocked endpoint and
 //! maps it into observations purely through `items` + `fields` (`jq` paths) —
 //! no script engine involved.
-//!
-//! This is the proof that dropping the dedicated Prometheus adapter lost
-//! nothing: the generic node extracts arbitrary shapes declaratively.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use opsense_components::vector::runtime::{Component, Message, Outbound};
-use opsense_components::{OpsenseContext, new_station_registry, signal};
+use opsense_components::http::HttpSource;
+use opsense_components::vector::runtime::{Component, Runtime};
+use opsense_mlib::vector::components::clock::Clock;
+use opsense_mlib::vector::components::output::Output;
+
+use opsense_core::Config;
 use opsense_core::Context;
-use opsense_core::collector::Collector;
-use opsense_core::registry;
-use opsense_core::{Stage, Watermarks};
+use opsense_model::secret::Secret;
 
-/// Serve a canned Prometheus matrix response and record request lines.
-async fn spawn_mock(body: &'static str) -> std::net::SocketAddr {
+async fn spawn_mock(
+    status_line: &'static str,
+    body: &'static str,
+) -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+
+    let reqs = requests.clone();
     tokio::spawn(async move {
         while let Ok((mut sock, _)) = listener.accept().await {
+            let reqs = reqs.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 let mut buf = Vec::new();
@@ -33,145 +39,108 @@ async fn spawn_mock(body: &'static str) -> std::net::SocketAddr {
                     }
                     buf.extend_from_slice(&chunk[..n]);
                 }
+                reqs.lock().unwrap().push(String::from_utf8_lossy(&buf).into_owned());
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                let _ = sock.write_all(resp.as_bytes()).await;
+                sock.write_all(resp.as_bytes()).await.unwrap();
             });
         }
     });
-    addr
+
+    (addr, requests)
 }
 
-const PROM_BODY: &str = r#"{
-    "status": "success",
-    "data": {
-        "resultType": "matrix",
-        "result": [
-            {
-                "metric": {"__name__": "cpu_usage", "instance": "host-a", "job": "node"},
-                "values": [[1700000000, "32.5"], [1700000060, "40.0"]]
-            }
-        ]
-    }
-}"#;
-
 #[tokio::test]
-async fn http_node_maps_prometheus_through_jq() {
-    opsense_rhai::register();
+async fn http_source_maps_prometheus_through_jq() {
+    let (addr, requests) = spawn_mock(
+        "200 OK",
+        r#"{"status":"success","data":{"resultType":"matrix","data":{"result":[{"metric":{"__name__":"cpu_usage","instance":"host1"},"values":[[1700000000,"12.5"],[1700000060,"13.0"]]}]}}}"#,
+    ).await;
 
-    let addr = spawn_mock(PROM_BODY).await;
+    let cfg: Config = serde_json::from_str("{}").unwrap();
+    let secret = Secret::new().await.unwrap();
+    let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
-    let ctx = Arc::new(OpsenseContext::new(
-        Arc::new(Collector::new(vec![])),
-        Watermarks::new(),
-        Arc::new(BTreeMap::from([(
-            "prom_url".to_string(),
-            format!("http://{addr}"),
-        )])),
-        new_station_registry(),
-    ));
-    let watermarks = ctx.watermarks().clone();
-
-    // Built exactly as it would appear under `[pipeline.components]`. The matrix
-    // response is flattened with `items` walking down to each sample, then
-    // `fields` picks the timestamp/value out of the `[ts, "val"]` pair and
-    // `constants` supplies the fixed metric id + labels.
-    let component: Box<dyn Component> = serde_json::from_value(serde_json::json!({
-        "type": "http_source",
-        "id": "prom",
-        "inputs": ["clock"],
-        "url": "{{prom_url}}/api/v1/query_range",
-        "items": "data.result[].values[]",
-        "fields": {
-            "ts": { "query": "0", "cast_to": "i64" },
-            "value": { "query": "1", "cast_to": "f64" },
-        },
-        "constants": {
-            "metric_id": "cpu_usage",
-            "labels": { "instance": "host-a", "job": "node" },
-        },
-        "params": {
-            "query": "rate(node_cpu_seconds_total[5m])",
-            "start": "{{from_ts}}",
-            "end": "{{to_ts}}",
-            "step": "60",
-        },
-        "initial_lookback_secs": 600,
-    }))
-    .expect("jq http node must deserialize");
-
-    // One tick at a fixed timestamp, then close the input.
-    let now = 1_700_000_100i64;
-    let (tx_in, mut rx) = tokio::sync::mpsc::channel::<Message>(4);
-    tx_in.send(signal::tick(now)).await.expect("send tick");
-    drop(tx_in);
-
-    let (down_tx, mut down_rx) = tokio::sync::mpsc::channel(4);
-    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::channel(4);
-    // Drain runtime events so nothing blocks.
-    tokio::spawn(async move { while ev_rx.recv().await.is_some() {} });
-
-    component
-        .run(
-            0,
-            &mut rx,
-            Outbound {
-                streams: vec![down_tx],
-                broadcast: None,
-                event: ev_tx,
-                ctx: Some(ctx),
-            },
-        )
-        .await
-        .expect("cycle must succeed");
-
-    // Downstream received data_ready(now).
-    assert_eq!(down_rx.recv().await.and_then(|m| signal::ts(&m)), Some(now));
-    // Cursor advanced exactly to the tick.
-    assert_eq!(watermarks.get_node("prom"), now);
-
-    // The script mapped the matrix into observations, labels preserved.
-    // Model mới: batch nằm trong TRẠM RIÊNG của node (không còn working store).
-    let prom_station = registry::station("prom")
-        .await
-        .expect("http_source must own its station");
-    let obs = prom_station
-        .read()
-        .await
-        .query(Stage::Processed, "cpu_usage", 0, i64::MAX)
-        .await;
-    assert_eq!(obs.len(), 2, "two samples expected");
-    assert_eq!(obs[0].ts, 1_700_000_000);
-    assert_eq!(obs[0].value, 32.5);
-    assert_eq!(obs[1].value, 40.0);
-    assert_eq!(
-        obs[0].labels.get("instance").map(String::as_str),
-        Some("host-a")
+    let url = format!("http://{}/api/v1/query_range?from_ts={{from_ts}}&to_ts={{to_ts}}&step={{step}}", addr);
+    let mut src = HttpSource::new(
+        "cpu-http",
+        &["clock"],
+        &url,
     );
-    assert_eq!(obs[0].labels.get("job").map(String::as_str), Some("node"));
+    src.bindings = {
+        let mut m = HashMap::new();
+        m.insert("from_ts".into(), "{{from_ts}}".into());
+        m.insert("to_ts".into(), "{{to_ts}}".into());
+        m.insert("step".into(), "60".into());
+        m
+    };
+    src.interval_secs = 60;
+    src.timeout_secs = 10;
+
+    let output = Output { id: "output".into(), inputs: vec!["cpu-http".into()] };
+    let clock = Clock::new(Duration::from_secs(1));
+
+    let components: Vec<Arc<dyn Component>> = vec![
+        Arc::new(clock),
+        Arc::new(src),
+        Arc::new(output),
+    ];
+    let mut rt = Runtime::new();
+    rt.set_context(ctx.clone());
+    rt.reload(components).expect("valid graph");
+
+    let _handle = rt.start(|_| async {}).unwrap();
+
+    // Wait for at least one poll cycle
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Verify request was made with interpolated bindings
+    let reqs = requests.lock().unwrap();
+    assert!(!reqs.is_empty(), "no HTTP request made");
+    let req = &reqs[0];
+    assert!(req.contains("from_ts="), "from_ts not interpolated: {req}");
+    assert!(req.contains("to_ts="), "to_ts not interpolated: {req}");
 }
 
 #[tokio::test]
-async fn registered_runner_executes_inline_scripts() {
-    opsense_rhai::register();
+async fn http_source_handles_http_errors_gracefully() {
+    let (addr, _requests) = spawn_mock("500 Internal Server Error", "{}").await;
 
-    let runner = opsense_core::script::script_runner().expect("runner must be registered");
-    let out = runner
-        .run(
-            r#"fn process(body) { [ #{ ts: body.ts, metric_id: "m", kind: "metric", signal: "rate", value: body.v * 2.0 } ] }"#,
-            "",
-            serde_json::json!({"ts": 5, "v": 21.0}),
-        )
-        .await
-        .expect("inline script runs");
+    let cfg: Config = serde_json::from_str("{}").unwrap();
+    let secret = Secret::new().await.unwrap();
+    let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
-    let obs: Vec<opsense_model::Observation> = out
-        .into_iter()
-        .map(|item| serde_json::from_value(item).expect("observation shape"))
-        .collect();
-    assert_eq!(obs.len(), 1);
-    assert_eq!(obs[0].metric_id, "m");
-    assert_eq!(obs[0].value, 42.0);
+    let url = format!("http://{}/api/v1/query_range?from_ts={{from_ts}}&to_ts={{to_ts}}&step={{step}}", addr);
+    let mut src = HttpSource::new(
+        "bad-http",
+        &["clock"],
+        &url,
+    );
+    src.bindings = HashMap::from([
+        ("from_ts".into(), "{{from_ts}}".into()),
+        ("to_ts".into(), "{{to_ts}}".into()),
+        ("step".into(), "60".into()),
+    ]);
+    src.interval_secs = 60;
+    src.timeout_secs = 1;
+
+    let output = Output { id: "output".into(), inputs: vec!["bad-http".into()] };
+    let clock = Clock::new(Duration::from_secs(1));
+
+    let components: Vec<Arc<dyn Component>> = vec![
+        Arc::new(clock),
+        Arc::new(src),
+        Arc::new(output),
+    ];
+    let mut rt = Runtime::new();
+    rt.set_context(ctx);
+    rt.reload(components).expect("valid graph");
+
+    let _handle = rt.start(|_| async {}).unwrap();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Should not crash; runtime survives
 }

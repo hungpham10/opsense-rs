@@ -146,7 +146,7 @@ type Mutation {
   station nào nhờ `stations[].kind`. Sai kind → GraphQL error rõ ràng
   (`station 'x' is not a timeseries`).
 - **Không liệt kê `nodeTypes`**: `typetag::serde` ở
-  `opsense-libs/src/vector/runtime/models.rs:133` tự fail khi deserialize
+  `opsense-mlib/src/vector/runtime/models.rs:133` tự fail khi deserialize
   `ComponentInput.type` không tồn tại → GraphQL trả error. Validate miễn phí.
 - **AppState siêu gọn** — chỉ `context` + `runtime`, không thêm session map
   hay event ring buffer. Process chạy 1 pipeline duy nhất.
@@ -199,8 +199,8 @@ Cập nhật `2026-09-01`. Branch `feature/refactor-to-decoupe-monorepo-into-mul
 
 | File | Thay đổi |
 |---|---|
-| `crates/opsense-libs/Cargo.toml` | Thêm `async-graphql = { workspace = true }` (cần cho `NodeInfo` derive) |
-| `crates/opsense-libs/src/vector/runtime/models.rs` | `NodeInfo` thêm `#[derive(SimpleObject)]` + `#[graphql(name = "NodeInfo")]` |
+| `crates/opsense-mlib/Cargo.toml` | Thêm `async-graphql = { workspace = true }` (cần cho `NodeInfo` derive) |
+| `crates/opsense-mlib/src/vector/runtime/models.rs` | `NodeInfo` thêm `#[derive(SimpleObject)]` + `#[graphql(name = "NodeInfo")]` |
 | `crates/opsense-core/Cargo.toml` | Thêm `async-graphql = { workspace = true }` (cần cho `StationKind` derive) |
 | `crates/opsense-core/src/station.rs` | `Station::kind()` method + `StationKind` enum derive `Enum` |
 | `crates/opsense-core/src/lib.rs` | `pub use station::{Station, StationKind};` |
@@ -208,7 +208,7 @@ Cập nhật `2026-09-01`. Branch `feature/refactor-to-decoupe-monorepo-into-mul
 
 **Verify build hiện tại:**
 
-- `cargo check -p opsense-libs` ✅
+- `cargo check -p opsense-mlib` ✅
 - `cargo check -p opsense-core` ✅
 - `cargo check -p opsense` ❌ — **lỗi pre-existing** trong `opsense-components` (xem dưới), không phải do refactor này introduce.
 
@@ -715,7 +715,7 @@ Cập nhật `2026-09-02`. Branch `feature/refactor-to-decoupe-monorepo-into-mul
 
 ## Phases cũ (đã xong hoặc chuyển sang phase khác)
 
-Tham khảo lịch sử trong git log. Phase scaffolding (Cargo workspace, opsense-libs
+Tham khảo lịch sử trong git log. Phase scaffolding (Cargo workspace, opsense-mlib
 utilities, opsense-core domain rewrite, opsense-components, config TOML) đã
 hoàn tất. Phase capacity engine, statistics, hot-reload config gốc đã được
 thay thế bằng model mới: vector runtime + station registry + typetag-based
@@ -734,7 +734,7 @@ component deserialization.
 
 - Nguồn: `opsense-qlib` = copy của `~/Desktop/Workspace/algorithm/pkgs/backend/services/src/qlib/`.
 - Copy thêm 4 file thiếu: `tick.rs` + `ohcl.rs` (`QueryCandleSticks`) → qlib;
-  `transition.rs` (`TransitionAnalysis`) + `sgd.rs` (`SGDOptimizer`) → `opsense-libs`.
+  `transition.rs` (`TransitionAnalysis`) + `sgd.rs` (`SGDOptimizer`) → `opsense-mlib`.
   Tạo `reload.rs` (trait `Reload`, 6 dòng) + `playground.rs` (chỉ `SharpeScore`) trong qlib.
 - `mod.rs` → `lib.rs`; khai báo module `candle`/`grid`/`tick`/`ohcl`/`reload` (2 file đã copy
   sẵn từ trước nhưng chưa được khai báo).
@@ -742,7 +742,7 @@ component deserialization.
   `opsense_libs`; `models::resolver::Resolver` → `opsense_model::resolver::Resolver`
   (đã có sẵn bản đầy đủ trong opsense-model); `vector_runtime` → `opsense_libs::vector::runtime`;
   `vector_config_macro` → `opsense_macros`.
-- `AnalysisGrid`/`SieveConfig` dùng bản của `opsense-libs` (bản cải tiến có clamp), xoá
+- `AnalysisGrid`/`SieveConfig` dùng bản của `opsense-mlib` (bản cải tiến có clamp), xoá
   bản trùng trong `qlib/grid.rs`; block test `VolumeProfile` (phụ thuộc 1500 dòng + rayon)
   bị cắt khỏi `ohcl.rs` — copy lại nếu cần volume profile.
 - Binary `opsense` link qlib qua `use opsense_qlib as _qlib_inventory` để các component
@@ -762,7 +762,7 @@ thường; `Resolver` (redis shards + S3) phải được inject vào runtime co
 
 **⚠️ RCF — chưa xong (parked, test đang `#[ignore]`):**
 
-- `opsense-libs/src/rcf.rs` đã sửa 2 lỗi: (1) `codisp` mẫu số dùng `min(containing, sibling)`
+- `opsense-mlib/src/rcf.rs` đã sửa 2 lỗi: (1) `codisp` mẫu số dùng `min(containing, sibling)`
   → đổi sang phía chứa điểm `ln(c+s)/ln(c+1)`; (2) guard far-outside ở root: điểm vượt
   ngoài bbox gốc quá một extent bị coi là cô lập tức thì (score ~8) thay vì đi theo nhánh dày.
 - Còn lại: điểm normal in-range vẫn score ~3.0 (kỳ vọng ~1.5) do codisp tại các level sâu
@@ -773,12 +773,12 @@ thường; `Resolver` (redis shards + S3) phải được inject vào runtime co
   depth/expected depth thay vì displacement.
 
 
-- ✅ Phase scaffolding (Cargo, opsense-libs, opsense-core rewrite, opsense-components)
+- ✅ Phase scaffolding (Cargo, opsense-mlib, opsense-core rewrite, opsense-components)
 - ✅ `init` subcommand (tạo config mẫu)
 - ✅ `serve` subcommand (axum + UDS/HTTP, mount `/api/repl` GraphQL skeleton)
 - 🟡 Phase 1 (đang làm): GraphQL schema + resolvers cho Tầng 1
   - ✅ `v1.rs` refactor: xoá duplicate types, dùng `opsense_core::{Observation, StationKind, Station}` trực tiếp
-  - ✅ `NodeInfo` (opsense-libs) có `SimpleObject` derive
+  - ✅ `NodeInfo` (opsense-mlib) có `SimpleObject` derive
   - ✅ `cargo build -p opsense` sạch (zero errors, chỉ 2 dead-code warnings pre-existing trong `opsense-runner`)
   - ✅ `queryTimeseries`/`queryCatalog`/`queryPattern` đã wire xong ở `v1.rs`
   - ⏸ `Query.status` vs `Query.nodeInfo` — chờ user quyết

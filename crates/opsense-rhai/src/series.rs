@@ -52,7 +52,7 @@ pub fn register(eng: &mut rhai::Engine) {
         "grid_fit_series",
         |s: &mut Series, min: f64, max: f64, max_bit: i64| -> rhai::Dynamic {
             let values: Vec<f64> = s.0.iter().map(|&(_, v)| v).collect();
-            let grid = opsense_libs::grid::AnalysisGrid::new(
+            let grid = opsense_mlib::grid::AnalysisGrid::new(
                 &values,
                 min,
                 max,

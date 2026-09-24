@@ -1,10 +1,10 @@
-//! Rhai scripts can read station history natively: `ts_query` / `ts_mean`
-//! over the global registry let a transform compare its current batch with
-//! stored history (the "aggregate the past, judge the present" story).
+//! Tests for the new station read API via Context (replaces old registry-based
+//! `ts_query`/`ts_mean` bindings which were removed).
 
-use opsense_core::registry;
-use opsense_core::{Stage, Station};
-use opsense_model::{Observation, Signal, TelemetryKind};
+use opsense_core::{Context, Observation, Station, TimeseriesStation};
+use opsense_model::events::{Signal, TelemetryKind};
+use opsense_model::secret::Secret;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -19,62 +19,69 @@ fn obs(ts: i64, value: f64) -> Observation {
 }
 
 #[tokio::test]
-async fn scripts_query_station_history() {
-    opsense_rhai::register();
-    let id = format!("st-rhai-{}", std::process::id());
-    let st = Arc::new(RwLock::new(Station::timeseries(1024)));
-    st.write()
-        .await
-        .append(Stage::Processed, &[obs(100, 30.0), obs(200, 40.0)])
-        .await;
-    assert!(registry::register_station(&id, st).await);
+async fn context_station_registry_and_query() {
+    let cfg: opsense_core::Config = serde_json::from_str("{}").unwrap();
+    let secret = Secret::new().await.unwrap();
+    let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
-    // The script receives today's sample (50.0) and evaluates it against
-    // history pulled straight from the registry.
-    let script = format!(
-        r#"
-        fn process(body) {{
-            let base = ts_mean("{id}", "processed", "cpu", 0, 1000);
-            let history = ts_query("{id}", "processed", "cpu", 0, 1000);
-            [ #{{
-                ts: body.ts,
-                metric_id: "cpu_dev",
-                kind: "metric",
-                signal: "utilization",
-                value: body.v - base,
-                points: history.len(),
-                first: history[0].value,
-            }} ]
-        }}
-        "#
-    );
-
-    let runner = opsense_core::script::script_runner().expect("runner registered");
-    let out = runner
-        .run(&script, "", serde_json::json!({"ts": 300, "v": 55.0}))
+    // Create and register a TimeseriesStation
+    let station = TimeseriesStation::from_storage("test-station", ctx.storage())
         .await
-        .expect("script must run");
-    assert_eq!(out.len(), 1);
-    assert_eq!(out[0]["value"], serde_json::json!(20.0)); // 55 - mean(30,40)=35
-    assert_eq!(out[0]["points"], serde_json::json!(2));
-    assert_eq!(out[0]["first"], serde_json::json!(30.0));
+        .unwrap();
+    let station_arc = Arc::new(RwLock::new(station));
+    ctx.registry("test-station", Station::Timeseries(station_arc.clone()))
+        .await
+        .unwrap();
+
+    // Write some data
+    let batch = vec![obs(100, 30.0), obs(200, 40.0), obs(300, 50.0)];
+    station_arc.write().await.update_range(&batch, 100, 300, 300);
+
+    // Query via Context
+    let retrieved = ctx.station::<Arc<RwLock<TimeseriesStation>>>("test-station").await.unwrap();
+    // Query within the written data range (100-300)
+    let data = retrieved.write().await.query_range(100, 300).await.unwrap();
+
+    assert_eq!(data.len(), 3);
+    assert_eq!(data[0].value, 30.0);
+    assert_eq!(data[1].value, 40.0);
+    assert_eq!(data[2].value, 50.0);
 }
 
 #[tokio::test]
-async fn unknown_station_and_empty_windows_return_unit() {
-    opsense_rhai::register();
-    let script = r#"
-        fn process(body) {
-            [#{ missing: ts_query("nope", "processed", "cpu", 0, 1) == (), empty: ts_mean("nope", "processed", "cpu", 0, 1) == (), echo: body.ts }]
-        }
-    "#;
+async fn context_station_missing_returns_error() {
+    let cfg: opsense_core::Config = serde_json::from_str("{}").unwrap();
+    let secret = Secret::new().await.unwrap();
+    let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
-    let runner = opsense_core::script::script_runner().expect("runner registered");
-    let out = runner
-        .run(script, "", serde_json::json!({"ts": 7}))
-        .await
-        .expect("script must run");
-    assert_eq!(out.len(), 1);
-    assert_eq!(out[0]["missing"], serde_json::json!(true));
-    assert_eq!(out[0]["empty"], serde_json::json!(true));
+    // Query non-existent station
+    let result = ctx.station::<Arc<RwLock<TimeseriesStation>>>("nonexistent").await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn context_attributes_roundtrip() {
+    let mut attrs = HashMap::new();
+    attrs.insert("foo".into(), "bar".into());
+
+    let cfg: opsense_core::Config = serde_json::from_str("{}").unwrap();
+    let mut cfg = cfg;
+    cfg.attributes = attrs.clone();
+    let secret = Secret::new().await.unwrap();
+    let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
+
+    let retrieved = ctx.get_attributes().await;
+    assert_eq!(retrieved.get("foo").unwrap(), "bar");
+}
+
+#[tokio::test]
+async fn context_capacity_lookup() {
+    let cfg: opsense_core::Config = serde_json::from_str("{}").unwrap();
+    let mut cfg = cfg;
+    cfg.capacity.insert("disk_usage".into(), 100.0);
+    let secret = Secret::new().await.unwrap();
+    let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
+
+    assert_eq!(ctx.capacity("disk_usage"), Some(100.0));
+    assert_eq!(ctx.capacity("unknown"), None);
 }

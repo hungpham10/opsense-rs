@@ -124,18 +124,18 @@ These modules require I/O, network, storage, or external services. They are the 
 | `opsense/src/repl/` | REPL interface | Keep as optional dev tool |
 | `opsense/src/client/` | Client layer (GraphQL, gRPC, auth) | Simplify to trading-specific client |
 
-### 2.4 Vector Runtime & Storage (opsense-libs)
+### 2.4 Vector Runtime & Storage (opsense-mlib)
 
 | Module | Purpose | Truncation Recommendation |
 |--------|---------|---------------------------|
-| `opsense-libs/src/vector/` | Full data pipeline engine (23 source files) | Replace with channel-based pipeline for trading data |
-| `opsense-libs/src/storage/` | DuckDB, LMDB, Redis, SQLite backends | Use standard crate (e.g., `sled` or single backend) |
-| `opsense-libs/src/ahocorasick/` | Pattern matching | Remove unless needed |
-| `opsense-libs/src/bloom/` | Bloom filters | Remove unless needed |
-| `opsense-libs/src/radix/` | Radix tree | Remove unless needed |
-| `opsense-libs/src/sgd.rs` | SGD optimizer | Keep — used by Portfolio::optimize() |
-| `opsense-libs/src/transition.rs` | Transition analysis | Keep — used by GridStrategy |
-| `opsense-libs/src/grid.rs` | AnalysisGrid | Keep — used by trading strategies |
+| `opsense-mlib/src/vector/` | Full data pipeline engine (23 source files) | Replace with channel-based pipeline for trading data |
+| `opsense-mlib/src/storage/` | DuckDB, LMDB, Redis, SQLite backends | Use standard crate (e.g., `sled` or single backend) |
+| `opsense-mlib/src/ahocorasick/` | Pattern matching | Remove unless needed |
+| `opsense-mlib/src/bloom/` | Bloom filters | Remove unless needed |
+| `opsense-mlib/src/radix/` | Radix tree | Remove unless needed |
+| `opsense-mlib/src/sgd.rs` | SGD optimizer | Keep — used by Portfolio::optimize() |
+| `opsense-mlib/src/transition.rs` | Transition analysis | Keep — used by GridStrategy |
+| `opsense-mlib/src/grid.rs` | AnalysisGrid | Keep — used by trading strategies |
 
 ### 2.5 Pipeline Components (opsense-components)
 
@@ -157,18 +157,18 @@ The codegraph dependency graph reveals the following internal dependency pattern
 
 ```
 opsense-qlib (trading core)
-  ├── opsense-libs (AnalysisGrid, TransitionAnalysis, SGDOptimizer, LruCache, jq)
+  ├── opsense-mlib (AnalysisGrid, TransitionAnalysis, SGDOptimizer, LruCache, jq)
   ├── opsense-macros (ONNX DSL macros: onnx_graph!, onnx_model!, ema_indicator!, etc.)
   └── opsense-model (LogLevel, Signal, TelemetryKind, TimeSeries)
 
 opsense-core (infrastructure engine)
-  ├── opsense-libs, opsense-model
+  ├── opsense-mlib, opsense-model
   ├── async-graphql, config, reqwest
   └── Provides: Config, Context, Station (Timeseries, Category, Pattern)
 
 opsense (binary)
   ├── opsense-core, opsense-qlib, opsense-components
-  ├── opsense-proto, opsense-model, opsense-runner, opsense-libs
+  ├── opsense-proto, opsense-model, opsense-runner, opsense-mlib
   ├── axum, tokio, sqlx, redis, aws-sdk-s3
   └── Provides: HTTP API, MCP server, CLI, REPL, gRPC runner
 ```
@@ -226,7 +226,7 @@ The **cleanest boundary** between "build" and "integrate" is:
 ### 3.3 External Crate Dependencies by Crate
 
 **opsense-qlib** (trading core) depends on:
-- `opsense-libs` — AnalysisGrid, TransitionAnalysis, SGDOptimizer, LruCache
+- `opsense-mlib` — AnalysisGrid, TransitionAnalysis, SGDOptimizer, LruCache
 - `opsense-macros` — ONNX DSL macros
 - `opsense-model` — LogLevel, Signal, TelemetryKind
 - `itertools`, `reqwest`, `lmdb`, `tract-onnx`, `tokio`, `serde`, `csv`, `prost`
@@ -246,7 +246,7 @@ Based on codegraph analysis of the git history and code structure, the remaining
 - **Action**: Document the wiring pattern; keep the type definitions; stub the resolvers
 
 ### 4.2 RCF Anomaly Detection Tuning
-- **What**: `opsense-libs/src/rcf.rs` — `outlier_scores_higher_than_smooth_points` test marked `#[ignore]`
+- **What**: `opsense-mlib/src/rcf.rs` — `outlier_scores_higher_than_smooth_points` test marked `#[ignore]`
 - **Type**: **Build** — algorithm tuning
 - **Can be truncated?**: Optional — RCF is not core to grid trading; only relevant if repurposing anomaly detection for trading signals
 - **Action**: Document the issue; tune codisp formula per RRCF Guha et al. 2016 if needed
@@ -312,12 +312,12 @@ To make opsense primarily a trading system:
 | `opsense-qlib/src/data_loader.rs` (traits) | **Build** (interface) | ✅ Keep | None |
 | `opsense-qlib/src/ohcl.rs` (QueryCandleSticks) | **Integrate** | ⚠️ Simplify | Replace HTTP client with pluggable source |
 | `opsense-qlib/src/opt_cache.rs` | **Integrate** | ⚠️ Simplify | Replace LMDB with in-memory or configurable |
-| `opsense-libs/src/grid.rs` | **Build** | ✅ Keep | None |
-| `opsense-libs/src/sgd.rs` | **Build** | ✅ Keep | None |
-| `opsense-libs/src/transition.rs` | **Build** | ✅ Keep | None |
-| `opsense-libs/src/vector/` | **Integrate** | ❌ Truncate | Replace with channel-based pipeline |
-| `opsense-libs/src/storage/` | **Integrate** | ⚠️ Simplify | Use single standard backend |
-| `opsense-libs/src/ahocorasick/`, `bloom/`, `radix/` | **Integrate** | ❌ Truncate | Remove unless needed |
+| `opsense-mlib/src/grid.rs` | **Build** | ✅ Keep | None |
+| `opsense-mlib/src/sgd.rs` | **Build** | ✅ Keep | None |
+| `opsense-mlib/src/transition.rs` | **Build** | ✅ Keep | None |
+| `opsense-mlib/src/vector/` | **Integrate** | ❌ Truncate | Replace with channel-based pipeline |
+| `opsense-mlib/src/storage/` | **Integrate** | ⚠️ Simplify | Use single standard backend |
+| `opsense-mlib/src/ahocorasick/`, `bloom/`, `radix/` | **Integrate** | ❌ Truncate | Remove unless needed |
 | `opsense-proto` | **Integrate** | ❌ Truncate | Replace with JSON gRPC |
 | `opsense-runner` | **Integrate** | ❌ Truncate | Replace with direct execution |
 | `opsense-kernel-*` | **Integrate** | ❌ Truncate | Remove or replace |

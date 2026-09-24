@@ -5,9 +5,12 @@ Lazy reads trực tiếp qua DuckDB trên Parquet lakehouse của station (S3) k
 session có env `OPSENSE_S3_BASE` (+ credentials `OPSENSE_S3_*`); ngược lại
 fallback gọi GraphQL của serve (`OPSENSE_SERVE_URL`).
 
-Layout parquet (do `DuckS3Storage` flush): `<base>/<station>/ts_points/*.parquet`
-với cột `id, series BLOB ('blk:<block_id>'), ts BIGINT, value BLOB (JSON của
-Block)`. Filter theo block_id trong SQL → chỉ row groups liên quan được đọc.
+Layout parquet (time-partitioned lake, do `LakehouseStorage` flush):
+`<base>/<station>/ts/blk=<block_id>/batch-<millis>.parquet` với cột
+`id, series BLOB ('blk:<block_id>'), ts BIGINT, value BLOB (JSON của Block)`.
+Partition `blk=` (block partition, `block_id = floor(ts / block_secs)`) nên
+DuckDB/Spark/Polars đều prune được theo thời gian. Query lọc `blk` (partition
+column) + `series` trong SQL → chỉ file bob liên quan được đọc.
 
 Các hàm trả pandas DataFrame với cột: ts (int64 unix sec), metric_id, value,
 labels (JSON string), kind, signal.
@@ -61,7 +64,8 @@ def _station_glob(station: str) -> Optional[str]:
     base = _env("OPSENSE_S3_BASE")
     if not base:
         return None
-    return f"{base.rstrip('/')}/{station}/ts_points/*.parquet"
+    # Time-partitioned lake: `ts/blk=<block_id>/batch-*.parquet` (Hive partition).
+    return f"{base.rstrip('/')}/{station}/ts/**/*.parquet"
 
 
 def _configure_s3(con) -> None:
@@ -106,11 +110,12 @@ def _query_parquet(
         _configure_s3(con)
         sql = f"""
         WITH blocks AS (
-            SELECT convert_from(value, 'utf8') AS blk
-            FROM read_parquet('{glob}', union_by_name = true)
-            WHERE decode(series) IN ({block_list})
+            SELECT value AS block_json
+            FROM read_parquet('{glob}', union_by_name = true, hive_partitioning = true)
+            WHERE blk BETWEEN {first} AND {last}
+              AND decode(series) IN ({block_list})
         ), items AS (
-            SELECT unnest(CAST(json_extract(blk, '$.items') AS JSON[])) AS j
+            SELECT unnest(CAST(json_extract(block_json, '$.items') AS JSON[])) AS j
             FROM blocks
         )
         SELECT
@@ -210,7 +215,7 @@ def scan(station: str):
     _configure_s3(con)
     rel = con.sql(
         f"SELECT decode(series) AS block_id, ts, value "
-        f"FROM read_parquet('{glob}', union_by_name = true)"
+        f"FROM read_parquet('{glob}', union_by_name = true, hive_partitioning = true)"
     )
     return rel
 

@@ -56,7 +56,10 @@ build-binaries:
       else \
         echo "--> Pre-built binaries not found! Fallback to Cargo build inside Earthly..."; \
         cd /src/code && \
-        RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build --workspace --release --locked && \
+        # --features opsense-core/{parquet,sqlite}: fallback build phải bật các
+        # storage backend strategies dùng (parquet + s3 mirror, sqlite) — nếu
+        # không binary chỉ chạy được backend "memory".
+        RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build --workspace --release --locked --features opsense-core/parquet,opsense-core/sqlite && \
         cp target/release/opsense* /out/; \
       fi && \
       echo "=== Final artifacts in /out ===" && \

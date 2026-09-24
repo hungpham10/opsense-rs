@@ -1,0 +1,104 @@
+# Parquet + S3 (MinIO) — prediction system: clock + 1 HTTP source (live-feed)
+# → rhai predict (predict.rhai) → tsdb.
+#
+# Pipeline graph:
+#   clock ──────┐
+#               ├──→ predict (rhai_transform, inputs = ["clock", "live-feed"])
+#   live-feed ──┘   (http_source, station=true)     lịch sử + realtime sample
+#
+# `predict` nhận message từ CẢ 2 input edges và branch theo trigger
+# (native `trigger()` đọc `payload.trigger` trước, `payload.src` sau —
+# producer tự stamp `src` bằng `signal::tagged`, xem
+# crates/opsense-components/src/lib.rs; clock stamp khi forward, xem
+# crates/opsense-mlib/src/vector/components/clock.rs):
+#   - trigger == live_source ("live-feed") → KIỂM TRA: live sample vừa đến
+#     (metric `*_live_*` trong batch) so với prediction gần nhất đọc từ
+#     station của chính node qua `station_query(...)` → check
+#     (`labels.check = "result"`, value 1.0 = khớp / 0.0 = lệch).
+#   - trigger == "clock" (hoặc "" — ping trần) → TÍNH LẠI bảng dự đoán:
+#     station_query("live-feed", now-600, now) → AnalysisGrid +
+#     TransitionAnalysis trên history window → prediction
+#     (`labels.check = "prediction"`) → tsdb.
+#
+# Grid chỉ fit history (ts ≤ now-60, metric không chứa "_live_"): live sample
+# nằm trong cùng station nhưng không nhiễu forecast.
+#
+# "Trường gửi" tùy ý: nếu cần trigger khác src, thêm stage
+# `type = "json_2_json"` với `[component.constants] trigger = "..."` giữa
+# source và predict — transform ưu tiên đọc `payload.trigger`, fallback
+# `payload.src` (xem crates/opsense-rhai/src/transform.rs).
+#
+# Dữ liệu thật từ https://prometheus.demo.prometheus.io — demo trả Prometheus
+# JSON (không phải observations array) nên source log-warn bình thường khi dùng
+# demo; e2e test re-point `url` về mock deterministic (history + live trong
+# MỘT response).
+# Sau khi flush, file ts/blk=<id>/batch-*.parquet ở
+# s3://opsense-lake/test-case-predict/tsdb/ts/**.
+
+[engine]
+poll_interval_seconds = 10
+cache_block_seconds = 5
+cache_max_blocks = 12
+
+[storage]
+backend = "parquet"
+data_dir = "/app/.opsense/parquet"
+block_secs = 5
+retention_secs = 300
+# s3_flush_interval_secs / s3_snapshot_interval_secs là lịch sync của
+# [storage] (KHÔNG nằm trong [storage.s3] — config cũ để lệch schema thì bị
+# serde bỏ qua âm thầm, flush rơi về default 60s/600s).
+s3_flush_interval_secs = 15
+s3_snapshot_interval_secs = 60
+# parquet_compression = "zstd"
+
+[storage.s3]
+bucket = "opsense-lake"
+prefix = "test-case-predict"
+endpoint = "http://minio:9000"
+url_style = "path"
+# Creds/region KHÔNG khai ở đây — fallback theo env `OPSENSE_S3_*` rồi `AWS_*`
+# (xem opsense-core station.rs open_backend).
+
+[capacity]
+cpu_ramp = 100.0
+cpu_steady = 100.0
+
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 10
+
+# 1 source duy nhất: query_range trả history window (lịch sử dày cho grid) +
+# live sample hiện tại trong MỘT response. Station của nó vừa là nguồn query
+# (clock → recompute), vừa là nguồn dữ liệu check (message → check).
+[[pipeline.components]]
+type = "http_source"
+id = "live-feed"
+inputs = ["clock"]
+# Endpoint demo Prometheus — khi dùng demo thì parse log-warn (body là
+# Prometheus JSON); e2e test re-point url này về mock observations array gồm
+# history (cpu_ramp/cpu_steady) + live samples (cpu_live_ramp/cpu_live_steady).
+url = "https://prometheus.demo.prometheus.io/api/v1/query_range?query=cpu"
+interval_secs = 10
+timeout_secs = 5
+station = true
+
+[[pipeline.components]]
+type = "rhai_transform"
+id = "predict"
+inputs = ["clock", "live-feed"]  # clock → recompute; source → check
+script_path = "strategies/predict/predict.rhai"
+
+   # Tên các station script query — cùng source cho cả 2 nhánh (1 source),
+   # station của chính node để đọc prediction cũ, và tolerance của check.
+   [pipeline.components.params]
+   window_source = "live-feed"
+   live_source = "live-feed"
+   own_station = "predict"
+   tolerance = 1.0
+
+[[pipeline.components]]
+type = "timeseries_station_sink"
+id = "tsdb"
+inputs = ["predict"]  # predictions + checks → tsdb → parquet → S3

@@ -148,8 +148,25 @@ fn thread_engine() -> std::cell::RefCell<rhai::Engine> {
     // these bounds still stop pathological nesting.
     eng.set_max_expr_depths(256, 256);
 
+    // Route Rhai's built-in `print()`/`debug()` into tracing so script logs
+    // surface in the pipeline logs instead of raw stdout (which daemon /
+    // test harnesses capture). Enable with
+    // `RUST_LOG=opsense_rhai=info` (print) or `=debug` (print + debug).
+    eng.on_print(|s| {
+        tracing::info!(target: "opsense_rhai::runtime", "script print: {s}");
+    });
+    eng.on_debug(|s, src, pos| {
+        tracing::debug!(
+            target: "opsense_rhai::runtime",
+            "script debug ({}@{}:{}): {s}",
+            src.unwrap_or("<inline>"),
+            pos.line().unwrap_or(0),
+            pos.position().unwrap_or(0),
+        );
+    });
+
     // Every script-facing native function lives in one place: `tools`.
-    crate::tools::register_all(&mut eng);
+    crate::tools::register_all(&mut eng, std::collections::BTreeMap::new());
     std::cell::RefCell::new(eng)
 }
 
@@ -180,7 +197,15 @@ pub async fn call_process(
     script: ScriptSource,
     input_json: serde_json::Value,
 ) -> Result<Vec<serde_json::Value>, String> {
-    call_process_with(script, input_json, Default::default(), Default::default()).await
+    call_process_with(
+        script,
+        input_json,
+        Default::default(),
+        Default::default(),
+        None,
+        None,
+    )
+    .await
 }
 
 /// [`call_process`] with the node's `params` config table and the pipeline
@@ -188,19 +213,39 @@ pub async fn call_process(
 ///
 /// `params` are seeded into the scope as `param_<name>` globals;
 /// `attributes` are exposed read-only via the native `attr(name)` /
-/// `attrs()` lookups. Both are copied per call, so a script can never mutate
-/// pipeline state.
+/// `attrs()` lookups. `trigger` identifies which upstream sent this message —
+/// the payload field `trigger` if present (added by a json_2_json passthrough
+/// stage) else `src` (stamped by `signal::tagged`, e.g. `"clock"` vs a source
+/// node id) — and is readable by the script via the native `trigger()`, so a
+/// transform can branch on its input edge without any runtime/Message change.
+/// When `ctx` is `Some`, the script additionally gets the general station
+/// lookup API — [`crate::station`] — to read any registered station by name
+/// (`station_query("window-feed", from, to)` …), which is how scripts hold
+/// state across calls and pull raw data from source stations without any
+/// per-feature injection in the transform.
+///
+/// All inputs are copied per call, so a script can never mutate pipeline
+/// state.
 ///
 /// The script runs on a blocking thread (`spawn_blocking`) so its CPU-bound
-/// work never stalls async tasks. The wall-clock budget is enforced for real
-/// by the engine's `on_progress` abort; the outer `tokio::time::timeout` is a
-/// backstop that only cancels the *wait*, never the thread.
+/// work never stalls async tasks. The station lookups are synchronous to the
+/// script: they run on the captured tokio handle with `Handle::block_on`, so
+/// the thread-local engine never crosses an `.await`. The wall-clock budget is
+/// enforced for real by the engine's `on_progress` abort; the outer
+/// `tokio::time::timeout` is a backstop that only cancels the *wait*, never
+/// the thread.
 pub async fn call_process_with(
     script: ScriptSource,
     input_json: serde_json::Value,
     params: std::collections::BTreeMap<String, serde_json::Value>,
     attributes: std::collections::BTreeMap<String, String>,
+    trigger: Option<String>,
+    ctx: Option<Arc<opsense_core::Context>>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    // Station lookups inside the script must run on a runtime — the blocking
+    // thread has none, so carry a handle captured on the async caller.
+    let handle = tokio::runtime::Handle::current();
+
     let join = tokio::task::spawn_blocking(move || {
         let ast = acquire(&script)?;
         let arg =
@@ -241,7 +286,17 @@ pub async fn call_process_with(
                     Some(rhai::Dynamic::UNIT)
                 }
             });
-            crate::tools::register_attributes(eng, attributes);
+            crate::attributes::register(eng, attributes);
+            {
+                // Which upstream produced this message (payload `src`); "" for
+                // control-only pings. Re-registered per call — same pattern as
+                // attributes/station bindings above.
+                let src = trigger.clone().unwrap_or_default();
+                eng.register_fn("trigger", move || src.clone());
+            }
+            if let Some(ctx) = &ctx {
+                crate::station::register(eng, ctx.clone(), handle.clone());
+            }
             eng.call_fn(&mut scope, &ast, "process", (arg,))
                 .map_err(|e| format!("script error: {e}"))
         })?;

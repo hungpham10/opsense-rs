@@ -6,10 +6,13 @@ poll_interval_seconds = 60
 cache_block_seconds = 300
 cache_max_blocks = 288
 
-# Minimal pipeline: clock source → null sink. Required so the bare
-# `opsense serve` container (which mounts this file) has an explicit
+# Minimal pipeline: clock source → timeseries station sink. Required so the
+# bare `opsense serve` container (which mounts this file) has an explicit
 # `[pipeline]` instead of relying on the in-code default. Override or
 # extend this section to wire real sources/sinks for your environment.
+# Storage for the sink comes from `[storage]` below (default backend:
+# memory). Integration tests exercise non-default storage via
+# strategies/<name>/config.toml.
 [pipeline]
 [[pipeline.components]]
 type = "clock"
@@ -17,8 +20,8 @@ id = "clock"
 interval_secs = 60
 
 [[pipeline.components]]
-type = "null"
-id = "null"
+type = "timeseries_station_sink"
+id = "tsdb"
 inputs = ["clock"]
 
 # Capacity per metric (unit depends on the metric: cores, GB, req/s, ...).
@@ -32,7 +35,7 @@ mem_usage = 64.0
 #
 # [sources.vector]
 # url = "http://alloy:9080"
-# jq_filter is run through opsense_libs::jq::JsonQuery, which supports field
+# jq_filter is run through opsense_mlib::jq::JsonQuery, which supports field
 # access (`.field`), array iteration (`[]`) and field selection
 # (`select(a, b, ...)`). It does NOT support `|` pipes or `{...}` object
 # literals, so the upstream MUST already emit observation-shaped objects, e.g.

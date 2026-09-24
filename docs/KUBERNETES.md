@@ -30,7 +30,7 @@ Hướng dẫn chuẩn bị và thực thi go-live **Opsense v1.0.10** lên Kube
                         ┌─────────────────────────────┐
  Internet ──Ingress────▶│  Service: opsense-serve:8080│──▶ Pod opsense-serve
  (TLS, path /)          └─────────────────────────────┘        │
-                                                                │ nginx (in image)
+                                                               │ nginx (in image)
                         ┌──────────────────────────────────────┘ supervisord
                         │    supervisord (in image)
                         │      ├─ nginx.sh        ──▶ http :8080
@@ -45,8 +45,9 @@ Hướng dẫn chuẩn bị và thực thi go-live **Opsense v1.0.10** lên Kube
    opsense-valkey   ── Service :6379   (nginx session cache)
    opsense-dex      ── Service :5556   (OIDC, issuer https://<<DOMAIN>>/dex)
 
-   storage: PVC /app/.opsense  (lakehouse parquet duckdb/lmdb)
-            hoặc [storage] backend="s3" → object store
+   storage: PVC /app/.opsense  (parquet — lake time-partitioned ts/blk=*/*.parquet)
+            hoặc [storage].s3 (bucket+prefix) → mirror lake lên object store
+            (nơi Spark/Polars/DuckDB query) / data_dir="s3://..."
 ```
 
 Quan trọng — các giá trị được **ép cứng trong image**:
@@ -55,7 +56,7 @@ Quan trọng — các giá trị được **ép cứng trong image**:
 |---|---|---|
 | `conf/supervisor/opsense.conf` | `OPSENSE_RUNNER_GRPC=opsense-runner:50051` | Service runner mặc định **bắt buộc đặt tên `opsense-runner`** cùng namespace |
 | `conf/supervisor/opsense.conf` | `GATEWAY_LISTENER=unix` | Listener UDS chỉ nội bộ container; nginx là front HTTP duy nhất (`:8080`) |
-| `conf/supervisor/opsense.conf` | `HOME=/app` | Đường dẫn lakehouse mặc định = `/app/.opsense/lakehouse` → PVC mount tại `/app/.opsense` |
+| `conf/supervisor/opsense.conf` | `HOME=/app` | Dùng `data_dir="/app/.opsense/parquet"` → PVC mount tại `/app/.opsense` |
 | `Earthfile serve` | `ENTRYPOINT entrypoint.sh` (supervisord -n) | Pod **không** nên override `command`; chỉ truyền env |
 
 ---
@@ -123,46 +124,192 @@ kubectl -n opsense delete pod probe
 
 ## 5. ConfigMap — cấu hình ứng dụng
 
-### 5.1 `opsense.conf.toml` (Config `OPSENSE_CONFIG`)
+### 5.1 `opsense.conf.toml` — cách viết & biến môi trường
 
-`conf/opsense.conf.toml` trong repo là pipeline **minimal** (clock → null),
-chỉ nên dùng để smoke-test. Với prod, tạo config riêng có pipeline thật +
-`[storage]` backend phù hợp:
+File TOML duy nhất cấu hình engine + storage + pipeline. Pod serve mount nó tại
+`/app/opsense.conf.toml` và trỏ bằng `OPSENSE_CONFIG` (xem §9). `conf/opsense.conf.toml`
+trong repo chỉ là pipeline **minimal** (clock → null) để smoke-test; với prod viết
+file riêng theo mẫu dưới.
+
+#### 5.1.1 Template `{{name}}` từ `[attributes]`
+
+`[attributes]` là table tự do `key = "value"`, trở thành **biến template `{{name}}`**
+trong node `http_source` (áp dụng cho `url`, `headers`, `body` — node này KHÔNG có
+trường `params`) — đã xác nhận trong `crates/opsense-components/src/http.rs` `build_vars`.
+Mỗi cycle resolve theo 3 lớp (lớp trước thắng):
+
+1. `bound[name]` — output của `bindings` (jq dạng `name = expr`; hàm dựng sẵn:
+   `ts()`, `interval()`, `now()`, `attr("key")`, `sub_secs(a,b)`, `add_secs(a,b)`,
+   `add/sub/mul/div`, `int/float/str`);
+2. field `name` trong message payload (ép sang string);
+3. `Context::variable(name)` — **attributes → secret** (token map trong DB).
+
+Không còn `{{from_ts}}`/`{{to_ts}}` tự động: cửa sổ do bạn tự bind, ví dụ
+`bindings = { from = "sub_secs(ts(), interval())", to = "ts()" }` rồi dùng
+`{{from}}`/`{{to}}` trong `url`.
+
+> ⚠️ `http_source` mang `#[serde(deny_unknown_fields)]`: các key cũ trong
+> `template.toml` của `opsense init` — `items`, `fields`, `constants`, `params`,
+> `initial_lookback_secs`, `bind` — giờ bị **từ chối ở lúc load config**. Body
+> response phải là JSON mảng (hoặc object đơn) của `Observation` (`ts`,
+> `metric_id`, `kind`, `signal`, `value`; `labels`/`severity` tuỳ chọn) — không có
+> bước extract nữa, nên nguồn Prometheus thô phải được chuyển shape trước
+> (agent/proxy hoặc `rhai_transform`).
+
+#### 5.1.2 Biến môi trường — `OPSENSE_ATTR_<NAME>`
+
+**Có hỗ trợ biến môi trường, theo cơ chế riêng** (không phải `${VAR}`):
+mọi env `OPSENSE_ATTR_<NAME>` (tên viết HOA, giá trị khác rỗng) sẽ **ghi đè hoặc
+thêm mới** entry vào `[attributes]` tại thời điểm chạy — kể cả khi file không khai
+báo key đó (`crates/opsense-core/src/config.rs` → `resolved_attributes()`). Tức là:
+
+- Mỗi môi trường (dev/staging/prod) override/inject **mà không cần sửa file**;
+- Để **secret (token, endpoint)** ở env/K8s Secret, không để trong ConfigMap.
+
+K8s wiring — thêm vào Deployment serve (bổ sung `env` ở §9):
+
+```yaml
+- name: OPSENSE_ATTR_TOKEN
+  valueFrom: { secretKeyRef: { name: opsense-secrets, key: PROM_TOKEN } }
+- name: OPSENSE_ATTR_PROM_URL
+  value: "https://prometheus.example.com"
+```
+
+Rồi trong config dùng `{{token}}`, `{{prom_url}}` — nhớ khai báo tên trong
+`bindings` để biến được resolve (xem mẫu §5.1.3).
+
+> ⚠️ **Giới hạn:** không có cơ chế `envsubst`/`${VAR}` chung cho mọi giá trị TOML
+> (loader dùng crate `config` đọc file thuần, không thay thế biến). Muốn một giá
+> trị bất kỳ đọc từ môi trường → khai báo `[attributes]`/`OPSENSE_ATTR_*` rồi dùng
+> `{{name}}` ở field được hỗ trợ. Nếu template trỏ tới biến **thiếu** → render
+> lỗi (http_source chỉ warn và bỏ request cycle đó).
+
+#### 5.1.3 Mẫu prod đầy đủ
 
 ```toml
-# docs/KUBERNETES.md — mẫu prod
+# opsense.conf.toml — mẫu sản xuất (k8s)
 [engine]
 poll_interval_seconds = 60
 cache_block_seconds = 300
 cache_max_blocks = 288
 
-# Lakehouse: duckdb (PVC) hoặc s3 (object store). data_dir mặc định
-# ".opsense/lakehouse" — tương đối theo HOME=/app.
+# Storage = Parquet (canonical, backend name "parquet"). `backend` hợp lệ (xem
+# crates/opsense-core/src/station.rs `open_backend`):
+#   memory (mặc định, thuần RAM) | parquet | sqlite
+#   "duckdb"/"s3"/"lakehouse" là alias cũ → vẫn mở Parquet storage; lmdb ĐÃ BỊ GỠ.
+#
+# Layout parquet (mỗi station một thư mục <data_dir>/<id>-<kind>/):
+#   wal.log                      mutation JSON-lines (crash-safe, kiểu Delta)
+#   tables/*-<gen>.parquet       checkpoint state (chỉ nội bộ)
+#   _current                     con trỏ checkpoint atomic
+#   ts/blk=<block_id>/batch-*.parquet   — TIMESERIES, cắt theo block thời gian
+#                                        (block_id = floor(ts / block_secs)).
+#   Spark/Polars/DuckDB đọc thẳng `s3://…/<id>/ts/**/*.parquet`.
+#
+# Mirror lên S3: khai [storage.s3] → lake xuất ra
+#   s3://<bucket>/<prefix>/<id>/ts/**/*.parquet (timeseries) + state/
+#   (checkpoint). Hoặc data_dir "s3://bucket/prefix" (backend vẫn "parquet",
+#   creds/region qua env OPSENSE_S3_* / AWS_*, OPSENSE_S3_ENDPOINT cho MinIO).
 [storage]
-backend = "duckdb"          # duckdb | lmdb | s3 | memory
-data_dir = "/app/.opsense/lakehouse"
-block_secs = 600
-retention_secs = 0          # 0 = giữ mãi
+backend = "parquet"                    # Parquet storage (canonical)
+data_dir = "/app/.opsense/parquet"     # mount PVC tại /app/.opsense; local cache
+block_secs = 600                       # partition blk= (giây) — càng nhỏ càng nhiều file
+retention_secs = 0                     # 0 = giữ mãi; đặt giây để tự xoá nguyên blk partition
+# parquet_compression = "zstd"         # zstd (mặc định) | snappy | gzip | uncompressed
 
+# (tuỳ chọn) Lakehouse mirror — nơi data-engine query trực tiếp:
+# [storage.s3]
+# bucket = "opsense-lake"              # bắt buộc khi có [storage.s3]
+# prefix = "prod"                      # s3://opsense-lake/prod/<id>/ts/**/*.parquet
+# endpoint = "http://minio:9000"       # bỏ trống = AWS public
+# region = "us-east-1"                 # /access_key_id /secret_access_key nhận env
+# url_style = "path"                   # MinIO-style; bỏ trống = virtual-host
+# s3_flush_interval_secs = 60          # tự flush timeseries ra S3 theo lịch
+# s3_snapshot_interval_secs = 600      # checkpoint + mirror state theo lịch
+
+# validate() bắt buộc ít nhất 1 metric — giữ ít nhất một dòng dưới đây.
 [capacity]
-# cpu_usage = 32.0
-# mem_usage = 64.0
+cpu_usage = 32.0
+
+# Attributes → biến {{name}}. Env OPSENSE_ATTR_* ghi đè/thêm ngay lúc chạy (5.1.2).
+[attributes]
+prom_url = "https://prometheus.example.com"
 
 [pipeline]
+
 [[pipeline.components]]
-type = "clock_source"
+type = "clock"
 id = "clock"
 interval_secs = 60
-# ... bổ sung ingest / http_source / rhai_transform / persist_sink /
-#     timeseries_station_sink cho từng use-case prod
+
+# http_source: GET một URL trả về JSON Observation (mảng/object đơn), ghi vào
+# station riêng của node (id "prom") rồi forward data_ready. Không có params —
+# query string nhét thẳng vào `url`; `{{from}}`/`{{to}}` lấy từ bindings.
+[[pipeline.components]]
+type = "http_source"
+id = "prom"
+inputs = ["clock"]
+url = "{{prom_url}}/api/v1/query_range?query=up&start={{from}}&end={{to}}&step=120"
+method = "GET"
+timeout_secs = 30
+station = true
+headers = { Authorization = "Bearer {{token}}" }   # token lấy từ env OPSENSE_ATTR_TOKEN
+bindings = {                                       # from = ts−interval, to = ts (giây)
+  from = "sub_secs(ts(), interval())",
+  to = "ts()",
+  token = "attr(\"token\")",                       # tên phải khai báo để resolve được;
+}                                                  # giá trị rỗng → backfill từ attributes/secret
+
+# Xử lý cảnh báo / reshape bằng Rhai (tuỳ chọn) — đọc cửa sổ từ station "prom".
+# [[pipeline.components]]
+# type = "rhai_transform"
+# id = "mean"
+# inputs = ["prom"]
+# script_path = "scripts/moving_avg.rhai"
+
+# Dữ liệu http_source nằm trong station "prom" (đăng ký trong registry) — đọc
+# qua MCP/GraphQL (/api) hoặc node Rhai phía sau; KHÔNG dùng timeseries_station_sink
+# trỏ sau http_source (payload data_ready không kèm `observations`).
 ```
 
-Tạo:
+> ✅ **Feature `parquet` đã được build vào image** — cả `cargo zigbuild`
+> (`.github/workflows/image.yml`) và fallback `cargo build` (Earthfile
+> `+build-binaries`) đều truyền `--features opsense-core/parquet`. Với binary
+> đã build có feature này, `open_backend` nhận `backend = "parquet"` (canonical,
+> hoặc alias cũ `"duckdb"`/`"s3"`/`"lakehouse"`) và mở Parquet storage; chỉ
+> `memory` chạy được trên binary thiếu feature (không còn là trạng thái shipping).
+> Nếu tự build ngoài workflow phải giữ đúng flag:
+>
+> ```bash
+> cargo zigbuild --release --locked --features opsense-core/parquet --target <TARGET>
+> # fallback cargo build trong Earthfile +build-binaries cũng đã có --features:
+> cargo build --workspace --release --locked --features opsense-core/parquet
+> ```
+>
+> (xem mục 14.6). Tương tự, `backend = "sqlite"` cần feature `sqlite`.
+
+#### 5.1.4 Nhét qua ConfigMap
 
 ```bash
-kubectl -n opsense create configmap opsense-config --from-file=opsense.conf.toml=conf/opsense.conf.toml
-# hoặc với kustomize: configMapGenerator từ file prod
+# Từ file trên đĩa (key phải là tên file ứng dụng đọc qua OPSENSE_CONFIG)
+kubectl -n opsense create configmap opsense-config \
+  --from-file=opsense.conf.toml=opsense.conf.toml
+# Hoặc lấy trực tiếp từ repo (đã có mount sẵn trong §9):
+kubectl -n opsense create configmap opsense-config \
+  --from-file=opsense.conf.toml=conf/opsense.conf.toml
 ```
+
+Pod mount với `subPath: opsense.conf.toml → /app/opsense.conf.toml` (manifests §9
+đã khai báo sẵn volume `config`). **ConfigMap không hot-reload** — sau khi sửa
+config phải restart deployment để pod nạp lại:
+
+```bash
+kubectl -n opsense edit configmap opsense-config
+kubectl -n opsense rollout restart deploy/opsense-serve
+```
+
+Muốn dễ rollback → dùng tên version hoá (`opsense-config-v2`) rồi trỏ `configMap.name`
+trong Deployment sang tên mới + rollout.
 
 ### 5.2 Dex config (OIDC)
 
@@ -474,7 +621,7 @@ spec:
 ```yaml
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: { name: opsense-lakehouse-pvc, namespace: opsense }
+metadata: { name: opsense-parquet-pvc, namespace: opsense }
 spec:
   accessModes: [ReadWriteOnce]
   resources: { requests: { storage: 100Gi } }
@@ -541,7 +688,7 @@ spec:
             - { name: JWT_SECRET, valueFrom: { secretKeyRef: { name: opsense-secrets, key: JWT_SECRET } } }
           volumeMounts:
             - { name: config, mountPath: /app/opsense.conf.toml, subPath: opsense.conf.toml, readOnly: true }
-            - { name: lakehouse, mountPath: /app/.opsense }
+            - { name: parquet, mountPath: /app/.opsense }
             - { name: secrets, mountPath: /app/secrets, readOnly: true }   # (tuỳ chọn) file sops
           readinessProbe:
             httpGet: { path: /health, port: 8080 }
@@ -556,8 +703,8 @@ spec:
       volumes:
         - name: config
           configMap: { name: opsense-config }
-        - name: lakehouse
-          persistentVolumeClaim: { claimName: opsense-lakehouse-pvc }
+        - name: parquet
+          persistentVolumeClaim: { claimName: opsense-parquet-pvc }
         - name: secrets
           secret:
             secretName: opsense-sops     # (tuỳ chọn) chỉ khi dùng sops; optional=true → thiếu secret vẫn chạy
@@ -666,8 +813,8 @@ curl -fsS http://127.0.0.1:8080/health   # trong pod
 curl -X POST https://<<DOMAIN>>/mcp -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"opsense_init","params":{}}'
 
-# Lakehouse có dữ liệu (sau ≥1 tick pipeline + persist)
-kubectl -n opsense exec deploy/opsense-serve -- ls -R /app/.opsense/lakehouse | head
+# Parquet có dữ liệu (sau ≥1 tick pipeline + persist)
+kubectl -n opsense exec deploy/opsense-serve -- ls -R /app/.opsense/parquet | head
 
 # Runner health
 kubectl -n opsense get pods -l app=opsense-runner -o wide
@@ -689,7 +836,7 @@ Cảnh báo cần thiết (PrometheusRule / Grafana):
 - `opsense-serve` Ready < 2, PDB `minAvailable` vi phạm.
 - Runner down > 2 phút (health check).
 - `DB_DSN` kết nối fail (serve log error, `sys_token_map` không resolve được).
-- Disk lakehouse PVC đầy (PVC usage > 80%).
+- Disk parquet PVC đầy (PVC usage > 80%).
 - SSL expiry (cert-manager `Certificate` `Ready=false`).
 
 ---
@@ -711,12 +858,12 @@ kubectl -n opsense rollout undo deploy/opsense-serve     # về revision trướ
 kubectl -n opsense rollout undo deploy/opsense-runner
 kubectl -n opsense exec deploy/opsense-serve -- /app/opsense runner --health-check || true
 ```
-Chú ý: lakehouse/DB **không tự rollback schema** → giữ migration theo hướng
+Chú ý: parquet/DB **không tự rollback schema** → giữ migration theo hướng
 forward-only; dự phòng bằng backup trước nâng.
 
 **Backup trước go-live**:
 - `pg_dump` database `opsense` (chứa `sys_token_map`, `sys_oidc`, sessions).
-- Snapshot PVC lakehouse hoặc xoá vòng đời object store.
+- Snapshot PVC parquet hoặc xoá vòng đời object store.
 - Lưu `MASTER_KEY` + sops age key ở nơi an toàn (vault/secret manager) —
   **mất MASTER_KEY = toàn bộ token đã mã hoá trong DB không decrypt được.**
 
@@ -730,11 +877,16 @@ forward-only; dự phòng bằng backup trước nâng.
 - [ ] Dex issuer = URL HTTPS thật; client/secret khớp `sys_oidc`.
 - [ ] Job init DB chạy Succeeded; seed `prod` đúng (tenant/token).
 - [ ] `DISABLE_AUTO_INIT_DATABASE=true` trên Deployment serve.
-- [ ] PVC lakehouse mount `/app/.opsense` lưu trữ được bật retention.
+- [ ] PVC parquet mount `/app/.opsense` lưu trữ được bật retention.
+- [ ] Binary v1.0.10 build với `--features opsense-core/parquet` (xem §5.1.3 ✅); smoke test `backend="parquet"` mở được station (không còn lỗi "requires feature").
+- [ ] Nếu dùng lakehouse S3 (`[storage].s3`): verify sau ≥1 chu kỳ flush các file `ts/blk=<id>/batch-*.parquet` xuất hiện ở `s3://<bucket>/<prefix>/<id>/ts/` (đọc thử bằng Polars/DuckDB/Spark từ máy khác).
+- [ ] `[storage].backend` dùng đúng tên: `parquet`/`sqlite`/`memory` — không dùng `lmdb` (đã bị gỡ); `duckdb`/`lakehouse`/`s3` chỉ là alias cũ quy về `parquet`.
+- [ ] ConfigMap `opsense-config` mount `/app/opsense.conf.toml` (OPSENSE_CONFIG); sửa config xong phải `rollout restart` — ConfigMap không hot-reload.
+- [ ] Secret/token nhét qua env `OPSENSE_ATTR_*` (secretKeyRef) cho template `{{name}}` — không để plaintext trong ConfigMap.
 - [ ] Ingress + cert-manager `Certificate` `Ready=true`; path `/dex`,`/mcp`,`/api`,`/health`,`/metrics` đúng.
 - [ ] Smoke test (mục 10, "Smoke test go-live") pass trên môi trường UAT trước prod.
 - [ ] PDB + resource limits + HPA (tuỳ chọn) đã apply; liveness/readiness ok.
-- [ ] Backup DB + lakehouse + backup script cho migration.
+- [ ] Backup DB + parquet + backup script cho migration.
 
 ---
 
@@ -756,5 +908,17 @@ forward-only; dự phòng bằng backup trước nâng.
 5. **`conf/dex/config.dev.yaml` bị bake vào image serve** (`/etc/dex/config.dev.yaml`)
    — ở k8s, Dex chạy deployment riêng nên chỗ này thừa; xoá khỏi image để tránh
    nhầm lẫn.
+6. **Feature `parquet` trong build — ĐÃ SỬA** — `cargo zigbuild` (image.yml)
+   và fallback `cargo build` (Earthfile `+build-binaries`) đều đã truyền
+   `--features opsense-core/parquet`, nên binary build lại sẽ biên dịch Parquet
+   và `backend="parquet"` (hoặc alias `"duckdb"`/`"s3"`/`"lakehouse"`)
+   mở được station (xem §5.1.3 ✅). Còn lại: **chạy lại workflow `push-image`
+   cho tag `v1.0.10`** để image cũ base lên binary mới.
+7. **`template.toml` của `opsense init` — ĐÃ SỬA** — đồng bộ với code hiện tại:
+   `backend = "parquet"`/`data_dir = ".opsense/parquet"`, bỏ `items`/`fields`/
+   `constants`/`params`/`initial_lookback_secs`/`bind`, `clock_source`/
+   `ingest_source`/`persist_sink`, và các field cũ của sink (`block_secs`/
+   `max_hot_blocks`/`max_hot_mb`/`data_dir`/`cold_retention_secs`) — dùng
+   `clock`/`input` + `bindings` thay thế.
 6. **REPL/export CLI, join multi-series** (xem `docs/CHECKLIST.MD` Part B) —
    ngoài phạm vi v1.0.10 go-live.

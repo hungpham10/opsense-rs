@@ -116,3 +116,34 @@ patterns = ["up", "scrape", "prometheus"]
 type = "null"
 id = "null"
 inputs = ["prom-explore", "metric-catalog", "instance-catalog", "container-catalog", "disk-usage", "disk-catalog", "disk-grid"]
+
+# Inline script example - doubles the value of each observation
+[[pipeline_components]]
+type = "rhai_transform"
+id = "inline-example"
+inputs = ["prom-explore"]
+script = '''
+fn process(observations) {
+    if observations.len() == 0 { return []; }
+    
+    let multiplier = param_multiplier;
+    if multiplier == 0 { multiplier = 2.0; }  # default 2x
+    
+    let out = [];
+    for obs in observations {
+        out.push(#{
+            ts: obs.ts,
+            metric_id: obs.metric_id,
+            kind: obs.kind,
+            signal: obs.signal,
+            value: obs.value * multiplier,
+            labels: obs.labels
+        });
+    }
+    out
+}
+'''
+# script_path = ""  # empty when using inline
+
+    [pipeline_components.params]
+    multiplier = 2.5  # param passed as global variable to script

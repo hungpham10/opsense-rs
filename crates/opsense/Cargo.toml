@@ -58,7 +58,12 @@ rmcp = { version = "=0.8.0", features = ["transport-io"] }
 
 # Workspace crates
 opsense-model = { path = "../opsense-model" }
-opsense-core = { path = "../opsense-core" }
+# `parquet` + `sqlite` storage backends: strategy configs in
+# strategies/<name>/config.toml use these, so the serve/runner binaries must
+# link them or stations fail to open (`storage backend 'parquet' … requires
+# opsense-core feature 'parquet'`). Other crates pull opsense-core without
+# features; feature unification enables both on the single shared copy.
+opsense-core = { path = "../opsense-core", features = ["parquet", "sqlite"] }
 # `json` links qlib's typetag-registered pipeline components (Calendar, grid
 # strategies, …) into the component inventory deserialized from pipeline TOML.
 opsense-qlib = { path = "../opsense-qlib", features = ["json"] }
@@ -71,6 +76,17 @@ opsense-mlib = { path = "../opsense-mlib", features = ["json"] }
 # gRPC service).
 opsense-proto = { path = "../opsense-proto" }
 opsense-runner = { path = "../opsense-runner" }
+# Links `timeseries_station_sink`, `http`, `telegram`, `qlib` etc. —
+# typetag-registered pipeline components — into the serve binary so configs
+# using them deserialize. Must be a *regular* dependency: dev-dependencies
+# are not linked into the binary and `opsense serve` then rejects any
+# pipeline using these component types (`unknown variant …`).
+opsense-components = { path = "../opsense-components" }
+# `rhai_transform` trong `strategies/prometheus/config.toml`: opsense-rhai đăng
+# ký component typetag này, nên `opsense validate` / `opsense serve` load được
+# strategy. Phải là *regular* dependency (cùng rule với opsense-components bên
+# trên) — dev-dep sẽ khiến serve binary từ chối config (`unknown variant …`).
+opsense-rhai = { path = "../opsense-rhai" }
 tonic = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
@@ -96,6 +112,13 @@ internal-runner-tests = []
 # (see `.github/workflows/ci.yml`); they skip gracefully when the stack is
 # down (`OPSENSE_INTEGRATION` unset).
 [dev-dependencies]
+# mlib is already a regular dependency (features=["json"]); the parquet
+# feature is only needed by the storage/s3-lake integration test harness.
+opsense-mlib = { path = "../opsense-mlib", features = ["json", "parquet"] }
+object_store = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tempfile = "3"
+futures-util = { workspace = true }
 rexpect = "0.5"
 nix = "0.25"
 jsonwebtoken = "9"

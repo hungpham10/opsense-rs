@@ -1,20 +1,29 @@
 # Viết script Rhai trong Opsense
 
-Script Rhai là cách xử lý dữ liệu không cần build lại binary: sửa file là chạy
-lại ở batch kế tiếp. Script chạy trong sandbox (không fs/network/host fn, xem
-[§5](#5-sandbox)). Có hai chỗ script được dùng:
+> **Trạng thái:** engine Rhai + bindings grid/transition tích hợp thẳng vào
+> `opsense-components` (crate đã nối sẵn serve qua `use opsense_components as _;`
+> và healthy CI). Script chạy qua node `rhai_transform` khai trong `config.toml`
+> — **không cần build lại binary**: sửa file script là batch kế tiếp tự chạy.
+> Tài liệu này mô tả **hợp đồng script** — toàn bộ hàm script gọi được. Mọi
+> binding dưới đây được khai **một block duy nhất** bởi macro `#[rhai]` trong
+> `opsense-macros` (kiểu typetag, y hệt `#[transform]`); **không có "dead
+> binding"**: nếu một hàm trong bảng trả lỗi "hàm không tồn tại" thì đó là bug
+> — báo ngay (xem §8).
+
+Script chạy trong sandbox (không filesystem/network/host function — xem §7).
+Có **một** chỗ script được dùng trong pipeline:
 
 | Node | Hợp đồng | Dữ liệu vào |
 |---|---|---|
-| `rhai_transform` | `fn process(observations)` | array observation-map từ cửa sổ cursor |
+| `rhai_transform` | `fn process(observations)` → array observation-map mới | array observation-map từ cửa sổ cursor |
 
-> `http_source` không dùng script Rhai nữa: response API map thành observations
-> bằng bộ khai báo `items` + `fields` + `constants` (jq, xem `docs/GUIDE.md`
-> mục 5). Rhai chỉ còn vai trò transform giữa các node.
+> `http_source`/`ingest_source` không dùng script Rhai: response API map thành
+> observations bằng bộ khai báo `items` + `fields` + `constants` (jq, xem
+> `docs/GUIDE.md` §5). Rhai chỉ còn vai trò `rhai_transform` giữa các node.
 
 Script mẫu kèm repo: [`scripts/`](../scripts/README.md) — đặc biệt
-[`disk_spike_check.rhai`](../scripts/disk_spike_check.rhai)
-(so hiện tại với baseline trạm).
+[`disk_spike_check.rhai`](../scripts/disk_spike_check.rhai) (so hiện tại với
+baseline). Mọi function dưới đây có ví dụ dùng thật trong script đó.
 
 ---
 
@@ -34,38 +43,36 @@ Script mẫu kèm repo: [`scripts/`](../scripts/README.md) — đặc biệt
 ```
 
 `rhai_transform` nhận mảng các map này và **phải trả về mảng mới cùng dạng**
-(output ghi vào stage cấu hình).
+(output ghi vào stage cấu hình). Ví dụ script đầy đủ:
+[`scripts/disk_spike_check.rhai`](../scripts/disk_spike_check.rhai).
 
 ## 2. Query dữ liệu từ trạm (`ts_query` / `ts_mean`)
 
-MỌI node sinh dữ liệu (`http_source`, `ingest_source`, processor/rhai
-transform, `timeseries_station_transform`…) đều tự đăng ký một trạm vào
-registry toàn cục theo **node id** (first-wins: sửa tham số trạm cần restart
-session). Mọi script đều gọi được — ví dụ node `http_source` có `id =
-"vms-disk-usage"` (bật `station = true`) thì script đọc thẳng dữ liệu nó vừa
-fetch:
+Mọi node sinh dữ liệu (`http_source`, `ingest_source`, `rhai_transform`,
+`timeseries_station_transform`, …) tự đăng ký một **trạm** vào registry toàn
+cục theo node id (first-wins — sửa tham số trạm cần restart session). Script
+gọi được mọi trạm — ví dụ node có `id = "disk-usage"` (bật `station = true`):
 
 ```rhai
-// Trả ARRAY observation-map; () nếu không có trạm id đó.
+// Trả array observation-map; () nếu không có trạm id đó.
 let points = ts_query("tsdb", "processed", "disk_usage_ratio", now_secs() - 3600, now_secs());
 
-// Sugar: trung bình value của cửa sổ; () nếu rỗng/không có trạm.
+// Sugar: trung bình value trong cửa sổ; () nếu rỗng/không có trạm.
 let base = ts_mean("tsdb", "processed", "disk_usage_ratio", now_secs() - 3600, now_secs());
 ```
 
-- Tham số: `(station_id, stage /* raw|processed */, metric_id, from_ts, to_ts)`
+- Tham số: `(station_id, stage /* raw|processed */, metric_id, from_ts, to_ts)`.
 - Kiểm tra `!= ()` trước khi dùng — trạm chưa đăng ký hoặc cửa sổ trống trả `()`.
-- Muốn query được thì node sinh dữ liệu phải publish trạm: `http_source` bật
-  `station = true`, hoặc thêm `timeseries_station_sink`/`timeseries_station_transform`
-  đứng sau node đó (xem `examples/prometheus-demo/config.toml`, khối commented).
+- Muốn query được thì node sinh dữ liệu phải publish trạm: bật `station = true`,
+  hoặc thêm `timeseries_station_transform` đứng sau node.
 
 ## 3. Toán tử time-series (`ts_*`)
 
-Nhận array observation-map (đúng định dạng `ts_query` trả về):
+Nhận array observation-map (định dạng `ts_query` trả về):
 
 | Hàm | Trả về |
 |---|---|
-| `ts_rate(points)` | (cuối − đầu) / Δt; `()` nếu rỗng/chia 0 |
+| `ts_rate(points)` | (value cuối − value đầu)/Δt; `()` nếu rỗng/chia 0 |
 | `ts_moving_avg(points, window_secs)` | array `{ts, value}` trung bình trượt |
 | `ts_resample(points, bucket_secs, agg)` | gom bucket; `agg` ∈ `avg\|min\|max\|sum\|count` |
 | `ts_quantile(points, q)` | phân vị q∈[0,1] |
@@ -75,16 +82,16 @@ Nhận array observation-map (đúng định dạng `ts_query` trả về):
 
 Hàm thời gian: `now_secs()` → unix giây hiện tại.
 
-## 4. Ví dụ end-to-end — cảnh báo đĩa theo baseline
+## 4. Ví dụ end-to-end — cảnh báo baseline
 
-Pipeline (bổ sung vào `examples/prometheus-demo/config.toml`):
+Pipeline (bổ sung vào `config.toml` của strategy, node sinh dữ liệu trước,
+node check sau — khớp pattern CI hiện có):
 
 ```toml
 [[pipeline.components]]
-type = "timeseries_station_sink"
-id = "tsdb"
-inputs = ["disk-usage"]
-bind = "127.0.0.1:9190"
+type = "http_source"
+id = "disk-usage"
+station = true          # publish trạm để script đọc được
 
 [[pipeline.components]]
 type = "rhai_transform"
@@ -98,87 +105,90 @@ id = "checked-store"
 inputs = ["disk-spike"]
 ```
 
-`scripts/disk_spike_check.rhai`: mỗi điểm usage mới được gắn baseline 1 giờ,
-delta và nhãn cảnh báo — xem file để biết chi tiết.
+## 5. grid + transition (`grid_*`, `transition_*`)
 
-## 5. Phân tích lưới capacity (`grid_*`)
+> Cả hai type + toàn bộ accessor được đăng ký **một block duy nhất** bởi macro
+> `#[rhai]` — script **không cần khai constructor tay**: macro validate
+> constructor ở compile-time → script **luôn tạo được instance**.
 
-Chia khoảng capacity `[min, max]` thành các dải đều; chuỗi usage "đi" trên lưới.
-Thuật toán **sàng phân cấp** (`opsense_libs::grid`) tìm số dải sao cho tỉ lệ cắt
-biên giữa hai điểm liên tiếp thấp nhất trong khi lưới vẫn mịn nhất — dừng khi
-delta crossings tăng đột biến (overfitting).
+### AnalysisGrid (`grid_*`)
+
+Chia khoảng capacity `[min, max]` thành các dải đều; chuỗi usage "đi" trên
+lưới. Thuật toán **sàng phân cấp** tìm số dải sao cho tỉ lệ cắt biên giữa hai
+điểm liên tiếp thấp nhất trong khi lưới vẫn mịn nhất (dừng khi delta crossings
+tăng đột biến — overfitting).
 
 | Hàm | Ý nghĩa |
 |---|---|
-| `grid_fit(points, min, max, max_bit)` | Fit lưới từ array observation-map; trả object `AnalysisGrid` (hoặc `()`) |
-| `grid_fit_values(values, min, max, max_bit)` | Như trên nhưng nhận array số thuần |
+| `grid_fit(points, min, max, max_bits)` | Fit lưới; trả `AnalysisGrid` (hoặc `()` nếu không fit được) |
+| `grid_fit_values(values, min, max, max_bits)` | Như trên, nhận array số thuần |
 | `num_cells(g)` / `num_lines(g)` / `grid_step(g)` | Số dải / số đường lưới / độ rộng dải |
 | `grid_cell(g, y)` | Chỉ số dải chứa giá trị `y` |
 | `grid_crossings(g, points)` | Số lần cắt biên của chuỗi |
 | `grid_occupancy(g, points, interval_secs)` | Histogram `result[bucket][cell]` theo thời gian |
-| `grid_ranges(g)` | Array `#{index, low, high}` — biên từng dải |
+| `grid_ranges(g)` | Array `#{low, high}` — biên từng dải |
 
-Ví dụ với demo đĩa (biên vật lý `[0, disk_capacity]`):
+### TransitionAnalysis (`transition_*`)
+
+Xây trên một `AnalysisGrid` đã fit: chia cửa sổ dữ liệu thành các **bucket**
+liên tiếp, đếm lần di chuyển giữa các dải và thời gian lưu từng dải — phát
+hiện "trạng thái" bất thường (tỉ lệ đi xuống/tăng/đứng yên từ một dải với
+xác suất). **Constructor bắt buộc** (macro validate compile-time):
+
+| Hàm | Ý nghĩa |
+|---|---|
+| `transition_analysis(grid, points, interval_secs)` | **constructor** — instance `TransitionAnalysis` (hoặc `()` nếu không fit được) |
+| `num_buckets(ta)` / `num_cells(ta)` / `interval_secs(ta)` | số bucket / số dải / độ rộng bucket |
+| `grid(ta)` | AnalysisGrid cơ sở |
+| `transitions(ta)` | tổng số lần di chuyển |
+| `has_transitions_from(ta, cell)` / `total_from(ta, cell)` | có transition từ dải / tổng đi ra khỏi dải `cell` |
+| `down_probability(ta, cell)` / `up_probability(ta, cell)` / `stay_probability(ta, cell)` | xác suất đi xuống / đi lên / đứng yên từ dải |
+| `down_probabilities(ta)` / `up_probabilities(ta)` / `stay_probabilities(ta)` | vector xác suất cho mọi dải |
+
+Script điển hình — fit lưới → dựng transition → đọc accessor:
 
 ```rhai
 fn process(points) {
-    let g = grid_fit(points, 0.0, 52591026176.0, 12);   // capacity ~49GB
-    [
-        #{ bands: num_cells(g), step: grid_step(g) },
-        grid_occupancy(g, points, 3600),   // phân bố điểm theo giờ × dải
-        grid_ranges(g),                    // liệt kê các dải [low, high)
+    let g = grid_fit(points, 0.0, 52591026176.0, 12);
+    if g == () { return (); }
+
+    let ta = transition_analysis(g, points, 300);   // bucket 5 phút
+    if ta == () { return (); }
+
+    [       // mọi accessor gọi được ngay — không "miss"
+        #{ buckets: num_buckets(ta), cells: num_cells(ta), interval: interval_secs(ta) },
+        down_probabilities(ta),
+        up_probabilities(ta),
+        stay_probabilities(ta),
+        grid_ranges(grid(ta)),
     ]
 }
 ```
-
-`max_bit` là trần tinh xoáy của sieve (lưới mịn nhất = 2^max_bit dải);
-đặt 10–14 là hợp lý. Script tham khảo: `scripts/disk_spike_check.rhai`
-(cùng pipeline demo).
 
 ## 6. Pattern matching & catalog (`pattern_*` / `catalog_*`)
 
 ### Pattern (Aho-Corasick log matcher)
 
-| Hàm | Trả về | Mô tả |
-|---|---|---|
-| `pattern_is_known(node_id, text)` | `bool` | text có match pattern nào không |
-| `pattern_add(node_id, pattern)` | `()` | thêm pattern mới vào automaton |
-| `pattern_stats(node_id)` | map `{total_patterns, hits, misses}` | thống kê |
-
-```rhai
-fn process(observations) {
-    observations.map(|o| #{
-        ts: o.ts,
-        metric_id: o.metric_id,
-        kind: o.kind,
-        signal: o.signal,
-        value: o.value,
-        labels: #{ known: pattern_is_known("log-matcher", o.metric_id) },
-    })
-}
-```
+| Hàm | Trả về |
+|---|---|
+| `pattern_is_known(node_id, text)` | `bool` — text có match pattern nào không |
+| `pattern_add(node_id, pattern)` | `()` — thêm pattern vào automaton |
+| `pattern_stats(node_id)` | map `{total_patterns, hits, misses}` |
 
 ### Catalog (Radix substring search)
 
 | Hàm | Trả về |
 |---|---|
-| `catalog_insert(node_id, key, value)` | `()` — index key/value pair |
-| `catalog_search(node_id, pattern)` | array of `{key, value}` maps |
+| `catalog_insert(node_id, key, value)` | `()` — index key/value |
+| `catalog_search(node_id, pattern)` | array `{key, value}` maps |
 
-```rhai
-fn process(observations) {
-    for o in observations {
-        catalog_insert("svc-catalog", o.metric_id, serde_json::to_string(o));
-    }
-    let hits = catalog_search("svc-catalog", "cpu");
-}
-```
-
-Cả hai dùng chung registry first-wins per node id.
+Cả hai dùng chung registry first-wins per node id (macro `#[rhai]` sinh, nếu
+script dùng `pattern_*`/`catalog_*` thì cũng là một block duy nhất — §8).
 
 ## 7. Sandbox
 
-- Không filesystem/network/host function; chỉ toán tử Rhai + hàm `ts_*`/`now_secs`.
+- Không filesystem/network/host function; chỉ toán tử Rhai + hàm `ts_*`/`grid_*`
+  /`transition_*`/`now_secs`.
 - Giới hạn: 1_000_000 operations, array/map 100_000, string 1_000_000.
 - Timeout riêng: env `OPSENSE_RHAI_TIMEOUT_SECS`.
 - Lỗi script **không giết pipeline**: log warn, cursor giữ nguyên, cửa sổ được
@@ -186,8 +196,19 @@ Cả hai dùng chung registry first-wins per node id.
 
 ## 8. Test nhanh
 
-1. Pipeline playground không clock (mẫu A trong `.opsense/config.toml`) →
-   MCP `opsense_run({node})` bơm tay → `opsense_query` xem kết quả.
-2. Hoặc harness Rust thật theo [`GUIDE.md` §7](./GUIDE.md): copy
-   `crates/opsense-rhai/tests/http_format.rs`, mock server, đánh dấu
-   `#[ignore]`, chạy `cargo test -- --ignored --nocapture`.
+Quy trình chuẩn — **run → chờ → đọc dữ liệu → timeout:**
+
+1. Khai node `rhai_transform` + script trong `config.toml` của một strategy
+   (xem §4). Chạy `opsense serve` với config đó.
+2. **Chờ 1 khoảng thời gian** đủ cho pipeline chạy vài tick (vd 15–30s).
+3. **Đọc dữ liệu qua GraphQL** (`queryTimeseries`) với `station_id` = trạm của
+   node script — xem metric do script sinh ra đã vào trạm chưa.
+4. **Không có dữ liệu → báo timeout + xử lý:** kiểm tra server còn healthy
+   không, log warn lỗi script (script bị retry tự heal), station đã đăng ký
+   chưa; sau đó chạy lại ở batch kế. **Không panic ngầm** — timeout là hành vi
+   kỳ vọng khi pipeline chưa đủ dữ liệu.
+
+> **Hợp đồng lỗi:** nếu script đúng (đã khớp bảng §2–§6) mà một hàm báo "hàm
+> không tồn tại" → đó là bug binding (macro sinh thiếu/trùng) — báo ngay. Ví
+> dụ hiện tại nếu bảng §5 thiếu constructor thì là **bug** chứ không phải hành
+> vi kỳ vọng.

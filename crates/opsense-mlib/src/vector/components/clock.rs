@@ -46,7 +46,12 @@ impl_clock!(
         let mut ticker = tokio::time::interval(Duration::from_secs(self.interval_secs));
         loop {
             ticker.tick().await;
-            let msg = tick_signal(now_secs());
+            let mut msg = tick_signal(now_secs());
+            // Stamp tin nhắn với id producer — cùng convention `signal::tagged`
+            // của transform/http: consumer đọc `payload.src` qua `trigger()`.
+            if let Some(obj) = msg.payload.as_object_mut() {
+                obj.insert("src".into(), json!(self.id));
+            }
 
             for stream in &tx.streams {
                 if stream.send(msg.clone()).await.is_err() {

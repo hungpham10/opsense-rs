@@ -5,6 +5,22 @@ use std::path::PathBuf;
 
 use opsense::serve;
 
+// Force `opsense-components` to be linked into the binary: its pipeline
+// components (`timeseries_station_sink`, `http`, `telegram`, …) are
+// registered with typetag via `#[used]`-style statics, which rustc/linker
+// strips when no code path references the crate. Without this, configs that
+// use those component types fail to deserialize at runtime:
+//   unknown variant `timeseries_station_sink`, expected one of `clock`, ...
+#[allow(unused_imports)]
+use opsense_components as _;
+
+// Same force-link for `opsense-rhai`: it registers `rhai_transform` via the
+// same typetag/inventory mechanism, so configs like
+// strategies/prometheus/config.toml (clock → http → rhai → tsdb) must be
+// able to deserialize it in `opsense serve` / `opsense validate`.
+#[allow(unused_imports)]
+use opsense_rhai as _;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "opsense",
@@ -44,6 +60,16 @@ enum Commands {
         /// enables kernel mode.
         #[arg(long)]
         runner: Option<String>,
+    },
+
+    /// Validate config.toml without running the service.
+    ///
+    /// Reads config from `OPSENSE_CONFIG` (default `.opsense/config.toml`)
+    /// or explicit `--config` path, parses and validates it.
+    Validate {
+        /// Explicit config file path (overrides OPSENSE_CONFIG).
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
     },
 
     /// Run the opsense kernel runner: a standalone execution worker exposing
@@ -99,6 +125,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Err(e) = opsense::repl::run(endpoint, runner).await {
                         eprintln!("repl error: {e}");
                         std::process::exit(1);
+                    }
+                }
+                Some(Commands::Validate { config }) => {
+                    if let Err(e) = opsense::serve::validate_config(config).await {
+                        eprintln!("config validation failed: {e}");
+                        std::process::exit(1);
+                    } else {
+                        println!("config validation passed");
                     }
                 }
                 Some(Commands::Runner {

@@ -138,3 +138,44 @@ pub async fn wait_for_dex(timeout_secs: u64) -> anyhow::Result<()> {
     }
     anyhow::bail!("Dex not healthy at {url} after {timeout_secs}s")
 }
+
+/// Poll GraphQL status until at least one station is registered, or timeout.
+/// Returns the list of station IDs.
+#[allow(dead_code)] // dùng trong integration_storage.rs
+pub async fn wait_for_stations(
+    client: &Client,
+    timeout_secs: u64,
+    bearer: &str,
+) -> anyhow::Result<Vec<String>> {
+    let url = format!("{}/api/repl/graphql", serve_url());
+    let body = serde_json::json!({"query": "{ status { stations { id kind } } }"});
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        if let Ok(resp) = client
+            .post(&url)
+            .bearer_auth(bearer)
+            .json(&body)
+            .send()
+            .await
+            && resp.status().is_success()
+        {
+            let body: serde_json::Value = resp.json().await?;
+            let stations: Vec<serde_json::Value> = body
+                .get("data")
+                .and_then(|d| d.get("status"))
+                .and_then(|s| s.get("stations"))
+                .and_then(|s| s.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let station_ids: Vec<String> = stations
+                .iter()
+                .filter_map(|s| s.get("id").and_then(|id| id.as_str()).map(String::from))
+                .collect();
+            if !station_ids.is_empty() {
+                return Ok(station_ids);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+    }
+    anyhow::bail!("no stations registered at {url} after {timeout_secs}s")
+}

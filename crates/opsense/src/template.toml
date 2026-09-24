@@ -3,8 +3,7 @@
 # Quick tour:
 #   1. Set [attributes] (template variables) and [capacity].
 #   2. Uncomment ONE of the [pipeline] blocks below — or leave [pipeline]
-#      out entirely for the default hourly graph:
-#      clock_source -> ingest_source -> processor_transform -> persist_sink
+#      out entirely for the default minimal graph: `clock -> null`.
 #   3a. Interactive: `opsense serve --repl` (analysis REPL + Python), or
 #       `opsense serve --mcp` / `opsense mcp` (headless MCP stdio) /
 #       `opsense serve --mcp --http` (remote MCP clients; combinable
@@ -53,26 +52,46 @@ cpu = 8.0
 mem = 16.0
 
 # Template variables usable as {{name}} inside http_source
-# url/headers/params/body. Override per environment WITHOUT editing this
+# url/headers/body. Override per environment WITHOUT editing this
 # file: OPSENSE_ATTR_<NAME> (uppercase) wins, env-only entries are picked
 # up too — put secrets there, not here.
 [attributes]
 prom_url = "http://127.0.0.1:9090"    # TODO: URL Prometheus/VictoriaMetrics của bạn
 
-# Durable backend: "duckdb" (parquet lakehouse), "lmdb", "memory" hoặc "s3".
-#   - duckdb: ghi parquet ra <data_dir>/<stage>/blk=<start>/batch_NNN.parquet
-#            (layout cũ dt=YYYY-MM-DD/hour=HH/... vẫn đọc được — read-compat).
-#   - s3:    data_dir dạng "s3://bucket/prefix"; credentials + region lấy từ
-#            env qua AmazonS3Builder::from_env(), OPSENSE_S3_ENDPOINT cho MinIO.
-# Query lakehouse chỉ mở đúng block cắt ngang cửa sổ (block pruning).
-# block_secs: độ rộng mỗi block parquet (giây). Mặc định 3600.
-# retention_secs > 0: mỗi phút xoá điểm cũ hơn N giây (lakehouse: nguyên block).
+# Durable backend: "parquet" (canonical), "memory" (mặc định) hoặc "sqlite".
+#   - parquet: lake Parquet time-partitioned — mỗi station một thư mục
+#            <data_dir>/<id>-<kind>/ chứa: wal.log (mutation log kiểu Delta),
+#            tables/*.parquet + _current (checkpoint state, atomic), và
+#            ts/blk=<block_id>/batch-<millis>.parquet (timeseries cắt theo
+#            block thời gian; block_id = floor(ts / block_secs)). Các hệ thống
+#            data processing (Spark/DuckDB/Polars) đọc thẳng ts/blk=*/*.parquet.
+#   - memory:  không persistence — chỉ LRU in-memory.
+#   - sqlite:  một file riêng cho mỗi station.
+# Mirror lên object store (lakehouse S3):
+#   - Cách 1 (khuyến nghị): khai [storage.s3] bên dưới với bucket + prefix →
+#     lake xuất ra s3://<bucket>/<prefix>/<id>/ts/blk=*/*.parquet (+ state/),
+#     tự flush/snapshot định kỳ theo s3_flush_interval_secs / s3_snapshot_interval_secs.
+#   - Cách 2: data_dir = "s3://bucket/prefix" → lấy credentials từ env
+#     AWS_* / OPSENSE_S3_* (OPSENSE_S3_ENDPOINT cho MinIO).
+# (Tên cũ "duckdb"/"lakehouse"/"s3" không còn được khuyến nghị dùng — code
+# chỉ nhận chúng làm alias deprecated cho "parquet".)
+# block_secs: độ rộng mỗi block parquet (giây) = partition blk=; mặc định 3600.
+# retention_secs > 0: mỗi phút xoá điểm cũ hơn N giây (parquet: nguyên blk partition).
+# parquet_compression: "zstd" (mặc định) | "snappy" | "gzip" | "uncompressed".
 [storage]
-backend = "duckdb"
-data_dir = ".opsense/lakehouse"
+backend = "parquet"
+data_dir = ".opsense/parquet"        # local cache root (data vẫn nằm trong
+                                     # <data_dir>/<id>-timeseries/ts/...)
 # block_secs = 3600
-# retention_secs = 7776000               # ví dụ: chỉ giữ 90 ngày (0/bỏ = giữ mãi)
-# Ví dụ S3: backend = "s3", data_dir = "s3://my-bucket/opsense"
+# retention_secs = 7776000           # ví dụ: chỉ giữ 90 ngày (0/bỏ = giữ mãi)
+# parquet_compression = "zstd"
+# [storage.s3]                        # (tùy chọn) mirror parquet lên S3 → nơi
+# bucket = "opsense-lake"            # Spark/DuckDB/Polars query trực tiếp qua
+# prefix = "prod"                    # s3://opsense-lake/prod/<id>/ts/**/*.parquet
+# endpoint = "http://minio:9000"     # bỏ trống = AWS public; /region, /access_key_id,
+# url_style = "path"                 # /secret_access_key nhận env OPSENSE_S3_*.
+# s3_flush_interval_secs = 60        # flush timeseries ra S3 theo lịch
+# s3_snapshot_interval_secs = 600    # checkpoint + mirror state lên S3 theo lịch
 
 # Cursor pipeline tự lưu <data_dir>/watermarks.json để restart tiếp tục chỗ cũ.
 
@@ -81,7 +100,7 @@ data_dir = ".opsense/lakehouse"
 #    read results back with `opsense_query`. See scripts/README.md.
 # ------------------------------------------------------------------
 # [[pipeline.components]]
-# type = "ingest_source"
+# type = "input"                        # node nạp dữ liệu bằng tay qua opsense_run
 # id = "ingest"
 #
 # [[pipeline.components]]
@@ -94,15 +113,16 @@ data_dir = ".opsense/lakehouse"
 # type = "timeseries_station_sink"
 # id = "mean-station"
 # inputs = ["mean"]
-# # bind = "127.0.0.1:9190"            # mở endpoint Prometheus-style
 
 # ------------------------------------------------------------------
-# B) VictoriaMetrics / Prometheus through the generic HTTP node.
-#    Every minute the window advances (cursor -> ts): the request only
-#    asks for the delta. First cycle backfills initial_lookback_secs.
+# B) VictoriaMetrics / Prometheus — the generic HTTP node.
+#    Every minute the window advances: `bindings` computes from/to (giây)
+#    từ ts()/interval(); http_source gọi url mỗi chu kỳ và lưu vào station.
+#    http_source chỉ hỗ trợ JSON Observation (mảng/object đơn); không có
+#    jq extraction (items/fields/constants/params) hay bind.
 # ------------------------------------------------------------------
 # [[pipeline.components]]
-# type = "clock_source"
+# type = "clock"
 # id = "clock"
 # interval_secs = 60
 #
@@ -110,60 +130,37 @@ data_dir = ".opsense/lakehouse"
 # type = "http_source"
 # id = "prom"
 # inputs = ["clock"]
-# url = "{{prom_url}}/api/v1/query_range"
-# initial_lookback_secs = 900          # first cycle backfills 15 minutes
+# url = "{{prom_url}}/api/v1/query_range?query=up&start={{from}}&end={{to}}&step=120"
 # timeout_secs = 120
 # station = true                       # publish a station under id "prom"
-# # bind = "127.0.0.1:9290"            # optional Prometheus-style endpoint
-#
-# # Declarative jq extraction: walk down to each sample, pick ts/value out of
-# # the [ts, "val"] pair, then stamp a fixed metric id + labels on every obs.
-# items = "data.result[].values[]"
-# [pipeline.components.fields]
-# ts = { query = "0", cast_to = "i64" }
-# value = { query = "1", cast_to = "f64" }
-# [pipeline.components.constants]
-# metric_id = "up"
-# labels = { job = "node_exporter" }
-#
-# [pipeline.components.params]         # keys literal, values are templates
-# query = "up"                         # any PromQL — try up{job="node_exporter"}
-# start = "{{from_ts}}"
-# end = "{{to_ts}}"
-# step = "120"
-#
-# [[pipeline.components]]
-# type = "timeseries_station_sink"
-# id = "prom-station"
-# inputs = ["prom"]
+# bindings = {                         # bindings cho {{name}} template trong url
+#   from = "sub_secs(ts(), interval())",
+#   to   = "ts()",
+# }
 
 # ------------------------------------------------------------------
-# C) Trạm timeseries nội bộ — cache khối (dọn khi đầy: số entry + dung lượng),
-#    cold tier LMDB tuỳ chọn. Một node http_source khác có thể trỏ về chính
-#    trạm này thay vì Prometheus. Script Rhai trong pipeline cũng gọi được
-#    ts_query()/ts_mean().
+# C) Trạm timeseries nội bộ — mỗi sink ghi vào station riêng theo id của nó;
+#    persistence/nén nằm ở [storage] trên (Parquet). Đọc lại qua REPL/MCP/HTTP
+#    hoặc một http_source trỏ ngược về endpoint Prometheus-style của trạm.
 # ------------------------------------------------------------------
 # [[pipeline.components]]
 # type = "timeseries_station_sink"
 # id = "tsdb"
-# inputs = ["processor"]
-# bind = "127.0.0.1:9190"
-# block_secs = 300                      # độ rộng block LRU
-# max_hot_blocks = 288                  # trần số entry
-# max_hot_mb = 256                      # trần dung lượng RAM (xấp xỉ)
-# data_dir = ""                         # để trống = chỉ RAM (cold LMDB optional)
-# cold_retention_secs = 604800          # xoá điểm LMDB cũ hơn 7 ngày (0 = giữ)
+# inputs = ["prom"]
 #
-# Đọc lại lịch sử từ trạm qua http_source (query nhét thẳng vào URL):
+# Đọc lịch sử từ trạm qua http_source (query nhét thẳng vào url):
 # [[pipeline.components]]
 # type = "http_source"
 # id = "history"
 # inputs = ["clock"]
-# url = "http://127.0.0.1:9190/api/v1/query_range?query=cpu_usage&start={{from_ts}}&end={{to_ts}}"
-# fields.value = { query = "value", cast_to = "f64" }
+# url = "http://127.0.0.1:9190/api/v1/query_range?query=cpu_usage&start={{from}}&end={{to}}"
+# bindings = {
+#   from = "sub_secs(ts(), interval())",
+#   to   = "ts()",
+# }
 
 # ------------------------------------------------------------------
-# D) Legacy collector source (pull model through ingest_source).
+# D) Legacy collector source (pull model, không còn ingest_source).
 # ------------------------------------------------------------------
 # [sources.vector]
 # url = "http://127.0.0.1:8686"

@@ -63,18 +63,23 @@ opsense serve --mcp
 ### Lưu trữ & con trỏ qua restart
 
 - **Station là tầng lưu trữ DUY NHẤT** (in-memory, mỗi node một cái). Tầng
-  `ObservationStore` chung (memory/duckdb/lmdb/s3) + `persist_sink` đã bị gỡ
-  trong refactor 2026-08-26. Mỗi node tự ghi output vào station riêng theo
-  `id`; downstream đọc cửa sổ `(cursor, ts]` qua `read_window` — merge cả hai
-  stage raw+processed với dedup `(metric_id, ts)`.
+  `ObservationStore` chung (backend cũ: memory/duckdb/lmdb/s3) + `persist_sink`
+  đã bị gỡ trong refactor 2026-08-26. Mỗi node tự ghi output vào station riêng
+  theo `id`; downstream đọc cửa sổ `(cursor, ts]` qua `read_window` — merge cả
+  hai stage raw+processed với dedup `(metric_id, ts)`.
 - **Watermark sống qua restart**: `Watermarks` có journal JSON
   (`<data_dir>/watermarks.json`, tmp+rename atomic); restart tiếp tục đúng chỗ
   cũ thay vì backfill lại từ `initial_lookback_secs`. File hỏng thì log warn
   và khởi động sạch.
 
-> `[storage]` trong config giờ **chỉ còn ý nghĩa** cho các thành phần
-> `mirror` hoặc khi cần re-import lakehouse cũ; nếu không có thì để mặc định
-> `backend = "memory"`, `data_dir = ".opsense/lakehouse"` — không tốn disk.
+> `[storage]` quyết định backend bền cho **mọi station**: `backend = "parquet"`
+> (canonical) mở lake Parquet — `<data_dir>/<id>-<kind>/` với `wal.log` +
+> checkpoint (`tables/`+`_current`) + timeseries time-partitioned
+> `ts/blk=<block_id>/batch-*.parquet` (Spark/DuckDB/Polars đọc thẳng). Khai
+> `[storage].s3` (bucket + prefix) để mirror lake lên S3
+> (`s3://<bucket>/<prefix>/<id>/ts/**`) kèm auto flush/snapshot định kỳ; hoặc
+> `data_dir = "s3://bucket/prefix"`. Mặc định `backend = "memory"` — thuần RAM,
+> không tốn disk.
 
 ---
 
@@ -135,7 +140,7 @@ trong `opsense-macros`, nên component mới không thể lệch quy tắc.
 | `processor_component` | `processor_transform` | |
 | `rhai_transform_component` | `rhai_transform` | trong crate `opsense-rhai` |
 | `persist_component` | _đã xoá_ | persistence chung bị gỡ, mỗi node có station riêng |
-| `station_sink` | `timeseries_station_sink` | chỉ còn RAM hot + HTTP endpoint (không còn cold LMDB) |
+| `station_sink` | `timeseries_station_sink` | chỉ còn RAM hot + HTTP endpoint (cold tier đã gỡ) |
 | `ahocorasick_transform` | `pattern_station_transform` | Aho-Corasick, kèm hit/miss counter |
 | `catalog_transform` | `category_station_transform` | Radix + KMP key/value index |
 
@@ -276,20 +281,22 @@ nhiều series cần `metric_id`/`labels` khác nhau, hãy tách thành nhiều 
 type = "http_source"
 id = "prom"
 inputs = ["clock"]
-url = "{{prom_url}}/api/v1/query_range"
-initial_lookback_secs = 900
+url = "{{prom_url}}/api/v1/query_range?query=up&start={{from}}&end={{to}}&step=120"
 timeout_secs = 30
 station = true                 # đăng ký station với id = "prom"
-bind = "127.0.0.1:9290"        # mở endpoint Prometheus-style (truy vấn lại history)
-block_secs = 300
-max_hot_blocks = 288
-max_hot_mb = 256
-data_dir = ""                  # để trống = chỉ RAM; đặt path để bật cold LMDB
-cold_retention_secs = 0        # 0 = giữ vĩnh viễn
+bindings = {                   # cửa sổ window → {{from}}/{{to}} trong url
+  from = "sub_secs(ts(), interval())",
+  to   = "ts()",
+}
 ```
 
 Trường hợp dùng `station = true` thì **không cần thêm `timeseries_station_sink`**
 cho cùng dữ liệu — station của `http_source` đã đủ.
+
+> Lưu ý: `http_source` KHÔNG có các field cũ `initial_lookback_secs`/`bind`/
+> `block_secs`/`max_hot_blocks`/`max_hot_mb`/`data_dir`/`cold_retention_secs`
+> (đã bị gỡ cùng `persist_sink`). Persistence nằm ở section `[storage]` (xem
+> dưới) — `backend = "parquet"` mở Parquet cho mọi station có `data_dir`.
 
 ---
 
@@ -312,7 +319,7 @@ station cùng tồn tại trong registry):
 
 | Hình thái | Cách bật | Dùng khi |
 |---|---|---|
-| **`Timeseries`** | `http_source` + `station = true` (+ `bind/block_secs/max_hot_blocks/max_hot_mb/data_dir/cold_retention_secs`) hoặc `timeseries_station_sink` | Mọi thứ cần cache time-series; mặc định cho mọi nguồn dữ liệu metric |
+| **`Timeseries`** | `http_source` + `station = true`, hoặc `timeseries_station_sink` | Mọi thứ cần cache time-series; mặc định cho mọi nguồn dữ liệu metric |
 | **`Pattern`** | `pattern_station_transform` (Aho-Corasick multi-pattern) | Log/text stream: đánh dấu known/unknown theo pattern |
 | **`Category`** | `category_station_transform` (Radix + KMP key/value index) | Catalog / từ điển / metadata, cho phép substring search |
 
@@ -344,28 +351,16 @@ Ví dụ cấu hình `timeseries_station_sink`:
 type = "timeseries_station_sink"
 id = "tsdb"
 inputs = ["processor"]
-bind = "127.0.0.1:9190"
-block_secs = 300                       # độ rộng block LRU
-max_hot_blocks = 288                   # trần số entry
-max_hot_mb = 256                       # trần dung lượng (xấp xỉ)
-data_dir = ""                          # để trống = chỉ RAM
-cold_retention_secs = 0                # 0 = giữ vĩnh viễn
 ```
 
-Cơ chế dọn dẹp — **RAM chỉ dọn khi đầy**:
-
-- **Hot tier (RAM)**: evict theo entry `(stage, metric)` ngay khi vượt
-  `max_hot_blocks` / `max_hot_mb`, cũ nhất trước. Không có TTL: cache RAM không
-  cần dọn theo thời gian, trần dung lượng đã đủ chặn.
-- **Cold tier (LMDB, optional)**: khi `data_dir` khác rỗng, dữ liệu cũ evict
-  khỏi RAM vẫn còn trong LMDB; truy vấn ghép cold + overlay hot, dedup
-  `(metric_id, ts)`.
-- **Retention theo thời gian**: `cold_retention_secs > 0` bật task nền range-
-  delete key cũ hơn N giây (chỉ áp dụng khi có cold tier).
+Persistence của trạm đi theo section `[storage]` ở trên: `backend = "parquet"`
+mở Parquet (block spill từ RAM hot), `backend = "sqlite"` một file riêng,
+`backend = "memory"` thuần RAM. Trạm tự đọc lại dữ liệu cũ khi cần
+(read-through) — không còn khái niệm cold tier riêng rẽ như thời `lmdb`.
 
 > Lịch sử: trước 2026-08-26 trạm còn field `hot_ttl_secs` (đã bỏ), layout
-> `dt=/hour=` (đã thay bằng LRU `(stage, metric)`), `delete_before` qua LMDB
-> cold riêng. Giờ chỉ còn LRU thuần sync + cold tier optional.
+> `dt=/hour=` (đã thay bằng LRU `(stage, metric)`), cold tier `LMDB` riêng
+> (đã gỡ). Giờ chỉ còn LRU hot sync + persistence qua `[storage].backend`.
 
 ### Phục hồi dữ liệu bị evict (`opsense_backfill`)
 
@@ -452,9 +447,9 @@ chính thức.
   tiến trình cũ. Trạm giữ handle đầu tiên đăng ký — sửa config trạm cần
   restart session để áp dụng.
 - **`station_sink`: unknown field `hot_ttl_secs`** — khoá này đã bỏ từ
-  2026-08-26; cache RAM chỉ dọn khi đầy (`max_hot_blocks` / `max_hot_mb`).
-  `cold_retention_secs` (nếu có `data_dir` cold LMDB) cũng đã đổi tên từ
-  `retention_secs`.
+  2026-08-26; cache RAM chỉ dọn khi đầy. Retention theo thời gian giờ nằm ở
+  `[storage] retention_secs` (parquet: xoá nguyên block cũ), không còn
+  `data_dir`/`cold_retention_secs`/`cold tier lmdb` trên sink.
 - **`pipeline graph contains a cycle: a -> b -> a`** — config hoặc
   `opsense_edit` vừa tạo vòng dependency giữa các node; bỏ một cạnh `inputs`
   hoặc tách đường vòng qua node trung gian rồi nạp lại.

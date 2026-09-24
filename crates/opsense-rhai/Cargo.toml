@@ -10,9 +10,10 @@ warnings = "deny"
 
 [dependencies]
 async-trait = { workspace = true }
+inventory = "0.3"
 opsense-core = { path = "../opsense-core" }
 opsense-components = { path = "../opsense-components" }
-opsense-libs = { path = "../opsense-libs" }
+opsense-mlib = { path = "../opsense-mlib", features = ["json", "rhai"] }
 opsense-macros = { path = "../opsense-macros" }
 opsense-model = { path = "../opsense-model" }
 rhai = { workspace = true }
@@ -26,3 +27,4 @@ typetag = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
+toml = "0.8"
