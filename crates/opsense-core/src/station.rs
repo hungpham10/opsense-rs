@@ -12,11 +12,11 @@ use opsense_mlib::ahocorasick::AhoCorasick;
 use opsense_mlib::lru::LruCache;
 use opsense_mlib::search::Search;
 use opsense_mlib::snowflake_id::SnowflakeId;
-use opsense_mlib::storage::{CategoryStorage, PatternStorage, TimeseriesStorage};
 #[cfg(feature = "parquet")]
 use opsense_mlib::storage::LakehouseStorage;
 #[cfg(feature = "sqlite")]
 use opsense_mlib::storage::SqliteStorage;
+use opsense_mlib::storage::{CategoryStorage, PatternStorage, TimeseriesStorage};
 use opsense_model::events::Observation;
 
 use crate::config::StorageConfig;
@@ -166,11 +166,9 @@ async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<Backe
                     .await
                     .map_err(|e| backend_error(id, backend, e))?
                 }
-                None => {
-                    LakehouseStorage::open(&local)
-                        .await
-                        .map_err(|e| backend_error(id, backend, e))?
-                }
+                None => LakehouseStorage::open(&local)
+                    .await
+                    .map_err(|e| backend_error(id, backend, e))?,
             };
             Ok(BackendStorage::Parquet(storage))
         }
@@ -186,19 +184,15 @@ async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<Backe
 
         // Backend nhận diện nhưng feature tương ứng chưa được biên dịch.
         #[cfg(not(feature = "parquet"))]
-        "parquet" | "duckdb" | "s3" | "lakehouse" => Err(unsupported(
-            id,
-            backend,
-            "opsense-core feature 'parquet'",
-        )),
+        "parquet" | "duckdb" | "s3" | "lakehouse" => {
+            Err(unsupported(id, backend, "opsense-core feature 'parquet'"))
+        }
         #[cfg(not(feature = "sqlite"))]
         "sqlite" => Err(unsupported(id, backend, "opsense-core feature 'sqlite'")),
 
         other => Err(Error::new(
             ErrorKind::InvalidInput,
-            format!(
-                "unsupported storage backend '{other}' for station '{id}' (kind '{kind}')"
-            ),
+            format!("unsupported storage backend '{other}' for station '{id}' (kind '{kind}')"),
         )),
     }
 }
@@ -409,6 +403,52 @@ impl TimeseriesStation {
             if !covered {
                 return None;
             }
+            result.extend(items);
+        }
+
+        Some(result)
+    }
+
+    /// Query dữ liệu mà station thực sự có trong cửa sổ — chịu được coverage
+    /// hổng.
+    ///
+    /// Duyệt mọi block từ `from_ts` tới `to_ts`, gom observation nằm trong
+    /// khoảng yêu cầu của từng block; block không tồn tại (chưa ghi, đã
+    /// evict/retention) chỉ bị bỏ qua — KHÔNG dừng quét, vì dữ liệu có thể nằm
+    /// rải rác ở block phía trước/sau lỗ hổng (vd station chỉ mới có một cửa
+    /// sổ vài chục giây dưới `to_ts`). Không như [`query_range`] (trả `None`
+    /// nếu BẤT KỲ block nào trong cửa sổ chưa cover trọn), method này trả
+    /// *những gì thực sự có* — dùng cho script-facing `station_query`: script
+    /// hỏi cửa sổ rộng mà không cần biết chính xác vùng dữ liệu được cover.
+    pub async fn query_recent(&mut self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
+        let start_block = self.get_block_id(from_ts);
+        let end_block = self.get_block_id(to_ts);
+        let mut result = Vec::new();
+
+        for block_id in start_block..=end_block {
+            let block_start = block_id * self.block_duration;
+            let block_end = (block_id + 1) * self.block_duration - 1;
+
+            let block = match self.caches.get(&block_id) {
+                Some(b) => b.clone(),
+                None => match self.load_cold_block(block_id).await {
+                    Some(b) => {
+                        self.caches.put(block_id, b.clone());
+                        b
+                    }
+                    // Block không có dữ liệu — lỗ hổng của cửa sổ, bỏ qua.
+                    None => continue,
+                },
+            };
+
+            let req_start = from_ts.max(block_start);
+            let req_end = to_ts.min(block_end);
+            let items: Vec<Observation> = block
+                .items
+                .iter()
+                .filter(|o| o.ts >= req_start && o.ts <= req_end)
+                .cloned()
+                .collect();
             result.extend(items);
         }
 
@@ -697,3 +737,35 @@ impl TryFrom<&Station> for Arc<RwLock<PatternStation>> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opsense_model::events::{Signal, TelemetryKind};
+
+    fn obs(ts: i64, value: f64) -> Observation {
+        Observation::new(ts, "cpu".into(), TelemetryKind::Metric, Signal::Raw, value)
+    }
+
+    /// `query_range` trả None khi bất kỳ block nào trong cửa sổ chưa cover
+    /// trọn; `query_recent` trả vùng dữ liệu gần nhất dù cửa sổ hổng.
+    #[tokio::test]
+    async fn query_recent_returns_latest_suffix_over_holes() {
+        let mut st = TimeseriesStation::new(32, Some(300)); // block 300s
+
+        // Block 0 chỉ cover [100, 110].
+        let batch = vec![obs(100, 1.0), obs(105, 2.0), obs(110, 3.0)];
+        st.update_range(&batch, 100, 110, 200);
+
+        // Cửa sổ rộng [0, 200]: block 0 không cover trọn bên trái → None.
+        assert!(st.query_range(0, 200).await.is_none());
+
+        // query_recent: đuôi [100, 110] vẫn trả về (dù từ_ts hổng).
+        let got = st.query_recent(0, 200).await.unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].value, 1.0);
+        assert_eq!(got[2].value, 3.0);
+
+        // Phần tương lai chưa ghi: block mới nhất không tồn tại → kết quả rỗng.
+        assert!(st.query_recent(400, 2000).await.unwrap().is_empty());
+    }
+}

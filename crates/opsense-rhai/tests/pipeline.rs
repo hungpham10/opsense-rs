@@ -13,13 +13,17 @@ use std::time::Duration;
 use opsense_components::vector::runtime::{Component, Runtime};
 use opsense_core::Config;
 use opsense_core::Context;
-use opsense_model::secret::Secret;
 use opsense_mlib::vector::components::clock::Clock;
 use opsense_mlib::vector::components::output::Output;
+use opsense_model::secret::Secret;
 use opsense_rhai::RhaiTransform;
 
 fn moving_avg_script_path() -> String {
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/prometheus-demo/rhai/moving_avg.rhai").to_string()
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/prometheus-demo/rhai/moving_avg.rhai"
+    )
+    .to_string()
 }
 
 async fn context_with_attributes(attributes: HashMap<String, String>) -> Arc<Context> {
@@ -40,13 +44,13 @@ async fn rhai_transform_processes_through_script() {
 
     // Build runtime: clock -> transform -> output
     let clock = Clock::new(Duration::from_secs(1));
-    let output = Output { id: "output".into(), inputs: vec!["mean".into()] };
+    let output = Output {
+        id: "output".into(),
+        inputs: vec!["mean".into()],
+    };
 
-    let components: Vec<Arc<dyn Component>> = vec![
-        Arc::new(clock),
-        Arc::new(transform),
-        Arc::new(output),
-    ];
+    let components: Vec<Arc<dyn Component>> =
+        vec![Arc::new(clock), Arc::new(transform), Arc::new(output)];
     let mut rt = Runtime::new();
     rt.set_context(ctx.clone());
     rt.reload(components).expect("valid graph");
@@ -61,7 +65,12 @@ async fn rhai_transform_processes_through_script() {
         .station::<Arc<tokio::sync::RwLock<opsense_core::TimeseriesStation>>>("mean")
         .await
         .expect("station registered");
-    let _obs = station.write().await.query_range(0, i64::MAX).await.unwrap_or_default();
+    let _obs = station
+        .write()
+        .await
+        .query_range(0, i64::MAX)
+        .await
+        .unwrap_or_default();
     // The clock ticks but doesn't produce observations, so transform receives empty batch
     // This test mainly verifies the runtime wiring compiles and runs without panic
     assert!(true);
@@ -101,12 +110,12 @@ async fn missing_script_source_errors_cleanly() {
     let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
     let clock = Clock::new(Duration::from_secs(1));
-    let output = Output { id: "output".into(), inputs: vec!["bad".into()] };
-    let components: Vec<Arc<dyn Component>> = vec![
-        Arc::new(clock),
-        Arc::new(transform),
-        Arc::new(output),
-    ];
+    let output = Output {
+        id: "output".into(),
+        inputs: vec!["bad".into()],
+    };
+    let components: Vec<Arc<dyn Component>> =
+        vec![Arc::new(clock), Arc::new(transform), Arc::new(output)];
     let mut rt = Runtime::new();
     rt.set_context(ctx);
     rt.reload(components).expect("reload");
@@ -138,6 +147,7 @@ async fn rhai_script_receives_params_and_attributes() {
             m.insert("env_attr".into(), "from_env".into());
             m
         },
+        None,
     )
     .await
     .expect("call_process_with works");

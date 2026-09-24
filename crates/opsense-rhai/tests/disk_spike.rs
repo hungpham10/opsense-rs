@@ -28,9 +28,12 @@ async fn disk_spike_script_alert_flow() {
 
     // 1) Single point: no baseline can be computed (count=1, base=that value, but spike needs > base+delta)
     // Actually with 1 point, base = that value, so value > base + 0.05 is false → "ok"
-    let out = call_process(script(), serde_json::Value::Array(vec![input_point(now, 0.5)]))
-        .await
-        .expect("script runs without baseline override");
+    let out = call_process(
+        script(),
+        serde_json::Value::Array(vec![input_point(now, 0.5)]),
+    )
+    .await
+    .expect("script runs without baseline override");
     assert_eq!(out.len(), 1);
     assert_eq!(out[0]["labels"]["alert"], "ok");
 
@@ -52,9 +55,12 @@ async fn disk_spike_script_alert_flow() {
     }
 
     // 3) Saturated threshold: value 0.95 > saturated(0.9) → saturated
-    let out = call_process(script(), serde_json::Value::Array(vec![input_point(now, 0.95)]))
-        .await
-        .expect("script runs saturated");
+    let out = call_process(
+        script(),
+        serde_json::Value::Array(vec![input_point(now, 0.95)]),
+    )
+    .await
+    .expect("script runs saturated");
     assert_eq!(out[0]["labels"]["alert"], "saturated");
 
     // 4) Param override for baseline
@@ -68,6 +74,7 @@ async fn disk_spike_script_alert_flow() {
         serde_json::Value::Array(vec![input_point(now, 0.61)]),
         params,
         std::collections::BTreeMap::new(),
+        None,
     )
     .await
     .expect("script runs with param_baseline");
@@ -85,6 +92,7 @@ async fn disk_spike_script_alert_flow() {
         serde_json::Value::Array(vec![input_point(now, 0.85)]),
         params,
         std::collections::BTreeMap::new(),
+        None,
     )
     .await
     .expect("script runs with param_saturated");

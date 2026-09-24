@@ -13,7 +13,6 @@
 //!
 //! Configurable parameters (via `params` map in the pipeline config) are
 /// exposed to the script as global variables.
-
 use std::collections::BTreeMap;
 use std::io::Error;
 use std::path::PathBuf;
@@ -110,16 +109,11 @@ impl_rhai_transform!(
                 continue;
             };
 
-            // Extract observations from the upstream message payload
+            // Extract observations from the upstream message payload. Empty
+            // batches ([...]) are still handed to the script: a clock ping
+            // carries no observations, and the script drives itself off
+            // station lookups (`station_query`) instead.
             let batch = extract_observations(&msg.payload);
-            if batch.is_empty() {
-                // Forward processed signal even for empty batch to advance downstream watermarks
-                let done = signal::tagged(signal::processed(ts), &self.id);
-                for s in &tx.streams {
-                    let _ = s.send(done.clone()).await;
-                }
-                continue;
-            }
 
             let source = match self.script_source() {
                 Ok(s) => s,
@@ -132,12 +126,15 @@ impl_rhai_transform!(
             // Fetch attributes for this call (async, so do it per-batch)
             let attributes = ctx.get_attributes().await;
 
-            // Run the script
+            // Run the script. The pipeline context is handed over so the
+            // script can read any registered station by name — no per-feature
+            // globals or snapshots are injected here.
             let items = match crate::call_process_with(
                 source,
-                serde_json::to_value(&batch).unwrap(),
+                serde_json::to_value(&batch).unwrap_or(Value::Array(Vec::new())),
                 self.params.clone(),
                 attributes,
+                Some(Arc::new(ctx.clone())),
             )
             .await
             {
@@ -163,8 +160,11 @@ impl_rhai_transform!(
             }
 
             if !processed.is_empty() {
-                let from = batch.iter().map(|o| o.ts).min().unwrap_or(ts);
-                let to = batch.iter().map(|o| o.ts).max().unwrap_or(ts);
+                // Range the write over the script's own output timestamps, so
+                // observations whose ts differ from the trigger batch (a ping
+                // with an empty payload) still land in their blocks.
+                let from = processed.iter().map(|o| o.ts).min().unwrap_or(ts);
+                let to = processed.iter().map(|o| o.ts).max().unwrap_or(ts);
                 me.write().await.update_range(&processed, from, to, ts);
             }
 

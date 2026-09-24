@@ -197,7 +197,14 @@ pub async fn call_process(
     script: ScriptSource,
     input_json: serde_json::Value,
 ) -> Result<Vec<serde_json::Value>, String> {
-    call_process_with(script, input_json, Default::default(), Default::default()).await
+    call_process_with(
+        script,
+        input_json,
+        Default::default(),
+        Default::default(),
+        None,
+    )
+    .await
 }
 
 /// [`call_process`] with the node's `params` config table and the pipeline
@@ -205,19 +212,33 @@ pub async fn call_process(
 ///
 /// `params` are seeded into the scope as `param_<name>` globals;
 /// `attributes` are exposed read-only via the native `attr(name)` /
-/// `attrs()` lookups. Both are copied per call, so a script can never mutate
-/// pipeline state.
+/// `attrs()` lookups. When `ctx` is `Some`, the script additionally gets the
+/// general station lookup API — [`crate::station`] — to read any registered
+/// station by name (`station_query("window-feed", from, to)` …), which is how
+/// scripts hold state across calls and pull raw data from source stations
+/// without any per-feature injection in the transform.
+///
+/// All inputs are copied per call, so a script can never mutate pipeline
+/// state.
 ///
 /// The script runs on a blocking thread (`spawn_blocking`) so its CPU-bound
-/// work never stalls async tasks. The wall-clock budget is enforced for real
-/// by the engine's `on_progress` abort; the outer `tokio::time::timeout` is a
-/// backstop that only cancels the *wait*, never the thread.
+/// work never stalls async tasks. The station lookups are synchronous to the
+/// script: they run on the captured tokio handle with `Handle::block_on`, so
+/// the thread-local engine never crosses an `.await`. The wall-clock budget is
+/// enforced for real by the engine's `on_progress` abort; the outer
+/// `tokio::time::timeout` is a backstop that only cancels the *wait*, never
+/// the thread.
 pub async fn call_process_with(
     script: ScriptSource,
     input_json: serde_json::Value,
     params: std::collections::BTreeMap<String, serde_json::Value>,
     attributes: std::collections::BTreeMap<String, String>,
+    ctx: Option<Arc<opsense_core::Context>>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    // Station lookups inside the script must run on a runtime — the blocking
+    // thread has none, so carry a handle captured on the async caller.
+    let handle = tokio::runtime::Handle::current();
+
     let join = tokio::task::spawn_blocking(move || {
         let ast = acquire(&script)?;
         let arg =
@@ -259,6 +280,9 @@ pub async fn call_process_with(
                 }
             });
             crate::attributes::register(eng, attributes);
+            if let Some(ctx) = &ctx {
+                crate::station::register(eng, ctx.clone(), handle.clone());
+            }
             eng.call_fn(&mut scope, &ast, "process", (arg,))
                 .map_err(|e| format!("script error: {e}"))
         })?;

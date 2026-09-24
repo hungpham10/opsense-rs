@@ -197,7 +197,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        strategy: [default, local, memory, sqlite, s3, prometheus]
+        strategy: [default, local, memory, sqlite, s3, prometheus, predict]
     services:
       redis:
         image: redis:7
@@ -358,6 +358,26 @@ jobs:
         run: |
           cargo test --workspace --locked --release \
             --test e2e_prometheus_config \
+            -- --test-threads=1 --nocapture
+
+      # Full e2e predict: clock ping → predict.rhai tự query window-feed +
+      # live-feed + chính station predict qua `station_query(...)` → prediction
+      # (labels.check="prediction") + so với live → check (labels.check="result",
+      # value 1.0/0.0) → tsdb → parquet local + mirror S3 tại
+      # opsense-lake/test-case-predict/** sau flush s3_flush_interval_secs=15.
+      - name: Run e2e Predict strategy config test
+        if: matrix.strategy == 'predict'
+        env:
+          OPSENSE_INTEGRATION: "true"
+          OPSENSE_S3_ENDPOINT: "http://127.0.0.1:9000"
+          OPSENSE_S3_ACCESS_KEY_ID: opsense
+          OPSENSE_S3_SECRET_ACCESS_KEY: opsense123
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          RUST_LOG: warn,opsense_components=info,opsense_rhai=debug,opsense_mlib=info
+        run: |
+          cargo test --workspace --locked --release \
+            --test e2e_predict_config \
             -- --test-threads=1 --nocapture
 
       - name: Cleanup Compose stack
