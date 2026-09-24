@@ -3936,6 +3936,7 @@ dependencies = [
  "opsense-macros",
  "opsense-mlib",
  "opsense-model",
+ "opsense-qlib",
  "rhai",
  "serde",
  "serde_json",

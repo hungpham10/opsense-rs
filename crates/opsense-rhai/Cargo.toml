@@ -16,6 +16,7 @@ opsense-components = { path = "../opsense-components" }
 opsense-mlib = { path = "../opsense-mlib", features = ["json", "rhai"] }
 opsense-macros = { path = "../opsense-macros" }
 opsense-model = { path = "../opsense-model" }
+opsense-qlib = { path = "../opsense-qlib", features = ["json"] }
 rhai = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
