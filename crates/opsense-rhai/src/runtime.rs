@@ -148,6 +148,23 @@ fn thread_engine() -> std::cell::RefCell<rhai::Engine> {
     // these bounds still stop pathological nesting.
     eng.set_max_expr_depths(256, 256);
 
+    // Route Rhai's built-in `print()`/`debug()` into tracing so script logs
+    // surface in the pipeline logs instead of raw stdout (which daemon /
+    // test harnesses capture). Enable with
+    // `RUST_LOG=opsense_rhai=info` (print) or `=debug` (print + debug).
+    eng.on_print(|s| {
+        tracing::info!(target: "opsense_rhai::runtime", "script print: {s}");
+    });
+    eng.on_debug(|s, src, pos| {
+        tracing::debug!(
+            target: "opsense_rhai::runtime",
+            "script debug ({}@{}:{}): {s}",
+            src.unwrap_or("<inline>"),
+            pos.line().unwrap_or(0),
+            pos.position().unwrap_or(0),
+        );
+    });
+
     // Every script-facing native function lives in one place: `tools`.
     crate::tools::register_all(&mut eng, std::collections::BTreeMap::new());
     std::cell::RefCell::new(eng)

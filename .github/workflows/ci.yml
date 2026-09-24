@@ -354,7 +354,7 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           # Bật log component (http/rhai/tsdb) vào test output để chẩn đoán
           # nhanh khi e2e fail: request errors, batch parse, script eval lỗi.
-          RUST_LOG: warn,opsense_components=info,opsense_rhai=info,opsense_mlib=info
+          RUST_LOG: warn,opsense_components=info,opsense_rhai=debug,opsense_mlib=info
         run: |
           cargo test --workspace --locked --release \
             --test e2e_prometheus_config \
