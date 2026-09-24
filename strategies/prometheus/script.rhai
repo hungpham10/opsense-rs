@@ -16,7 +16,14 @@ fn process(observations) {
     }
 
     let out = [];
-    let ts = now_secs();
+    // Stamp summaries tại max ts của input batch (không phải now_secs) để
+    // block key ổn định giữa các tick — update cùng key → persist_point fire
+    // → parquet local + mirror S3 chắc chắn xuất hiện sau flush.
+    let ts = 0;
+    for obs in observations {
+        let t = obs["ts"];
+        if t > ts { ts = t; }
+    }
 
     for id in metric_ids {
         let vals = [];
