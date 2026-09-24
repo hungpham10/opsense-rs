@@ -148,6 +148,7 @@ async fn rhai_script_receives_params_and_attributes() {
             m
         },
         None,
+        None,
     )
     .await
     .expect("call_process_with works");

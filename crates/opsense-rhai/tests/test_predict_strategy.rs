@@ -1,14 +1,15 @@
 //! Unit tests for `strategies/predict/predict.rhai` driven through the general
 //! station lookup API (`call_process_with` with a `Context`).
 //!
-//! The script receives a clock ping (empty payload) and pulls everything
-//! itself via `station_query`: window history → grid/transition forecast
-//! (`labels.check = "prediction"`), then live sample vs the previous
-//! prediction ("result", value 1.0/0.0).
+//! Script branch theo trigger (`trigger()` = `payload.src` của message):
+//!   - clock ping (trigger None/""/"clock") → recompute: query `live-feed`
+//!     station → grid/transition forecast (`labels.check = "prediction"`).
+//!   - live source message (trigger "live-feed") → check: live sample
+//!     (metric `*_live_*`) vs prediction cũ trong own station
+//!     (`labels.check = "result"`, value 1.0/0.0).
 //!
-//! Two ticks are simulated: the first call yields predictions only (own
-//! station empty), the test mirrors the transform's own-station write, and the
-//! second call emits the checks.
+//! Single source "live-feed" vừa cung cấp history window vừa live samples
+//! (1 http source duy nhất trong config).
 
 use opsense_core::{Context, Observation, Station, TimeseriesStation};
 use opsense_model::events::{Signal, TelemetryKind};
@@ -30,7 +31,7 @@ fn obs(ts: i64, id: &str, value: f64) -> Observation {
 
 fn params() -> BTreeMap<String, Value> {
     let mut m = BTreeMap::new();
-    m.insert("window_source".into(), Value::from("window-feed"));
+    m.insert("window_source".into(), Value::from("live-feed"));
     m.insert("live_source".into(), Value::from("live-feed"));
     m.insert("own_station".into(), Value::from("predict"));
     m.insert("tolerance".into(), Value::from(1.0));
@@ -45,7 +46,7 @@ async fn make_ctx() -> Arc<Context> {
     let cfg: opsense_core::Config = serde_json::from_str("{}").unwrap();
     let secret = Secret::new().await.unwrap();
     let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
-    for id in ["window-feed", "live-feed", "predict"] {
+    for id in ["live-feed", "predict"] {
         let station = TimeseriesStation::from_storage(id, ctx.storage())
             .await
             .unwrap();
@@ -66,10 +67,9 @@ async fn write(ctx: &Arc<Context>, station_id: &str, obs: &[Observation], now: i
     st.write().await.update_range(obs, from, to, now);
 }
 
-/// Cửa sổ lịch sử (ts dời về quá khứ, max ≤ now-60): cpu_ramp 3.0 → 18.0
+/// History window (ts dời về quá khứ, max ≤ now-60): cpu_ramp 3.0 → 18.0
 /// (ts ≡ now mod 3), cpu_steady hằng 42.0 (ts ≡ now+1 mod 3). Mỗi metric ts
-/// khác nhau vì `TimeseriesStation::update_range` dedup theo ts — và phải khác
-/// cả ts của live (pred/check không được trùng ts ở tsdb).
+/// khác nhau vì `update_range` dedup theo ts.
 fn window_obs(now: i64) -> Vec<Observation> {
     let mut out = Vec::new();
     for i in 0..=20 {
@@ -81,14 +81,18 @@ fn window_obs(now: i64) -> Vec<Observation> {
     out
 }
 
-/// Realtime (sau cửa sổ, trước now): cpu_ramp đột biến 999 (so với prediction
-/// ~18) → miss, cpu_steady 42.0 (khớp prediction) → match. Ts khác nhau giữa 2
-/// metric và khác hẳn một số ts của prediction.
+/// Live samples (metric riêng `*_live_*` — tránh nhiễu grid, và ts khác
+/// prediction để tsdb không dedup): cpu_live_ramp=999 (lệch xa prediction
+/// ~18) → miss, cpu_live_steady=42.0 (khớp) → match.
 fn live_obs(now: i64) -> Vec<Observation> {
     vec![
-        obs(now - 30, "cpu_ramp", 999.0),
-        obs(now - 31, "cpu_steady", 42.0),
+        obs(now - 30, "cpu_live_ramp", 999.0),
+        obs(now - 31, "cpu_live_steady", 42.0),
     ]
+}
+
+fn live_obs_json(now: i64) -> Value {
+    serde_json::to_value(live_obs(now)).unwrap()
 }
 
 fn find<'a>(items: &'a [Value], id: &str) -> &'a Value {
@@ -98,27 +102,46 @@ fn find<'a>(items: &'a [Value], id: &str) -> &'a Value {
         .expect(&format!("output phải có metric {id}"))
 }
 
-#[tokio::test]
-async fn predict_window_emits_forecasts() {
-    let ctx = make_ctx().await;
-    let now = opsense_components::signal::now_secs();
-    write(&ctx, "window-feed", &window_obs(now), now).await;
-    write(&ctx, "live-feed", &live_obs(now), now).await;
-
-    // Tick 1: own station rỗng → chỉ có prediction, chưa có check.
-    let out = call_process_with(
+/// Clock ping (trigger ""/None) → chỉ có predictions, không có check.
+async fn tick_recompute(ctx: &Arc<Context>) -> Vec<Value> {
+    call_process_with(
         ScriptSource::Inline(SCRIPT.into()),
         Value::Array(vec![]),
         params(),
         attrs(),
+        None,
         Some(ctx.clone()),
     )
     .await
-    .expect("script chạy");
+    .expect("script chạy (recompute)")
+}
+
+/// Live source message (trigger "live-feed") + batch = live samples.
+async fn tick_check(ctx: &Arc<Context>, input: Value) -> Vec<Value> {
+    call_process_with(
+        ScriptSource::Inline(SCRIPT.into()),
+        input,
+        params(),
+        attrs(),
+        Some("live-feed".into()),
+        Some(ctx.clone()),
+    )
+    .await
+    .expect("script chạy (check)")
+}
+
+#[tokio::test]
+async fn predict_window_emits_forecasts() {
+    let ctx = make_ctx().await;
+    let now = opsense_components::signal::now_secs();
+    write(&ctx, "live-feed", &window_obs(now), now).await;
+
+    // Clock ping → recompute: 2 prediction, chưa có check.
+    let out = tick_recompute(&ctx).await;
     assert_eq!(
         out.len(),
         2,
-        "tick 1 chỉ có 2 prediction (chưa có check): {out:?}"
+        "recompute chỉ có 2 prediction (chưa có check): {out:?}"
     );
 
     for item in &out {
@@ -145,50 +168,26 @@ async fn predict_window_emits_forecasts() {
 async fn predict_checks_live_against_previous_prediction() {
     let ctx = make_ctx().await;
     let now = opsense_components::signal::now_secs();
-    write(&ctx, "window-feed", &window_obs(now), now).await;
-    write(&ctx, "live-feed", &live_obs(now), now).await;
+    write(&ctx, "live-feed", &window_obs(now), now).await;
 
-    // Tick 1 → predictions lưu vào station của chính predict (mô phỏng đúng
-    // việc transform flush output vào own station sau script).
-    let tick1 = call_process_with(
-        ScriptSource::Inline(SCRIPT.into()),
-        Value::Array(vec![]),
-        params(),
-        attrs(),
-        Some(ctx.clone()),
-    )
-    .await
-    .expect("tick 1 script chạy");
-    assert_eq!(tick1.len(), 2, "tick 1 = 2 predictions");
+    // Clock ping → predictions lưu vào own station (transform flush output).
+    let tick1 = tick_recompute(&ctx).await;
+    assert_eq!(tick1.len(), 2, "recompute = 2 predictions");
     let preds: Vec<Observation> = tick1
         .iter()
         .map(|v| serde_json::from_value(v.clone()).unwrap())
         .collect();
     write(&ctx, "predict", &preds, now).await;
 
-    // Tick 2 → có prediction cũ trong own station → sinh check result.
-    let tick2 = call_process_with(
-        ScriptSource::Inline(SCRIPT.into()),
-        Value::Array(vec![]),
-        params(),
-        attrs(),
-        Some(ctx.clone()),
-    )
-    .await
-    .expect("tick 2 script chạy");
-    assert_eq!(tick2.len(), 4, "tick 2 = 2 prediction + 2 check");
+    // Live source message → chỉ có check (no new predictions).
+    let tick2 = tick_check(&ctx, live_obs_json(now)).await;
+    assert_eq!(tick2.len(), 2, "live message = 2 check: {tick2:?}");
+    for item in &tick2 {
+        assert_eq!(item["labels"]["check"], "result");
+    }
 
-    let checks: Vec<&Value> = tick2
-        .iter()
-        .filter(|v| v["labels"]["check"] == "result")
-        .collect();
-    assert_eq!(checks.len(), 2);
-
-    // cpu_ramp: live 999 vs prediction ~19 → miss (value 0.0).
-    let bad = checks
-        .iter()
-        .find(|c| c["metric_id"] == "cpu_ramp")
-        .expect("check cpu_ramp");
+    // cpu_live_ramp: 999 vs prediction ~19 → miss (value 0.0).
+    let bad = find(&tick2, "cpu_live_ramp");
     assert_eq!(bad["value"].as_f64().unwrap(), 0.0, "ramp lệch xa → false");
     assert!(
         bad["labels"]["delta"]
@@ -199,11 +198,8 @@ async fn predict_checks_live_against_previous_prediction() {
             > 900.0
     );
 
-    // cpu_steady: live 42 vs prediction 42 → match (value 1.0).
-    let good = checks
-        .iter()
-        .find(|c| c["metric_id"] == "cpu_steady")
-        .expect("check cpu_steady");
+    // cpu_live_steady: 42 vs prediction 42 → match (value 1.0).
+    let good = find(&tick2, "cpu_live_steady");
     assert_eq!(good["value"].as_f64().unwrap(), 1.0, "steady khớp → true");
     assert_eq!(
         good["labels"]["delta"]
@@ -218,28 +214,31 @@ async fn predict_checks_live_against_previous_prediction() {
 
 #[tokio::test]
 async fn predict_empty_when_window_station_missing() {
-    // Không đăng ký window-feed → station_query trả () → script thoát sớm.
+    // Không đăng ký live-feed → station_query trả () → script thoát sớm.
     let cfg: opsense_core::Config = serde_json::from_str("{}").unwrap();
     let secret = Secret::new().await.unwrap();
     let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
-    let station = TimeseriesStation::from_storage("live-feed", ctx.storage())
+    let station = TimeseriesStation::from_storage("predict", ctx.storage())
         .await
         .unwrap();
     ctx.registry(
-        "live-feed",
+        "predict",
         Station::Timeseries(Arc::new(RwLock::new(station))),
     )
     .await
     .unwrap();
 
-    let out = call_process_with(
-        ScriptSource::Inline(SCRIPT.into()),
-        Value::Array(vec![]),
-        params(),
-        attrs(),
-        Some(ctx.clone()),
-    )
-    .await
-    .expect("script chạy (station_query trả ())");
-    assert!(out.is_empty(), "thiếu window station → không có output");
+    let out = tick_recompute(&ctx).await;
+    assert!(out.is_empty(), "thiếu source station → không có output");
+}
+
+#[tokio::test]
+async fn predict_skips_check_without_prediction() {
+    // Live message nhưng own station chưa có prediction → không output.
+    let ctx = make_ctx().await;
+    let now = opsense_components::signal::now_secs();
+    write(&ctx, "live-feed", &window_obs(now), now).await;
+
+    let out = tick_check(&ctx, live_obs_json(now)).await;
+    assert!(out.is_empty(), "chưa có prediction → check không sinh gì");
 }

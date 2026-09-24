@@ -360,11 +360,13 @@ jobs:
             --test e2e_prometheus_config \
             -- --test-threads=1 --nocapture
 
-      # Full e2e predict: clock ping → predict.rhai tự query window-feed +
-      # live-feed + chính station predict qua `station_query(...)` → prediction
-      # (labels.check="prediction") + so với live → check (labels.check="result",
-      # value 1.0/0.0) → tsdb → parquet local + mirror S3 tại
-      # opsense-lake/test-case-predict/** sau flush s3_flush_interval_secs=15.
+      # Full e2e predict: 1 clock + 1 http source (live-feed). predict nhận 2
+      # input và branch theo trigger (`payload.src`, native trigger()): clock →
+      # recompute bảng dự đoán qua station_query(...) → prediction
+      # (labels.check="prediction"); live-feed message → check live sample vs
+      # prediction cũ (labels.check="result", value 1.0/0.0) → tsdb → parquet
+      # local + mirror S3 tại opsense-lake/test-case-predict/** sau flush
+      # s3_flush_interval_secs=15.
       - name: Run e2e Predict strategy config test
         if: matrix.strategy == 'predict'
         env:

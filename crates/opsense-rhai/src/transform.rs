@@ -126,6 +126,17 @@ impl_rhai_transform!(
             // Fetch attributes for this call (async, so do it per-batch)
             let attributes = ctx.get_attributes().await;
 
+            // Which upstream produced this message? An explicit `trigger` field
+            // (added by a passthrough json_2_json stage, e.g. constants) wins;
+            // otherwise fall back to `src` (stamped by `signal::tagged`) — the
+            // script branches on it via `trigger()` (see call_process_with).
+            let trigger = msg
+                .payload
+                .get("trigger")
+                .or_else(|| msg.payload.get("src"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+
             // Run the script. The pipeline context is handed over so the
             // script can read any registered station by name — no per-feature
             // globals or snapshots are injected here.
@@ -134,6 +145,7 @@ impl_rhai_transform!(
                 serde_json::to_value(&batch).unwrap_or(Value::Array(Vec::new())),
                 self.params.clone(),
                 attributes,
+                trigger,
                 Some(Arc::new(ctx.clone())),
             )
             .await

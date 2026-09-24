@@ -203,6 +203,7 @@ pub async fn call_process(
         Default::default(),
         Default::default(),
         None,
+        None,
     )
     .await
 }
@@ -212,11 +213,16 @@ pub async fn call_process(
 ///
 /// `params` are seeded into the scope as `param_<name>` globals;
 /// `attributes` are exposed read-only via the native `attr(name)` /
-/// `attrs()` lookups. When `ctx` is `Some`, the script additionally gets the
-/// general station lookup API — [`crate::station`] — to read any registered
-/// station by name (`station_query("window-feed", from, to)` …), which is how
-/// scripts hold state across calls and pull raw data from source stations
-/// without any per-feature injection in the transform.
+/// `attrs()` lookups. `trigger` identifies which upstream sent this message —
+/// the payload field `trigger` if present (added by a json_2_json passthrough
+/// stage) else `src` (stamped by `signal::tagged`, e.g. `"clock"` vs a source
+/// node id) — and is readable by the script via the native `trigger()`, so a
+/// transform can branch on its input edge without any runtime/Message change.
+/// When `ctx` is `Some`, the script additionally gets the general station
+/// lookup API — [`crate::station`] — to read any registered station by name
+/// (`station_query("window-feed", from, to)` …), which is how scripts hold
+/// state across calls and pull raw data from source stations without any
+/// per-feature injection in the transform.
 ///
 /// All inputs are copied per call, so a script can never mutate pipeline
 /// state.
@@ -233,6 +239,7 @@ pub async fn call_process_with(
     input_json: serde_json::Value,
     params: std::collections::BTreeMap<String, serde_json::Value>,
     attributes: std::collections::BTreeMap<String, String>,
+    trigger: Option<String>,
     ctx: Option<Arc<opsense_core::Context>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     // Station lookups inside the script must run on a runtime — the blocking
@@ -280,6 +287,13 @@ pub async fn call_process_with(
                 }
             });
             crate::attributes::register(eng, attributes);
+            {
+                // Which upstream produced this message (payload `src`); "" for
+                // control-only pings. Re-registered per call — same pattern as
+                // attributes/station bindings above.
+                let src = trigger.clone().unwrap_or_default();
+                eng.register_fn("trigger", move || src.clone());
+            }
             if let Some(ctx) = &ctx {
                 crate::station::register(eng, ctx.clone(), handle.clone());
             }

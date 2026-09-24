@@ -75,6 +75,7 @@ async fn disk_spike_script_alert_flow() {
         params,
         std::collections::BTreeMap::new(),
         None,
+        None,
     )
     .await
     .expect("script runs with param_baseline");
@@ -92,6 +93,7 @@ async fn disk_spike_script_alert_flow() {
         serde_json::Value::Array(vec![input_point(now, 0.85)]),
         params,
         std::collections::BTreeMap::new(),
+        None,
         None,
     )
     .await

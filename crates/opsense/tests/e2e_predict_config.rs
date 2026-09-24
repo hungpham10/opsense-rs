@@ -3,16 +3,18 @@
 //! Hai tầng:
 //!   1. `config_file_contract` — nhanh, không cần infra: load + validate config
 //!      thật, khẳng định các knobs `[storage]` / `[storage.s3]` được áp dụng và
-//!      graph pipeline 5 components (`clock`, `window-feed`, `live-feed`,
-//!      `predict` rhai có `params`, `tsdb`) deserialize qua typetag registry.
+//!      graph pipeline 4 components (`clock`, `live-feed` http, `predict` rhai
+//!      có `params`, `tsdb`) deserialize qua typetag registry.
 //!   2. `full_pipeline_checks_parquet_s3` — full flow của config: chạy runtime
-//!      thật, re-point 2 http source về mock deterministic (window history:
-//!      cpu_ramp 3→18 + cpu_steady const; live: cpu_ramp=999, cpu_steady=42).
-//!      `predict` chỉ nhận clock ping và tự query các station qua
-//!      `station_query(...)`: window → grid/transition → prediction
-//!      (`labels.check="prediction"`); live vs prediction cũ → check
+//!      thật, re-point http source duy nhất (`live-feed`) về mock deterministic
+//!      trả history window (cpu_ramp 3→18 + cpu_steady const) VÀ live samples
+//!      (cpu_live_ramp=999, cpu_live_steady=42) trong MỘT response.
+//!      `predict` nhận message từ 2 input (clock + live-feed) và branch theo
+//!      trigger (`payload.src`): clock → recompute bảng dự đoán qua
+//!      `station_query(...)` (grid/transition, `labels.check="prediction"`);
+//!      live-feed → check live sample vs prediction cũ trong own station
 //!      (`labels.check="result"`, value 1.0/0.0). Khẳng định:
-//!        - window-feed + live-feed station nhận observations raw,
+//!        - live-feed station nhận observations raw (history + live),
 //!        - predict station có prediction + check true (1.0) + check false (0.0),
 //!        - parquet local dưới `<data_dir>/tsdb-timeseries/ts/blk=*`,
 //!        - mirror S3 (khi MinIO reachable): `opsense-lake/test-case-predict/tsdb/ts/**`.
@@ -54,8 +56,7 @@ const CONFIG_PATH: &str = concat!(
 
 const S3_PREFIX: &str = "test-case-predict";
 const STATION_TSDB: &str = "tsdb";
-const STATION_WINDOW: &str = "window-feed";
-const STATION_LIVE: &str = "live-feed";
+const STATION_SOURCE: &str = "live-feed";
 const STATION_PREDICT: &str = "predict";
 
 fn s3_endpoint() -> String {
@@ -70,13 +71,16 @@ fn s3_pass() -> String {
     std::env::var("OPSENSE_S3_SECRET_ACCESS_KEY").unwrap_or_else(|_| "opsense123".into())
 }
 
-/// Body mock cửa sổ lịch sử (ghi vào station window-feed):
+/// Body mock cho http source DUY NHẤT (`live-feed`) — history window + live
+/// samples trong MỘT response:
 ///   - cpu_ramp 3.0 → 18.0, 21 điểm, ts cách 3s (ts ≡ now mod 3),
-///   - cpu_steady hằng 42.0, 20 điểm (ts ≡ now+1 mod 3).
+///   - cpu_steady hằng 42.0, 20 điểm (ts ≡ now+1 mod 3),
+///   - cpu_live_ramp = 999 (đột biến, lệch xa prediction ~18) → check false,
+///   - cpu_live_steady = 42 (khớp prediction steady) → check true.
 /// Mọi ts dời về quá khứ (max ≤ now-60). Từng metric ts khác nhau vì
-/// `update_range` dedup theo ts — và phải khác cả ts của live để prediction và
-/// check cùng metric không trùng ts ở tsdb.
-fn window_body(now: i64) -> String {
+/// `update_range` dedup theo ts — và live sample phải khác ts prediction để
+/// tsdb không dedup chúng về cùng hàng.
+fn source_body(now: i64) -> String {
     let mut arr = Vec::new();
     for i in 0..=20 {
         arr.push(serde_json::json!({
@@ -98,18 +102,17 @@ fn window_body(now: i64) -> String {
             "labels": {"phase": "steady"}
         }));
     }
+    // Live samples — metric riêng `*_live_*` (script chỉ fit grid history
+    // không chứa "_live_", nên spike 999 không nhiễu forecast).
+    arr.push(serde_json::json!({
+        "ts": now - 30, "metric_id": "cpu_live_ramp", "kind": "metric",
+        "signal": "raw", "value": 999.0, "labels": {"src": "live"}
+    }));
+    arr.push(serde_json::json!({
+        "ts": now - 31, "metric_id": "cpu_live_steady", "kind": "metric",
+        "signal": "raw", "value": 42.0, "labels": {"src": "live"}
+    }));
     serde_json::json!(arr).to_string()
-}
-
-/// Body mock realtime (ghi vào station live-feed), sau cửa sổ, trước now:
-///   - cpu_ramp = 999 (đột biến, lệch xa prediction ~18) → check false (0.0)
-///   - cpu_steady = 42 (khớp prediction steady) → check true (1.0)
-fn live_body(now: i64) -> String {
-    serde_json::json!([
-        {"ts": now - 30, "metric_id": "cpu_ramp", "kind": "metric", "signal": "raw", "value": 999.0, "labels": {"src": "live"}},
-        {"ts": now - 31, "metric_id": "cpu_steady", "kind": "metric", "signal": "raw", "value": 42.0, "labels": {"src": "live"}}
-    ])
-    .to_string()
 }
 
 /// Mock HTTP server (deterministic, đúng pattern e2e_prometheus_config).
@@ -350,12 +353,12 @@ fn config_file_contract() {
     assert_eq!(s3.prefix, S3_PREFIX);
     assert_eq!(s3.url_style.as_deref(), Some("path"));
 
-    // Graph 5 components qua typetag registry.
+    // Graph 4 components qua typetag registry.
     let graph = pipeline_from_config(&cfg).expect("components của config phải deserialize");
     assert_eq!(
         graph.len(),
-        5,
-        "config khai clock + window-feed + live-feed + rhai predict + timeseries_station_sink"
+        4,
+        "config khai clock + live-feed (http source duy nhất) + rhai predict + timeseries_station_sink"
     );
 
     let clock = graph[0]
@@ -365,27 +368,13 @@ fn config_file_contract() {
     assert_eq!(clock.id, "clock");
     assert_eq!(clock.interval_secs, 10);
 
-    let win = graph[1]
+    // 1 http source duy nhất (vừa là nguồn history cho grid vừa nguồn live
+    // sample) — predict query station của nó qua station_query.
+    let live = graph[1]
         .as_any()
         .downcast_ref::<HttpSource>()
-        .expect("component 1 = http_source window-feed");
-    assert_eq!(win.id, STATION_WINDOW);
-    assert_eq!(win.inputs, vec!["clock".to_string()]);
-    assert!(
-        win.station,
-        "window-feed phải có station=true để station_query đọc"
-    );
-    assert!(
-        win.url.contains("prometheus.demo.prometheus.io"),
-        "{}",
-        win.url
-    );
-
-    let live = graph[2]
-        .as_any()
-        .downcast_ref::<HttpSource>()
-        .expect("component 2 = http_source live-feed");
-    assert_eq!(live.id, STATION_LIVE);
+        .expect("component 1 = http_source live-feed");
+    assert_eq!(live.id, STATION_SOURCE);
     assert_eq!(live.inputs, vec!["clock".to_string()]);
     assert!(
         live.station,
@@ -397,18 +386,18 @@ fn config_file_contract() {
         live.url
     );
 
-    // `predict` chỉ nhận clock ping — KHÔNG nhận message từ 2 http source:
-    // mọi dữ liệu đi qua station_query.
-    let predict = graph[3]
+    // `predict` nhận message từ 2 input và branch theo trigger
+    // (`payload.src`, native `trigger()`): clock → recompute, live-feed → check.
+    let predict = graph[2]
         .as_any()
         .downcast_ref::<RhaiTransform>()
-        .expect("component 3 = rhai_transform predict");
+        .expect("component 2 = rhai_transform predict");
     assert_eq!(predict.id, STATION_PREDICT);
-    assert_eq!(predict.inputs, vec!["clock".to_string()]);
+    assert_eq!(predict.inputs, vec!["clock".to_string(), "live-feed".to_string()]);
     assert_eq!(predict.script_path, "strategies/predict/predict.rhai");
     assert_eq!(
         predict.params.get("window_source").and_then(|v| v.as_str()),
-        Some("window-feed")
+        Some("live-feed")
     );
     assert_eq!(
         predict.params.get("live_source").and_then(|v| v.as_str()),
@@ -431,10 +420,10 @@ fn config_file_contract() {
         "predict.rhai phải nằm cạnh config trong strategies/predict/"
     );
 
-    let sink = graph[4]
+    let sink = graph[3]
         .as_any()
         .downcast_ref::<TimeseriesStationSink>()
-        .expect("component 4 = timeseries_station_sink");
+        .expect("component 3 = timeseries_station_sink");
     assert_eq!(sink.id, STATION_TSDB);
     assert_eq!(sink.inputs, vec![STATION_PREDICT.to_string()]);
 }
@@ -478,9 +467,8 @@ async fn full_pipeline_checks_parquet_s3() {
         .try_init();
     let now = signal::now_secs();
 
-    // 2) Hai mock deterministic: window history + live actual.
-    let (win_addr, win_reqs) = spawn_mock(window_body(now)).await;
-    let (live_addr, live_reqs) = spawn_mock(live_body(now)).await;
+    // 2) Mock deterministic duy nhất: history window + live samples.
+    let (src_addr, src_reqs) = spawn_mock(source_body(now)).await;
 
     // 3) Runtime với graph của config, re-point url + script_path.
     let dir = Path::new(CONFIG_PATH)
@@ -488,8 +476,7 @@ async fn full_pipeline_checks_parquet_s3() {
         .expect("config parent")
         .to_path_buf();
     let script = dir.join("predict.rhai");
-    let win_url = format!("http://{win_addr}/api/v1/query_range?query=cpu");
-    let live_url = format!("http://{live_addr}/api/v1/query?query=cpu");
+    let src_url = format!("http://{src_addr}/api/v1/query_range?query=cpu");
     if let Some(p) = &mut cfg.pipeline {
         for comp in &mut p.components {
             let Some(obj) = comp.as_object_mut() else {
@@ -502,11 +489,8 @@ async fn full_pipeline_checks_parquet_s3() {
                         serde_json::json!(script.to_string_lossy().as_ref()),
                     );
                 }
-                Some(STATION_WINDOW) => {
-                    obj.insert("url".into(), serde_json::json!(win_url));
-                }
-                Some(STATION_LIVE) => {
-                    obj.insert("url".into(), serde_json::json!(live_url));
+                Some(STATION_SOURCE) => {
+                    obj.insert("url".into(), serde_json::json!(src_url));
                 }
                 _ => {}
             }
@@ -522,31 +506,36 @@ async fn full_pipeline_checks_parquet_s3() {
     rt.reload(components).expect("valid component graph");
     let _runtime_handle = rt.start(|_| async {}).unwrap();
 
-    // 4) Sources nhận dữ liệu raw (http → station).
-    let win_obs = wait_station_data(&ctx, STATION_WINDOW, now - 300, now, 40).await;
+    // 4) Source nhận dữ liệu raw (http → station): history + live cùng station.
+    let src_obs = wait_station_data(&ctx, STATION_SOURCE, now - 300, now, 40).await;
     assert!(
-        win_obs.iter().any(|o| o.metric_id == "cpu_ramp"),
-        "window-feed phải có cpu_ramp raw"
+        src_obs.iter().any(|o| o.metric_id == "cpu_ramp"),
+        "live-feed phải có cpu_ramp raw"
     );
     assert!(
-        win_obs.iter().any(|o| o.metric_id == "cpu_steady"),
-        "window-feed phải có cpu_steady raw"
+        src_obs.iter().any(|o| o.metric_id == "cpu_steady"),
+        "live-feed phải có cpu_steady raw"
     );
-    let live_obs = wait_station_data(&ctx, STATION_LIVE, now - 300, now, 40).await;
     assert!(
-        live_obs
+        src_obs
             .iter()
-            .any(|o| o.metric_id == "cpu_ramp" && o.value == 999.0),
-        "live-feed phải có cpu_ramp=999"
+            .any(|o| o.metric_id == "cpu_live_ramp" && o.value == 999.0),
+        "live-feed phải có cpu_live_ramp=999"
     );
     assert!(
-        !win_reqs.lock().unwrap().is_empty() && !live_reqs.lock().unwrap().is_empty(),
-        "cả 2 http source phải thực sự poll mock"
+        src_obs
+            .iter()
+            .any(|o| o.metric_id == "cpu_live_steady" && o.value == 42.0),
+        "live-feed phải có cpu_live_steady=42"
+    );
+    assert!(
+        !src_reqs.lock().unwrap().is_empty(),
+        "http source phải thực sự poll mock"
     );
 
-    // 5) predict (clock-ping driven): window → prediction, live vs prediction
-    //    cũ → check. Cần ≥ 2 tick (tick 1 chưa có prediction cũ trong own
-    //    station) — deadline 70s, clock 10s.
+    // 5) predict: clock ping → recompute prediction từ station; live-feed
+    //    message → check live sample vs prediction cũ. Cần ≥ 2 vòng (vòng đầu
+    //    chưa có prediction cũ trong own station) — deadline 70s, clock 10s.
     let checks = wait_predict_checks(&ctx, now - 300, now, 70).await;
     let preds: Vec<&Observation> = checks
         .iter()
@@ -566,22 +555,22 @@ async fn full_pipeline_checks_parquet_s3() {
     let steady_pred = preds.iter().find(|o| o.metric_id == "cpu_steady").unwrap();
     assert_eq!(steady_pred.value, 42.0, "cpu_steady nhánh steady = 42");
 
-    // check true (1.0, steady khớp) + check false (0.0, ramp lệch xa).
+    // check true (1.0, live steady khớp) + check false (0.0, live ramp lệch xa).
     let ok_result = results
         .iter()
-        .find(|o| o.metric_id == "cpu_steady")
-        .expect("result cpu_steady");
+        .find(|o| o.metric_id == "cpu_live_steady")
+        .expect("result cpu_live_steady");
     assert_eq!(
         ok_result.value, 1.0,
-        "steady predict 42 vs actual 42 → match"
+        "steady predict 42 vs live 42 → match"
     );
     let bad_result = results
         .iter()
-        .find(|o| o.metric_id == "cpu_ramp")
-        .expect("result cpu_ramp");
+        .find(|o| o.metric_id == "cpu_live_ramp")
+        .expect("result cpu_live_ramp");
     assert_eq!(
         bad_result.value, 0.0,
-        "ramp predict ~18 vs actual 999 → miss"
+        "ramp predict ~18 vs live 999 → miss"
     );
 
     // 6) tsdb: predictions + checks chảy qua message → parquet local sau flush.

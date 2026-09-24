@@ -1,33 +1,28 @@
-// predict.rhai — prediction + live verification, driven by station lookups.
+// predict.rhai — prediction + live verification, branch theo trigger.
 //
-// The node receives only the clock PING (its message payload is empty): it
-// pulls everything itself through the general station lookup API
+// Node nhận message từ HAI input edges và quyết định theo `trigger()` (= giá
+// trị `payload.src` mà producer tự stamp bằng `signal::tagged`, xem
+// crates/opsense-components/src/lib.rs; nếu có stage trung gian thêm
+// `payload.trigger` thì ưu tiên field đó):
 //
-//     station_query(station, from_ts, to_ts) -> array of observation maps
+//   trigger() == live_source ("live-feed") → KIỂM TRA dữ liệu vừa đến từ
+//     http source: live sample (metric `*_live_*` trong batch) so với
+//     prediction gần nhất (`labels.check = "prediction"`) lưu trong station
+//     của chính node → `labels.check = "result"` (value 1.0 = khớp trong
+//     tolerance / 0.0 = lệch).
+//   trigger() khác (clock ping, "") → TÍNH LẠI bảng dự đoán: query source
+//     station qua `station_query(window_source, now-600, now)` → AnalysisGrid
+//     + TransitionAnalysis trên history window → prediction per metric.
 //
-// Flow per ping:
-//   1. window = station_query(window_source, now-600, now)  — history window
-//      pulled from the `window-feed` HTTP source station.
-//   2. Per metric: AnalysisGrid + TransitionAnalysis over the window →
-//      a next-step prediction. Emit a prediction observation
-//      (`labels.check = "prediction"`).
-//   3. live = station_query(live_source, now-600, now) — realtime sample from
-//      the `live-feed` HTTP source station.
-//   4. prev = latest stored prediction of this node's own station
-//      (`labels.check == "prediction"`, the one from a previous tick) vs the
-//      latest live actual → emit a check result observation
-//      (`labels.check = "result"`, value 1.0 = match / 0.0 = miss).
-//
-// The check pair is always prediction-before-actual: this tick's predictions
-// land in the own station when the transform flushes the output, so the NEXT
-// ping compares them against the live samples that observed them.
+// Grid CHỈ fit history (ts <= now-60 và metric không chứa "_live_"): live
+// samples (ts gần now) không nhiễu forecast dù nằm trong cùng station.
 //
 // Node params (all optional, sane defaults):
-//   window_source = "window-feed", live_source = "live-feed",
+//   window_source = "live-feed", live_source = "live-feed",
 //   own_station = "predict", tolerance = 1.0
 
 fn process(observations) {
-    let win_src = "window-feed";
+    let win_src = "live-feed";
     if is_def_var("param_window_source") && type_of(param_window_source) != "()" {
         win_src = param_window_source;
     }
@@ -44,6 +39,12 @@ fn process(observations) {
         tol = param_tolerance.to_float();
     }
 
+    if trigger() == live_src {
+        // Dữ liệu từ http source vừa đến → kiểm tra lệch khỏi dự đoán.
+        return check_live(observations, own, tol);
+    }
+
+    // Ngược lại (clock ping) → tính lại bảng dự đoán.
     let now = now_secs();
     let back = 600;
 
@@ -51,22 +52,9 @@ fn process(observations) {
     if type_of(win) == "()" { return []; }
     if win.len() == 0 { return []; }
 
-    // 1 + 2: forecast from the history window.
-    let preds = predict_window(win);
-    if preds.len() == 0 { return []; }
-
-    // 3 + 4: verify the previous forecast against the live sample.
-    let live = station_query(live_src, now - back, now);
-    let hist = station_query(own, now - back, now);
-
-    let out = [];
-    for p in preds { out.push(p); }
-    if type_of(live) != "()" {
-        for c in check_live(live, hist, tol) { out.push(c); }
-    }
-
-    print("predict: " + preds.len() + " prediction(s), " + (out.len() - preds.len()) + " check(s)");
-    out
+    let preds = predict_window(win, now);
+    print("predict: " + preds.len() + " prediction(s)");
+    preds
 }
 
 /// Window → one prediction observation per metric.
@@ -74,10 +62,11 @@ fn process(observations) {
 /// Steady window (span <= 0): forecast = last value. Growing/shrinking
 /// window: forecast = last value + (up_prob - down_prob) * grid_step, i.e. the
 /// grid cell trend one step ahead.
-fn predict_window(win) {
+fn predict_window(win, now) {
+    let hist = history_window(win, now);
     let out = [];
-    for id in metric_ids(win) {
-        let pts = metric_points(win, id);
+    for id in metric_ids(hist) {
+        let pts = metric_points(hist, id);
         if pts.len() == 0 { continue; }
 
         let points = sort_by_ts(pts);
@@ -138,16 +127,39 @@ fn predict_window(win) {
     out
 }
 
-/// Latest live sample per metric vs the latest stored prediction
-/// (`labels.check == "prediction"`) → 1.0 / 0.0 check observation.
-///
-/// A live sample older than the prediction is skipped (prediction must
-/// precede the actual it explains).
-fn check_live(live, hist, tol) {
+/// Lọc về history window: ts ≤ now-60 và không phải metric live (mock dùng
+/// `*_live_*` làm realtime sample — không được vào grid).
+fn history_window(win, now) {
     let out = [];
+    for o in win {
+        let id = o["metric_id"];
+        if o["ts"] <= now - 60 && !id.contains("_live_") {
+            out.push(o);
+        }
+    }
+    out
+}
+
+/// Live sample (metric `*_live_*` trong batch source) vs prediction gần nhất
+/// (`labels.check == "prediction"`) của metric gốc → 1.0 / 0.0.
+///
+/// Live id "cpu_live_ramp" → base "cpu_ramp" (bỏ đuôi "_live"); sample cũ hơn
+/// prediction bị skip (prediction phải đứng trước actual nó giải thích).
+fn check_live(live, own, tol) {
+    let out = [];
+    if type_of(live) == "()" { return out; }
+    if live.len() == 0 { return out; }
+
+    let now = now_secs();
+    let back = 600;
+    let hist = station_query(own, now - back, now);
     if type_of(hist) == "()" { return out; }
 
     for id in metric_ids(live) {
+        // Chỉ live sample (metric chứa "_live_"); history trùng payload bị bỏ.
+        if !id.contains("_live_") { continue; }
+        let base = live_to_base(id);
+        if base == id { continue; }
         let pts = metric_points(live, id);
         if pts.len() == 0 { continue; }
 
@@ -155,12 +167,12 @@ fn check_live(live, hist, tol) {
         let actual_obs = latest[latest.len() - 1];
         let actual = actual_obs["value"].to_float();
 
-        let prev = latest_prediction(hist, id);
+        let prev = latest_prediction(hist, base);
         if type_of(prev) == "()" { continue; }
         if actual_obs["ts"] < prev["ts"] { continue; }
 
         let expected = prev["value"].to_float();
-        let delta = if actual > expected { actual - expected } else { expected - actual };
+        let delta = (actual - expected).abs();
         let ok = delta <= tol;
 
         out.push(#{
@@ -181,12 +193,22 @@ fn check_live(live, hist, tol) {
     out
 }
 
-/// Latest stored prediction obs for `id` (max ts), or () when absent.
-fn latest_prediction(hist, id) {
+/// "cpu_live_ramp" → "cpu_ramp" (bỏ phần "_live"). `split` không mutate (trái
+/// với `replace` — Rhai replace mutates in-place và trả unit). Trả nguyên id
+/// nếu không khớp pattern `prefix_live_suffix`.
+fn live_to_base(id) {
+    let parts = id.split("_live_");
+    if parts.len() == 2 { return parts[0] + "_" + parts[1]; }
+    id
+}
+
+/// Latest stored prediction obs cho metric gốc `base` (max ts), hoặc () nếu
+/// chưa có.
+fn latest_prediction(hist, base) {
     let best = ();
     let best_ts = -1;
     for h in hist {
-        if h["metric_id"] != id { continue; }
+        if h["metric_id"] != base { continue; }
         let labels = h["labels"];
         if labels["check"] == "prediction" && h["ts"] > best_ts {
             best_ts = h["ts"];
