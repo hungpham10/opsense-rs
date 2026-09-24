@@ -6,7 +6,7 @@
 fn process(observations) {
     if observations.len() == 0 { return []; }
 
-    let mut metric_ids = [];
+    let metric_ids = [];
     for obs in observations {
         let id = obs["metric_id"];
         let found = false;
@@ -16,7 +16,7 @@ fn process(observations) {
         if !found { metric_ids.push(id); }
     }
 
-    let mut out = [];
+    let out = [];
     let ts = now_secs();
 
     for id in metric_ids {
@@ -53,7 +53,7 @@ fn process(observations) {
     out
 }
 
-fn mean(vals) { if vals.len() == 0 { return 0.0; } let s = 0.0; for x in vals { s = s + x as float; } s / vals.len() as float }
-fn variance(vals) { if vals.len() < 2 { return 0.0; } let m = mean(vals); let s = 0.0; for x in vals { s = s + (x as float - m) * (x as float - m); } s / (vals.len() - 1) as float }
-fn array_min(vals) { if vals.len() == 0 { return 0.0; } let mut m = vals[0] as float; for x in vals { if x as float < m { m = x as float; } } m }
-fn array_max(vals) { if vals.len() == 0 { return 0.0; } let mut m = vals[0] as float; for x in vals { if x as float > m { m = x as float; } } m }
+fn mean(vals) { if vals.len() == 0 { return 0.0; } let s = 0.0; for x in vals { s = s + x.to_float(); } s / vals.len().to_float() }
+fn variance(vals) { if vals.len() < 2 { return 0.0; } let m = mean(vals); let s = 0.0; for x in vals { s = s + (x.to_float() - m) * (x.to_float() - m); } s / (vals.len() - 1).to_float() }
+fn array_min(vals) { if vals.len() == 0 { return 0.0; } let m = vals[0].to_float(); for x in vals { if x.to_float() < m { m = x.to_float(); } } m }
+fn array_max(vals) { if vals.len() == 0 { return 0.0; } let m = vals[0].to_float(); for x in vals { if x.to_float() > m { m = x.to_float(); } } m }

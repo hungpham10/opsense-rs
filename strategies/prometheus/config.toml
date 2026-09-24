@@ -39,3 +39,14 @@ interval_secs = 10
 type = "timeseries_station_sink"
 id = "tsdb"
 inputs = ["clock"]
+
+# Example: RhaiTransform for statistics summary (mean, variance, min, max per metric)
+# Uncomment to enable statistics summary processor
+# [[pipeline.components]]
+# type = "rhai_transform"
+# id = "stats-summary"
+# inputs = ["prom-explore"]  # or another HTTP source that provides observations
+# script_path = "script.rhai"
+# 
+#     [pipeline.components.params]
+#     cells = 10
