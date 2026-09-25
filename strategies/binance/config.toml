@@ -149,7 +149,7 @@ script_path = "strategies/binance/grid.rhai"
    # interval_time_to_rebuild = 60
 
 # Terminal node (bắt buộc: transform non-sink phải có consumer). Chỉ giữ
-# snapshots + candles trong memory — không persist / không MinIO (v1).
+# snapshots + candles trong memory — không persist / không object store (v1).
 [[pipeline.components]]
 type = "timeseries_station_sink"
 id = "binance-tsdb"

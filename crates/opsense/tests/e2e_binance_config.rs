@@ -12,7 +12,7 @@
 //!      OHLCV từ klines, station `grid` có candle từ tick VÀ snapshot grid
 //!      (`labels.kind="snapshot"`, `grid_step > 0`), sink terminal nhận data.
 //!
-//! **Không dùng MinIO** — `[storage] backend = "memory"`: v1 runtime-only.
+//! **Không dùng object store** — `[storage] backend = "memory"`: v1 runtime-only.
 //! `cargo test -p opsense --test e2e_binance_config -- --nocapture`
 
 use std::path::Path;
@@ -57,7 +57,7 @@ fn config_file_contract() {
         .expect("strategies/binance/config.toml phải parse + validate");
     assert_eq!(
         cfg.storage.backend, "memory",
-        "v1 runtime-only: không persist, không MinIO"
+        "v1 runtime-only: không persist, không RustFS"
     );
 
     // Graph 6 node: clock → history (http candles) + tick-feed (ws) → tick-map

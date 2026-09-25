@@ -72,7 +72,7 @@ pub struct S3Config {
     pub bucket: String,
     /// Prefix key, VD `"opsense/proj1"` — không kèm `/` ở hai đầu.
     pub prefix: String,
-    /// Custom endpoint (VD `http://minio:9000`). `None` = AWS S3 mặc định.
+    /// Custom endpoint (VD `http://rustfs:9000`). `None` = AWS S3 mặc định.
     pub endpoint: Option<String>,
     pub region: Option<String>,
     /// `None` = để `object_store` tự rút từ env AWS chuẩn

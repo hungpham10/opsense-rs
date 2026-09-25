@@ -148,7 +148,7 @@ services:
       OPSENSE_RUNNER_GRPC: opsense-runner:50051
       # S3/object-store creds — strategy config như prometheus không hardcode key;
       # `opsense serve` fallback theo env (opsense-core station.rs open_backend)
-      # nên mirror parquet → S3 hoạt động với MinIO mặc định.
+      # nên mirror parquet → S3 hoạt động với RustFS mặc định.
       OPSENSE_S3_ACCESS_KEY_ID: ${OPSENSE_S3_ACCESS_KEY_ID:-opsense}
       OPSENSE_S3_SECRET_ACCESS_KEY: ${OPSENSE_S3_SECRET_ACCESS_KEY:-opsense123}
       # Nginx / supervisor boot (release.sh sed)
@@ -175,42 +175,53 @@ services:
       start_period: 30s
     networks: [opsense-net]
 
-  # MinIO — object store S3-compatible cho lakehouse parquet (local dev).
-  # Endpoint: http://minio:9000 (path-style, OPSENSE_S3_ENDPOINT).
-  # Bucket `opsense-lake` được tạo tự động bởi minio-bucket service.
-  minio:
-    # Use quay.io to avoid Docker Hub rate limits
-    image: quay.io/minio/minio:latest
-    container_name: opsense-minio
-    command: server /data --console-address ":9001"
+  # rustfs — object store S3-compatible cho lakehouse parquet (local dev).
+  # Endpoint: http://rustfs:9000 (path-style, OPSENSE_S3_ENDPOINT).
+  # Bucket `opsense-lake` được tạo tự động bởi rustfs-bucket service.
+  #
+  # Vì sao RustFS chứ không MinIO: image MinIO (`quay.io/minio/*`) pull fail với
+  # `unauthorized` trên registry của team → cả `docker compose up` fail trước khi
+  # chạy được postgres/valkey. RustFS là S3-compatible (100%, kể cả path-style),
+  # viết bằng Rust, image Docker Hub public, và còn hỗ trợ cả
+  # `/minio/health/live` lẫn `/health` nên code cũ không phải đổi.
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: opsense-rustfs
     ports:
       - "9000:9000"   # S3 API
       - "9001:9001"   # Console (http://localhost:9001)
     environment:
-      MINIO_ROOT_USER: ${OPSENSE_S3_ACCESS_KEY_ID:-opsense}
-      MINIO_ROOT_PASSWORD: ${OPSENSE_S3_SECRET_ACCESS_KEY:-opsense123}
+      RUSTFS_ACCESS_KEY: ${OPSENSE_S3_ACCESS_KEY_ID:-opsense}
+      RUSTFS_SECRET_KEY: ${OPSENSE_S3_SECRET_ACCESS_KEY:-opsense123}
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_OBS_LOGGER_LEVEL: error
     volumes:
-      - minio-data:/data
+      - rustfs-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
       start_period: 5s
     networks: [opsense-net]
 
-  # Tạo bucket opsense-lake trên MinIO ngay khi MinIO sẵn sàng.
-  # Run as init container that stays alive; healthcheck passes after bucket creation.
-  minio-bucket:
-    # Use quay.io to avoid Docker Hub rate limits
-    image: quay.io/minio/mc:latest
+  # Tạo bucket `opsense-lake` trên RustFS ngay khi server sẵn sàng.
+  # Dùng `aws-cli` (public.ecr.aws) thay `minio/mc` — image mc bị chặn pull
+  # cùng registry với minio, còn aws-cli thì bucket create là một lệnh S3 thuần.
+  rustfs-bucket:
+    image: public.ecr.aws/aws-cli/aws-cli:latest
     depends_on:
-      minio:
+      rustfs:
         condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${OPSENSE_S3_ACCESS_KEY_ID:-opsense}
+      AWS_SECRET_ACCESS_KEY: ${OPSENSE_S3_SECRET_ACCESS_KEY:-opsense123}
+      AWS_DEFAULT_REGION: us-east-1
     entrypoint: >
-      sh -c "mc alias set myminio http://minio:9000 opsense opsense123 &&
-      mc mb --ignore-existing myminio/opsense-lake &&
-      mc ls myminio/opsense-lake &&
+      sh -c "aws --endpoint-url http://rustfs:9000 s3 mb s3://opsense-lake 2>/dev/null || true;
+      aws --endpoint-url http://rustfs:9000 s3 ls s3://opsense-lake/ &&
       touch /tmp/bucket-ready &&
       echo 'Bucket ready, keeping container alive...' &&
       sleep infinity"
@@ -227,4 +238,4 @@ networks:
     driver: bridge
 
 volumes:
-  minio-data:
+  rustfs-data:

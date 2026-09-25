@@ -1,4 +1,4 @@
-# Parquet + S3 (MinIO) — full Prometheus demo → clock → station → S3.
+# Parquet + S3 (RustFS) — full Prometheus demo → clock → station → S3.
 # Pipeline: clock → http prom-explore → rhai stats-summary(script.rhai) →
 # tsdb (parquet local + mirror s3://opsense-lake/test-case-prom/).
 # Data thật (up{job=...}, node_cpu_seconds_total, node_memory_MemAvailable_bytes)
@@ -28,7 +28,7 @@ s3_snapshot_interval_secs = 60
 [storage.s3]
 bucket = "opsense-lake"
 prefix = "test-case-prom"
-endpoint = "http://minio:9000"
+endpoint = "http://rustfs:9000"
 url_style = "path"
 # Creds/region KHÔNG khai ở đây — fallback theo env `OPSENSE_S3_*` rồi `AWS_*`
 # (xem opsense-core station.rs open_backend).

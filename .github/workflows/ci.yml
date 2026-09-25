@@ -341,7 +341,7 @@ jobs:
       # s3_flush_interval_secs=15 của config, rồi khẳng định parquet local +
       # mirror S3 tại opsense-lake/test-case-prom/**.
       # Endpoint dùng 127.0.0.1:9000 (compose publish 9000, host-reachable) —
-      # config gốc ghi `minio:9000` là hostname trong compose network, không
+      # config gốc ghi `rustfs:9000` là hostname trong compose network, không
       # resolve được từ runner.
       - name: Run e2e Prometheus strategy config test
         if: matrix.strategy == 'prometheus'

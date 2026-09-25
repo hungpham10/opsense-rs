@@ -209,7 +209,7 @@ cache_max_blocks = 288
 # Mirror lên S3: khai [storage.s3] → lake xuất ra
 #   s3://<bucket>/<prefix>/<id>/ts/**/*.parquet (timeseries) + state/
 #   (checkpoint). Hoặc data_dir "s3://bucket/prefix" (backend vẫn "parquet",
-#   creds/region qua env OPSENSE_S3_* / AWS_*, OPSENSE_S3_ENDPOINT cho MinIO).
+#   creds/region qua env OPSENSE_S3_* / AWS_*, OPSENSE_S3_ENDPOINT cho object store self-hosted).
 [storage]
 backend = "parquet"                    # Parquet storage (canonical)
 data_dir = "/app/.opsense/parquet"     # mount PVC tại /app/.opsense; local cache
@@ -221,9 +221,9 @@ retention_secs = 0                     # 0 = giữ mãi; đặt giây để tự
 # [storage.s3]
 # bucket = "opsense-lake"              # bắt buộc khi có [storage.s3]
 # prefix = "prod"                      # s3://opsense-lake/prod/<id>/ts/**/*.parquet
-# endpoint = "http://minio:9000"       # bỏ trống = AWS public
+# endpoint = "http://rustfs:9000"       # bỏ trống = AWS public
 # region = "us-east-1"                 # /access_key_id /secret_access_key nhận env
-# url_style = "path"                   # MinIO-style; bỏ trống = virtual-host
+# url_style = "path"                   # self-hosted S3; bỏ trống = virtual-host
 # s3_flush_interval_secs = 60          # tự flush timeseries ra S3 theo lịch
 # s3_snapshot_interval_secs = 600      # checkpoint + mirror state theo lịch
 
