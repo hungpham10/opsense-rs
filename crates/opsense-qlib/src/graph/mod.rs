@@ -103,6 +103,9 @@ pub struct Node {
 
 /// Genome/DAG cho ONNX trading model.
 /// `ops` là danh sách các Op trait objects, `nodes` là DAG referencing ops by index.
+///
+/// Không derive `Clone`: `Box<dyn Op>` không clone được, nên bản sao đi qua
+/// serde (typetag giữ đủ `ops`/`extractors` — xem `with_prebuilt_onnx`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Graph {
     ops: Vec<Box<dyn Op>>,
@@ -117,6 +120,14 @@ pub struct Graph {
     num_of_grids: usize,
     lookback_time_to_rebuild: usize,
     interval_time_to_rebuild: usize,
+
+    /// ONNX bytes đã build sẵn (artifact nạp từ file) — `None` nghĩa là tự emit
+    /// từ `ops` + `nodes` như bình thường.
+    ///
+    /// Genome vẫn là nguồn sự thật: bytes chỉ là cache để khỏi emit lại, và
+    /// **không** serialize kèm genome (tránh hai bản có thể lệch nhau).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prebuilt: Option<Arc<Vec<u8>>>,
 }
 
 impl Graph {
@@ -141,7 +152,69 @@ impl Graph {
             num_of_grids,
             lookback_time_to_rebuild,
             interval_time_to_rebuild,
+            prebuilt: None,
         }
+    }
+
+    /// Gắn ONNX bytes đã build sẵn — `model()` bỏ qua `build_onnx` và compile
+    /// thẳng từ bytes này.
+    ///
+    /// Dùng khi ONNX được build ở Python (hoặc lâu hơn một lần trước) rồi lưu
+    /// ra file. **Genome vẫn là nguồn sự thật**: bytes phải khớp `ops`+`nodes`+
+    /// `window_size`+`num_of_grids`, nếu không `predict` sẽ lỗi shape — hãy
+    /// gọi lại [`Self::write_onnx`] sau mỗi lần sửa genome.
+    pub fn with_prebuilt_onnx(&self, onnx: Vec<u8>) -> Result<Self, Error> {
+        // `Box<dyn Op>` không `Clone` được nên bản sao đi qua serde — typetag
+        // bảo toàn `ops`/`extractors` (xem `graph_serializes_trait_objects_with_typetag`).
+        let mut next: Self = serde_json::from_str(
+            &serde_json::to_string(self)
+                .map_err(|e| Error::other(format!("serialize genome thất bại: {e}")))?,
+        )
+        .map_err(|e| Error::other(format!("clone genome qua JSON thất bại: {e}")))?;
+        next.prebuilt = Some(Arc::new(onnx));
+        Ok(next)
+    }
+
+    /// ONNX bytes ứng với genome này: bytes đã nạp sẵn nếu có, nếu không thì
+    /// emit từ `ops` + `nodes`. File `.onnx` chuẩn — Python (`onnx.load`) đọc
+    /// được, không cần qlib.
+    pub fn onnx_bytes(&self) -> Result<Vec<u8>, Error> {
+        match &self.prebuilt {
+            Some(bytes) => Ok(bytes.as_ref().clone()),
+            None => self.build_onnx().map(|(bytes, _)| bytes),
+        }
+    }
+
+    /// Ghi ONNX ra file (artifact để chia sẻ / inspect; không phải nguồn sự
+    /// thật — genome mới là).
+    pub fn write_onnx(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        let bytes = self.onnx_bytes()?;
+        std::fs::write(path, bytes)
+            .map_err(|e| Error::other(format!("ghi ONNX thất bại: {e}")))
+    }
+
+    /// Nạp cặp **genome + ONNX**: đọc genome JSON (nguồn sự thật) rồi gắn
+    /// bytes `.onnx` để khỏi emit lại.
+    ///
+    /// Sửa genome thì phải [`Self::write_onnx`] lại — bytes cũ sẽ lệch shape và
+    /// `predict` báo lỗi (đây là chủ ý: sai model phải lộ ra, không âm thầm
+    /// chạy kết quả cũ).
+    pub fn load_artifact(
+        genome_path: impl AsRef<std::path::Path>,
+        onnx_path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, Error> {
+        let genome_path = genome_path.as_ref();
+        let onnx_path = onnx_path.as_ref();
+        let genome = std::fs::read_to_string(genome_path)
+            .map_err(|e| Error::other(format!("đọc genome thất bại ({genome_path:?}): {e}")))?;
+        let graph: Self = serde_json::from_str(&genome)
+            .map_err(|e| Error::other(format!("genome không hợp lệ: {e}")))?;
+        let onnx = std::fs::read(onnx_path)
+            .map_err(|e| Error::other(format!("đọc ONNX thất bại ({onnx_path:?}): {e}")))?;
+        if onnx.is_empty() {
+            return Err(Error::other("file ONNX rỗng"));
+        }
+        graph.with_prebuilt_onnx(onnx)
     }
 }
 
@@ -370,23 +443,37 @@ impl Graph {
         Ok((bytes, n_feat))
     }
 
-    /// Compiled ONNX predictor từ DAG — cache theo fingerprint.
+    /// Compiled ONNX predictor — cache theo fingerprint.
+    ///
+    /// Ưu tiên bytes nạp sẵn (`with_prebuilt_onnx`): bỏ qua `build_onnx`. Sai
+    /// shape sẽ lộ ra ở `predict`/compile, kèm gợi ý build lại.
     fn model(&self) -> Result<(Arc<TypedRunnableModel>, usize), Error> {
         let key = self.fingerprint();
         if let Some(m) = predictor_cache().get(key) {
             return Ok((m, self.head_features()?));
         }
-        let (bytes, n_feat) = self.build_onnx()?;
+        let (bytes, n_feat) = match &self.prebuilt {
+            Some(prebuilt) => (prebuilt.as_ref().clone(), self.head_features()?),
+            None => self.build_onnx()?,
+        };
+        let prebuilt_hint = if self.prebuilt.is_some() {
+            " (ONNX nạp sẵn có thể không khớp genome — thử write_onnx lại)"
+        } else {
+            ""
+        };
         let model = tract_onnx::onnx()
             .model_for_read(&mut std::io::Cursor::new(&bytes))
             .and_then(|m| m.into_optimized())
             .and_then(|m| m.into_runnable())
-            .map_err(|e| Error::other(format!("ONNX compile failed: {e}")))?;
+            .map_err(|e| Error::other(format!("ONNX compile failed{prebuilt_hint}: {e}")))?;
         predictor_cache().put(key, model.clone());
         Ok((model, n_feat))
     }
 
-    /// Fingerprint cấu trúc DAG.
+    /// Fingerprint cấu trúc DAG **+ bytes nạp sẵn** (nếu có).
+    ///
+    /// Cần bytes trong key: hai artifact cùng cấu trúc nhưng khác bytes (ví dụ
+    /// build lại sau khi đổi op khác) không được dùng chung cache entry.
     fn fingerprint(&self) -> u64 {
         let mut h = DefaultHasher::new();
         if let Ok(bytes) =
@@ -396,6 +483,10 @@ impl Graph {
         } else {
             self.window_size.hash(&mut h);
             self.num_of_grids.hash(&mut h);
+        }
+        if let Some(prebuilt) = &self.prebuilt {
+            prebuilt.len().hash(&mut h);
+            prebuilt.hash(&mut h);
         }
         h.finish()
     }
@@ -409,9 +500,9 @@ impl Graph {
         Err(Error::other("genome thiếu node Head"))
     }
 
-    /// Compile DAG → ONNX bytes (dùng cho test / lưu genotype).
+    /// Compile DAG → ONNX bytes (alias của [`Self::onnx_bytes`] cho code cũ).
     pub fn compile(&self) -> Result<Vec<u8>, Error> {
-        Ok(self.build_onnx()?.0)
+        self.onnx_bytes()
     }
 
     pub fn num_features(&self) -> Result<usize, Error> {
