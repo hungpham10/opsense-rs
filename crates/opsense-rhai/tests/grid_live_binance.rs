@@ -9,6 +9,10 @@
 //! Test này **không** khẳng định lợi nhuận — chỉ khẳng định plan script dựng ra
 //! trên dữ liệu thật là dùng được: có ô, level tăng dần trong khoảng giá quan
 //! sát, win-prob trong (0, 1), và kernel `Portfolio` nhận plan đó đặt được lệnh.
+//!
+//! Endpoint: thử `data-api.binance.vision` trước rồi `api.binance.com`, vì
+//! **CI runner của GitHub bị Binance trả 451** (geo-block) cho `api.binance.com`.
+//! Ghi đè bằng `OPSENSE_BINANCE_KLINES_URL` nếu cần.
 
 use std::path::PathBuf;
 
@@ -42,19 +46,58 @@ fn params(i: usize) -> f64 {
     [KELLY, CAPITAL, GRID_LEVELS, SL_PCT, LOOKBACK][i]
 }
 
+/// Endpoint klines, thử lần lượt (xem [`fetch_klines`]).
+///
+/// Ưu tiên `data-api.binance.vision` — host **public market data** của Binance,
+/// không phục vụ giao dịch nên ít bị chặn hơn `api.binance.com` (CI runner của
+/// GitHub bị trả **451 Unavailable For Legal Reasons** cho `api.binance.com`).
+/// Ghi đè được bằng `OPSENSE_BINANCE_KLINES_URL` khi cần.
+fn endpoints() -> Vec<String> {
+    match std::env::var("OPSENSE_BINANCE_KLINES_URL") {
+        Ok(url) => vec![url],
+        Err(_) => vec![
+            "https://data-api.binance.vision/api/v3/klines".into(),
+            "https://api.binance.com/api/v3/klines".into(),
+        ],
+    }
+}
+
 /// Binance `klines`: `[openTimeMs, open, high, low, close, volume]`.
 async fn fetch_klines() -> Vec<CandleStick> {
-    let url = format!(
-        "https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit={LIMIT}"
+    let client = reqwest::Client::new();
+    let mut seen = Vec::new();
+    for base in endpoints() {
+        let url = format!("{base}?symbol={SYMBOL}&interval={INTERVAL}&limit={LIMIT}");
+        let resp = match client.get(&url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                seen.push(format!("{base} → transport: {e}"));
+                continue;
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            seen.push(format!("{base} → HTTP {status}"));
+            continue;
+        }
+        let body: Vec<Value> = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                seen.push(format!("{base} → parse JSON: {e}"));
+                continue;
+            }
+        };
+        println!("klines lấy từ {base}");
+        return parse_klines(&body);
+    }
+    panic!(
+        "không endpoint nào trả được klines (thử {}): {}",
+        endpoints().len(),
+        seen.join(" | ")
     );
-    let body: Vec<Value> = reqwest::get(&url)
-        .await
-        .expect("gọi Binance public API")
-        .error_for_status()
-        .expect("HTTP 200 từ Binance")
-        .json()
-        .await
-        .expect("parse JSON klines");
+}
+
+fn parse_klines(body: &[Value]) -> Vec<CandleStick> {
     assert!(body.len() >= 10, "Binance trả {} nến", body.len());
     // Binance trí số ở dạng JSON number (openTimeMs là integer, giá có thể là
     // float **hoặc** string) → đọc qua một cổng duy nhất.
