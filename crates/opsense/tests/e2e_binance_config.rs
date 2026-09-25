@@ -161,6 +161,42 @@ fn config_file_contract() {
     );
     assert_eq!(grid.params.get("symbol").and_then(Value::as_str), Some(SYMBOL));
     assert_eq!(grid.params.get("history_secs").and_then(Value::as_i64), Some(3600));
+
+    // Strategy = script: `fn rebuild` trong grid.rhai dựng plan (opsense-rhai
+    // `ScriptStrategy`), knob dưới đây là tham số `fn rebuild` đọc. Ghi rõ ở
+    // đây để lệch config↔script (thêm/xoá knob) chết ngay ở contract test.
+    assert_eq!(
+        grid.params.get("strategy").and_then(Value::as_str),
+        Some("rhai"),
+        "strategy mặc định = script `fn rebuild` (không còn class Rust)"
+    );
+    for (key, want) in [
+        ("grid_levels", 5.0),
+        ("sl_pct", 0.008),
+        ("grid_min_trades", 3.0),
+        ("grid_weight_sharpness", 4.0),
+        ("grid_max_bit", 20.0),
+    ] {
+        assert_eq!(
+            grid.params.get(key).and_then(Value::as_f64),
+            Some(want),
+            "knob `{key}` của `fn rebuild` lệch với script"
+        );
+    }
+    // Script phải thật sự chứa `fn rebuild` — nếu ai xoá nhầm thì strategy
+    // chỉ chết lúc runtime, không phải lúc test.
+    let script_src = std::fs::read_to_string(
+        Path::new(CONFIG_PATH)
+            .parent()
+            .expect("config parent")
+            .join("grid.rhai"),
+    )
+    .expect("đọc grid.rhai");
+    assert!(
+        script_src.contains("fn rebuild("),
+        "grid.rhai phải định nghĩa `fn rebuild(candles, prev, params)`"
+    );
+
     assert!(
         Path::new(CONFIG_PATH)
             .parent()
