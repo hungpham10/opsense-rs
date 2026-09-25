@@ -209,8 +209,9 @@ cache_max_blocks = 288
 # Mirror lên S3: khai [storage.s3] → lake xuất ra
 #   s3://<bucket>/<prefix>/<id>/ts/**/*.parquet (timeseries) + state/
 #   (checkpoint). Hoặc data_dir "s3://bucket/prefix" (backend vẫn "parquet",
-#   endpoint lấy TỪ TOML `[storage.s3].endpoint` — KHÔNG có env `OPSENSE_S3_ENDPOINT`
-#   trong code; env chỉ phủ creds/region: OPSENSE_S3_ACCESS_KEY_ID / _SECRET_ACCESS_KEY / _REGION, rồi AWS_*).
+#   endpoint lấy TỪ TOML `[storage.s3].endpoint`; env chỉ phủ creds/region:
+#   OPSENSE_S3_ACCESS_KEY_ID / _SECRET_ACCESS_KEY / _REGION, rồi AWS_*).
+#   (`OPSENSE_S3_ENDPOINT` chỉ là biến của test harness, không phải của runtime.)
 [storage]
 backend = "parquet"                    # Parquet storage (canonical)
 data_dir = "/app/.opsense/parquet"     # mount PVC tại /app/.opsense; local cache
@@ -841,9 +842,10 @@ Dễ hiểu sai nhất khi đọc manifest: **không phải biến nào cũng do
 | Entrypoint của image | `scripts/release.sh`, `scripts/nginx.sh`, `conf/supervisor/opsense.conf` | `APP_ENV`, `DISABLE_AUTO_INIT_DATABASE`, `ENCRYPTED_FILE`, `HTTP_SERVER`, `NGINX_DIR`, `NGINX_LOG`, `USE_TOR`, `POSTGRES_*` |
 | Nginx Lua (OIDC/JWT) | `conf/nginx/**` | `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_SESSION_SECRET`, `JWT_MODE`, `JWT_SECRET` |
 
-Hai biến **không** tồn tại trong code (đừng thêm vào manifest):
-`OPSENSE_S3_ENDPOINT` (endpoint lấy từ `[storage.s3].endpoint` trong TOML) và
-`OPSENSE_MCP_PORT` (MCP chỉ qua stdio).
+Hai biến **không được runtime đọc** (đừng thêm vào manifest):
+`OPSENSE_S3_ENDPOINT` (runtime lấy endpoint từ `[storage.s3].endpoint` trong TOML;
+biến này chỉ được **test harness** đọc để override endpoint khi chạy ngoài
+compose network) và `OPSENSE_MCP_PORT` (MCP chỉ qua stdio, không có cổng).
 
 ---
 

@@ -176,7 +176,10 @@ services:
     networks: [opsense-net]
 
   # rustfs — object store S3-compatible cho lakehouse parquet (local dev).
-  # Endpoint: http://rustfs:9000 (path-style, OPSENSE_S3_ENDPOINT).
+  # Endpoint: http://rustfs:9000 (path-style). Runtime đọc endpoint từ
+  # `[storage.s3].endpoint` trong config; `OPSENSE_S3_ENDPOINT` chỉ được
+  # **test harness** đọc (e2e_prometheus_config / e2e_predict_config /
+  # integration_s3_lake) để override endpoint khi chạy từ host.
   # Bucket `opsense-lake` được tạo tự động bởi rustfs-bucket service.
   #
   # Vì sao RustFS chứ không MinIO: image MinIO (`quay.io/minio/*`) pull fail với
