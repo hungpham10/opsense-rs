@@ -41,6 +41,18 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Scaffold a ready-to-edit config file.
+    ///
+    /// Default `.opsense/config.toml` — the file `opsense serve` picks up.
+    /// Refuses to overwrite an existing file unless `--force`.
+    Init {
+        /// Target path (default `.opsense/config.toml`).
+        path: Option<PathBuf>,
+        /// Overwrite if the file already exists.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Run the Opsense service: pipeline runtime + REST/GraphQL API.
     ///
     /// Listener mode via `GATEWAY_LISTENER` (`http`=TCP, default `unix`),
@@ -227,6 +239,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {    dotenvy::dotenv().ok();
         .build()?
         .block_on(async {
             match Cli::parse().command {
+                Some(Commands::Init { path, force }) => {
+                    let p = path.as_deref();
+                    if let Err(e) = opsense::init::run(p, force) {
+                        eprintln!("init error: {e}");
+                        std::process::exit(1);
+                    }
+                }
                 Some(Commands::Serve {}) => {
                     if let Err(e) = serve::run().await {
                         eprintln!("server error: {e}");

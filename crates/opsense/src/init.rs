@@ -42,9 +42,10 @@ pub fn run(path: Option<&Path>, force: bool) -> std::io::Result<()> {
         target.display()
     );
     println!("  2. Drive it interactively:");
-    println!("       opsense mcp");
-    println!("     (MCP tools: opsense_init / opsense_run / opsense_query / opsense_status)");
-    println!("     or run the gateway against it:");
+    println!("       opsense status        # node/station đang chạy");
+    println!("       opsense components    # cấu hình đang chạy (kể cả params)");
+    println!("       opsense mcp           # MCP stdio (Claude Desktop, IDE…)");
+    println!("     hoặc chạy gateway:");
     println!("       OPSENSE_CONFIG={} opsense serve", target.display());
     Ok(())
 }
