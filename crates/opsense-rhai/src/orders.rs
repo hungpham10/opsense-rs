@@ -35,11 +35,13 @@ use std::sync::{Arc, Mutex};
 use opsense_core::Observation;
 use opsense_model::events::{Signal, TelemetryKind};
 use opsense_qlib::{
-    Calendar, CandleStick, CryptoCalendar, DataLoader, Fee, ForexCalendar, Graph, GridStrategy,
-    Order, OrderEvent, OrderType, Portfolio, PortfolioConfig, Score, Session, SharpeScore,
-    SimpleFixedFee, StockCalendar, Strategy, VolatilityAdaptiveGridStrategy,
+    Calendar, CandleStick, CryptoCalendar, DataLoader, Fee, ForexCalendar, Graph, Order,
+    OrderEvent, OrderType, Portfolio, PortfolioConfig, Score, Session, SharpeScore,
+    SimpleFixedFee, StockCalendar, Strategy,
 };
 use rhai::{Array, Dynamic, Map};
+
+use crate::ScriptStrategy;
 
 /// Label của observation order.
 const L_STATUS: &str = "status";
@@ -119,7 +121,6 @@ struct Settings {
     strategy: String,
     grid_levels: usize,
     sl_pct: f64,
-    smoothing_k: f64,
     lookback_secs: u64,
     review_interval_secs: u64,
     trading_candle_secs: u64,
@@ -129,6 +130,20 @@ struct Settings {
     settlement_candles: u64,
     /// Genome DAG cho `strategy = "dag"` (JSON như trong config pipeline).
     dag: Option<serde_json::Value>,
+    // ── Knob cho `strategy = "rhai"` (đọc trong `fn rebuild`) ──────────────
+    /// Số lệnh đóng tối thiểu trước khi tin tỉ lệ thắng thực tế.
+    grid_min_trades: usize,
+    /// Độ nhọn phân bổ vốn (weights normal quanh giữa).
+    grid_weight_sharpness: f64,
+    /// `max_bit` cho sieve `AnalysisGrid` (số 2^k ô tối đa).
+    grid_max_bit: usize,
+    /// Biên độ win-prob lệch theo bậc (None = không lệch).
+    grid_level_edge_amp: Option<f64>,
+    /// Script của node đang chạy (`strategy = "rhai"`). Không đọc từ `cfg`:
+    /// `portfolio_feed` nằm trong lời gọi script nên lấy từ
+    /// [`crate::runtime::current_script`] — không bắt user khai đường dẫn thêm ở
+    /// params (hai bản không thể lệch nhau).
+    script: Option<crate::ScriptSource>,
 }
 
 impl Default for Settings {
@@ -136,10 +151,9 @@ impl Default for Settings {
         Self {
             resolution: "1m".to_string(),
             calendar: "crypto".to_string(),
-            strategy: "grid".to_string(),
+            strategy: "rhai".to_string(),
             grid_levels: 5,
             sl_pct: 0.008,
-            smoothing_k: 10.0,
             lookback_secs: 2 * 24 * 3600,
             review_interval_secs: 900,
             trading_candle_secs: 60,
@@ -148,6 +162,11 @@ impl Default for Settings {
             base_capital: 100_000.0,
             settlement_candles: 0,
             dag: None,
+            grid_min_trades: 3,
+            grid_weight_sharpness: 4.0,
+            grid_max_bit: 20,
+            grid_level_edge_amp: Some(0.10),
+            script: None,
         }
     }
 }
@@ -177,8 +196,17 @@ impl Settings {
         if let Some(v) = num("sl_pct") {
             s.sl_pct = v;
         }
-        if let Some(v) = num("smoothing_k") {
-            s.smoothing_k = v;
+        if let Some(v) = int("grid_min_trades") {
+            s.grid_min_trades = v.max(0) as usize;
+        }
+        if let Some(v) = num("grid_weight_sharpness") {
+            s.grid_weight_sharpness = v;
+        }
+        if let Some(v) = int("grid_max_bit") {
+            s.grid_max_bit = v.clamp(1, 32) as usize;
+        }
+        if let Some(v) = num("grid_level_edge_amp") {
+            s.grid_level_edge_amp = Some(v);
         }
         if let Some(v) = int("lookback_secs") {
             s.lookback_secs = v.max(0) as u64;
@@ -218,9 +246,10 @@ impl Settings {
             .map_err(|e| std::io::Error::other(format!("params.dag không hợp lệ: {e}")))
     }
 
-    /// Params đúng layout `GridStrategy::init()`: kernel đọc `kelly`/`capital`,
-    /// strategy đọc phần còn lại qua `ParamFn`. Với DAG, `Graph::init()` tự
-    /// có layout riêng nên hai nhánh này không trùng nhau.
+    /// Layout params kernel + strategy: `[kelly, capital, grid_levels, sl_pct,
+    /// lookback]` — cùng layout với `Graph::init()` (index 0..4) để `Portfolio`
+    /// dùng chung không cần biết strategy nào đang chạy. Với DAG, `Graph::init()`
+    /// tự có layout riêng nên hai nhánh này không trùng nhau.
     fn params(&self) -> Vec<f64> {
         if self.strategy == "dag" || self.strategy == "graph" {
             if let Ok(graph) = self.dag() {
@@ -242,30 +271,33 @@ impl Settings {
 
     fn portfolio(&self) -> Result<Portfolio, std::io::Error> {
         let strategy: Arc<dyn Strategy + Sync + Send> = match self.strategy.as_str() {
-            "volatility" | "volatility_adaptive" => {
-                Arc::new(VolatilityAdaptiveGridStrategy::new(
-                    self.grid_levels,
-                    2.0,
-                    1.5,
-                    24 * 3600,
-                    self.lookback_secs,
-                    self.review_interval_secs,
-                    self.smoothing_k,
-                    self.trading_candle_secs,
-                ))
-            }
             // DAG model: `params.dag` là genome (ops + nodes + weights) build
             // riêng ở Python, truyền vào đây dạng JSON. `Graph` tự emit ONNX
             // rồi chạy bằng tract — cầu nối giữa model ngoài và kernel.
             "dag" | "graph" => Arc::new(self.dag()?),
-            _ => Arc::new(GridStrategy::new(
-                self.grid_levels,
-                self.sl_pct,
-                self.smoothing_k,
-                self.lookback_secs,
-                self.review_interval_secs,
-                self.trading_candle_secs,
-            )),
+            // Script của chính node viết `fn rebuild` (xem `ScriptStrategy`).
+            "rhai" | "script" => {
+                let src = self.script.clone().ok_or_else(|| {
+                    std::io::Error::other(
+                        "strategy = \"rhai\" cần chạy trong script (portfolio_feed); \
+                         gọi ngoài pipeline thì không có script nào để lấy",
+                    )
+                })?;
+                let mut s = ScriptStrategy::new(src, self.review_interval_secs)
+                    .with_knob("min_trades", self.grid_min_trades.into())
+                    .with_knob("weight_sharpness", self.grid_weight_sharpness.into())
+                    .with_knob("max_bit", (self.grid_max_bit as i64).into());
+                if let Some(amp) = self.grid_level_edge_amp {
+                    s = s.with_knob("level_edge_amp", amp.into());
+                }
+                Arc::new(s)
+            }
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "strategy `{other}` không hỗ trợ: dùng \"rhai\" (script `fn rebuild`) \
+                     hoặc \"dag\" (genome `params.dag`)"
+                )));
+            }
         };
         let calendar: Arc<dyn Calendar + Sync + Send> = match self.calendar.as_str() {
             "forex" => Arc::new(ForexCalendar),
@@ -408,6 +440,12 @@ async fn feed(
     // AnalysisGrid cần ≥ 10 nến; thiếu thì plan rỗng, không đặt được lệnh.
     if candles.len() < 10 {
         return vec![step_cursor(incoming.t, state.session.candle_seq, symbol)];
+    }
+    let mut settings = settings.clone();
+    // Script của node đang chạy thắng. Ngoài pipeline (unit test gọi `feed`
+    // trực tiếp) `current_script()` là None → giữ script đã gán sẵn.
+    if let Some(src) = crate::runtime::current_script() {
+        settings.script = Some(src);
     }
     let Ok(portfolio) = settings.portfolio() else {
         return Vec::new();
@@ -653,6 +691,44 @@ mod tests {
     use super::*;
     use rhai::Engine;
 
+    /// `fn rebuild` tối giản cho unit test: một lưới phẳng bộc kín toàn bộ
+    /// khoảng giá quan sát (nên mọi nến đều chạm level ⇒ lệnh dễ đặt).
+    /// Strategy thật viết bằng Rhai nằm ở `strategies/binance/grid.rhai`.
+    const TEST_REBUILD: &str = r#"
+        fn rebuild(candles, prev, params) {
+            let lo = candles[0].l;
+            let hi = candles[0].h;
+            for k in candles {
+                if k.l < lo { lo = k.l; }
+                if k.h > hi { hi = k.h; }
+            }
+            if hi <= lo { return []; }
+            let k = params.grid_levels.to_int();
+            let levels = [];
+            let long_win = [];
+            let short_win = [];
+            for i in 0..k {
+                levels += [lo + (hi - lo) * i / k];
+                long_win += [0.5];
+                short_win += [0.5];
+            }
+            levels += [hi];
+            long_win += [0.5];
+            short_win += [0.5];
+            [ #{ levels: levels, sl_pct: params.sl_pct,
+                long_win: long_win, short_win: short_win } ]
+        }
+    "#;
+
+    /// Settings như production (`strategy = "rhai"`) nhưng trỏ script strategy
+    /// tối giản — `feed()` tự lấy script của node khi chạy thật.
+    fn scripted_settings() -> Settings {
+        Settings {
+            script: Some(crate::ScriptSource::Inline(TEST_REBUILD.into())),
+            ..Settings::from_map(&cfg_map())
+        }
+    }
+
     fn cfg_map() -> Map {
         let mut m = Map::new();
         m.insert("resolution".into(), Dynamic::from("1m"));
@@ -702,7 +778,7 @@ mod tests {
             })
             .collect();
         let state = State::from_observations(&Array::new());
-        let settings = Settings::from_map(&cfg_map());
+        let settings = scripted_settings();
         let out = feed(
             &data,
             &state,
@@ -730,7 +806,7 @@ mod tests {
             })
             .collect();
         let state = State::from_observations(&Array::new());
-        let settings = Settings::from_map(&cfg_map());
+        let settings = scripted_settings();
         let out = feed(&data, &state, *data.last().expect("có nến"), &settings, "BTCUSDT").await;
 
         let orders: Vec<&Observation> = out
@@ -778,7 +854,7 @@ mod tests {
         let graph = settings.dag().expect("graph deserialize được");
         assert_eq!(graph.num_features().expect("num_features"), 1);
         // Params phải lấy từ `Graph::init()` (weights vị trí 6+), không phải
-        // layout của GridStrategy.
+        // layout dùng chung với strategy script / DAG.
         let params = settings.params();
         assert_eq!(params.len(), 6 + 1 * 8 + 8);
         assert!(params[1] > 0.0, "base_capital phải > 0: {params:?}");
@@ -835,7 +911,7 @@ mod tests {
                 CandleStick::new(1_700_000_000 + i * 60, p, p + 0.5, p - 0.5, p, 10.0)
             })
             .collect();
-        let settings = Settings::from_map(&cfg_map());
+        let settings = scripted_settings();
         let first = feed(
             &data,
             &State::from_observations(&Array::new()),

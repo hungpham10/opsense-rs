@@ -6,7 +6,6 @@ mod grid;
 mod portfolio;
 mod score;
 mod session;
-mod strategies;
 mod tick;
 
 pub use calendar::{CryptoCalendar, ForexCalendar, StockCalendar};
@@ -21,6 +20,10 @@ pub use fee::{
 };
 pub use grid::TradingGrid;
 
+/// Plan dạng dữ liệu cho strategy viết bằng script (Rhai) — xem [`plan`].
+#[cfg(feature = "json")]
+pub mod plan;
+
 #[cfg(feature = "graph")]
 mod graph;
 
@@ -29,9 +32,6 @@ pub use portfolio::{
 };
 pub use score::{NetPnlScore, SharpeScore};
 pub use session::Session;
-
-#[cfg(feature = "json")]
-pub use strategies::{GridStrategy, VolatilityAdaptiveGridStrategy};
 
 #[cfg(feature = "graph")]
 pub use graph::{Graph, In, Node, ops::*};

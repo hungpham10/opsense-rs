@@ -26,12 +26,14 @@ mod orders;
 mod rhai_collect;
 mod runtime;
 mod station;
+mod strategy;
 mod time_fns;
 mod tools;
 mod transform;
 mod ts_ops;
 
 pub use runtime::{ScriptSource, call_process, call_process_with};
+pub use strategy::ScriptStrategy;
 pub use transform::RhaiTransform;
 
 /// Re-export of the `vector` runtime under `crate::vector::runtime`.

@@ -31,8 +31,9 @@ use crate::{Extractor, FetchFn, ParamFn, Strategy};
 // ── Params layout ──────────────────────────────────────────────────
 //
 // `params` là vector phẳng mà `Portfolio` truyền cho `Strategy::rebuild` (và
-// `SGD` tối ưu trên đó). Index 0..5 là **cùng layout** với `GridStrategy::init`
-// để `Portfolio` dùng chung, từ 6 trở đi là trọng số + bias của DAG.
+// `SGD` tối ưu trên đó). Index 0..5 là **cùng layout** với strategy script
+// (`ScriptStrategy`) để `Portfolio` dùng chung, từ 6 trở đi là trọng số + bias
+// của DAG.
 
 /// `kelly_fraction` cho `Portfolio::evaluate`.
 pub const P_KELLY: usize = 0;
@@ -547,7 +548,7 @@ impl Graph {
     /// Decode ONNX outputs → TradingGrid.
     ///
     /// `grid_levels` / `sl_pct` đến từ `params` (`P_GRID_LEVELS`, `P_SL_PCT`) để
-    /// cùng một DAG vẫn cấu hình được như `GridStrategy` (SGD tối ưu chung
+    /// cùng một DAG vẫn cấu hình được như strategy script (SGD tối ưu chung
     /// không gian params).
     fn setup(
         last_close: f64,

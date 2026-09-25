@@ -46,3 +46,18 @@ pub fn register_all(eng: &mut rhai::Engine, attributes: std::collections::BTreeM
     // dựng từ observation order trong station (xem `orders`).
     crate::orders::register(eng);
 }
+
+/// Binding cho engine **strategy** (script `fn rebuild`, xem
+/// [`crate::strategy`]): cùng bộ phân tích như `process` nhưng cắt bỏ phần
+/// có state.
+///
+/// Không đăng ký `portfolio_feed`/`station`: strategy chỉ *dựng plan* từ nến
+/// kernel đưa vào, không được gọi ngược vào kernel (nếu không là đệ quy
+/// `rebuild` → `portfolio_feed` → `rebuild` …).
+pub(crate) fn register_strategy_tools(eng: &mut rhai::Engine) {
+    AnalysisGrid::register(eng);
+    TransitionAnalysis::register(eng);
+    crate::time_fns::register(eng);
+    crate::ts_ops::register(eng);
+    crate::attributes::register(eng, std::collections::BTreeMap::new());
+}

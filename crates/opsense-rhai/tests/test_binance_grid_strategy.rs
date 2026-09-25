@@ -144,7 +144,7 @@ fn trading_params() -> BTreeMap<String, Value> {
     m.insert("strategy".into(), Value::from("grid"));
     m.insert("grid_levels".into(), Value::from(5));
     m.insert("sl_pct".into(), Value::from(0.008));
-    m.insert("smoothing_k".into(), Value::from(10.0));
+    m.insert("grid_min_trades".into(), Value::from(3));
     m.insert("lookback_secs".into(), Value::from(172_800));
     m.insert("review_interval_secs".into(), Value::from(900));
     m.insert("trading_candle_secs".into(), Value::from(60));

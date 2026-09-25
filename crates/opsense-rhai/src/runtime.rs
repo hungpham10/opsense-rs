@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 /// Where a node's script comes from.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ScriptSource {
     /// Inline script declared in the pipeline config table.
     Inline(String),
@@ -92,7 +92,21 @@ fn script_text(script: &ScriptSource) -> Result<String, String> {
 }
 
 /// Compile (or reuse the cached) AST for `script`.
-fn acquire(script: &ScriptSource) -> Result<Arc<rhai::AST>, String> {
+/// Compile-once cache: lấy AST theo fingerprint (content hash cho inline,
+/// mtime cho file). Dùng chung cho `process` và strategy `rebuild` — AST không
+/// phụ thuộc engine nên một script dùng được ở cả hai.
+pub(crate) fn acquire(script: &ScriptSource) -> Result<Arc<rhai::AST>, String> {
+    let ast = acquire_any(script)?;
+    // A script without `process` fails at first call with a clear message;
+    // catch it here so the error names the contract instead of the call site.
+    if ast.iter_functions().all(|f| f.name != "process") {
+        return Err("script must define `fn process(observations)`".to_string());
+    }
+    Ok(ast)
+}
+
+/// [`acquire`] nhưng không đòi `fn process` — cho script chỉ cần `fn rebuild`.
+pub(crate) fn acquire_any(script: &ScriptSource) -> Result<Arc<rhai::AST>, String> {
     let key = script.cache_key();
     let fingerprint = source_fingerprint(script)?;
 
@@ -117,9 +131,6 @@ fn acquire(script: &ScriptSource) -> Result<Arc<rhai::AST>, String> {
     );
     // A script without `process` fails at first call with a clear message;
     // catch it here so the error names the contract instead of the call site.
-    if ast.iter_functions().all(|f| f.name != "process") {
-        return Err("script must define `fn process(observations)`".to_string());
-    }
     let compiled = CompiledScript { fingerprint, ast };
     let ast = compiled.ast.clone();
     cache.insert(key, compiled);
@@ -139,6 +150,14 @@ fn acquire(script: &ScriptSource) -> Result<Arc<rhai::AST>, String> {
 /// engine right before evaluation; each blocking thread runs one script at a
 /// time, so those installs never race.
 fn thread_engine() -> std::cell::RefCell<rhai::Engine> {
+    std::cell::RefCell::new(new_sandbox_engine(true))
+}
+
+/// Engine sandbox cho script. `full = true` cài **mọi** binding script-facing
+/// (`tools::register_all`, gồm cả `portfolio_feed`); `full = false` chỉ cài
+/// binding read-only dùng được cho strategy (xem [`crate::strategy`]) — không
+/// có `portfolio_feed` nên strategy không thể gọi ngược vào kernel (đệ quy).
+pub(crate) fn new_sandbox_engine(full: bool) -> rhai::Engine {
     let mut eng = rhai::Engine::new();
     eng.set_max_operations(1_000_000);
     eng.set_max_array_size(100_000);
@@ -166,19 +185,45 @@ fn thread_engine() -> std::cell::RefCell<rhai::Engine> {
     });
 
     // Every script-facing native function lives in one place: `tools`.
-    crate::tools::register_all(&mut eng, std::collections::BTreeMap::new());
-    std::cell::RefCell::new(eng)
+    if full {
+        crate::tools::register_all(&mut eng, std::collections::BTreeMap::new());
+    } else {
+        crate::tools::register_strategy_tools(&mut eng);
+    }
+    eng
 }
 
 thread_local! {
     static ENGINE: std::cell::RefCell<rhai::Engine> = thread_engine();
+
+    /// Script đang được `call_fn` trên thread này.
+    ///
+    /// `portfolio_feed` cần biết chính script nào đang chạy để dựng
+    /// `ScriptStrategy` từ cùng file đó (`strategy = "rhai"` = "dùng luôn
+    /// `fn rebuild` trong script của node") — không bắt user khai lại đường dẫn
+    /// script trong params, nên hai bản không thể lệch nhau.
+    static CURRENT_SCRIPT: std::cell::RefCell<Option<ScriptSource>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Script hiện tại trên thread đang chạy (nếu đang trong `call_fn`).
+pub(crate) fn current_script() -> Option<ScriptSource> {
+    CURRENT_SCRIPT.with(|c| c.borrow().clone())
+}
+
+/// Đặt script hiện tại trong `f`, khôi phục lại sau đó.
+fn with_current_script<T>(script: &ScriptSource, f: impl FnOnce() -> T) -> T {
+    let prev = CURRENT_SCRIPT.with(|c| c.replace(Some(script.clone())));
+    let out = f();
+    CURRENT_SCRIPT.with(|c| *c.borrow_mut() = prev);
+    out
 }
 
 /// Wall-clock budget for any single `process` call, overridable via
 /// `OPSENSE_RHAI_TIMEOUT_SECS` (default 30). Enforced cooperatively by the
 /// engine's `on_progress` callback (which aborts the script) and as a
 /// backstop by `tokio::time::timeout` around the `spawn_blocking` join.
-fn rhai_timeout() -> std::time::Duration {
+pub(crate) fn rhai_timeout() -> std::time::Duration {
     let secs: u64 = std::env::var("OPSENSE_RHAI_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -297,8 +342,10 @@ pub async fn call_process_with(
             if let Some(ctx) = &ctx {
                 crate::station::register(eng, ctx.clone(), handle.clone());
             }
-            eng.call_fn(&mut scope, &ast, "process", (arg,))
-                .map_err(|e| format!("script error: {e}"))
+            with_current_script(&script, || {
+                eng.call_fn(&mut scope, &ast, "process", (arg,))
+                    .map_err(|e| format!("script error: {e}"))
+            })
         })?;
 
         let value: serde_json::Value =

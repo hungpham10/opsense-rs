@@ -148,7 +148,7 @@ fn trading_cfg() {
     if is_def_var("param_calendar") && type_of(param_calendar) != "()" {
         calendar = param_calendar;
     }
-    let strategy = "grid";
+    let strategy = "rhai";
     if is_def_var("param_strategy") && type_of(param_strategy) != "()" {
         strategy = param_strategy;
     }
@@ -160,9 +160,17 @@ fn trading_cfg() {
     if is_def_var("param_sl_pct") && type_of(param_sl_pct) != "()" {
         sl_pct = param_sl_pct.to_float();
     }
-    let smoothing_k = 10.0;
-    if is_def_var("param_smoothing_k") && type_of(param_smoothing_k) != "()" {
-        smoothing_k = param_smoothing_k.to_float();
+    let grid_min_trades = 3;
+    if is_def_var("param_grid_min_trades") && type_of(param_grid_min_trades) != "()" {
+        grid_min_trades = param_grid_min_trades.to_int();
+    }
+    let grid_weight_sharpness = 4.0;
+    if is_def_var("param_grid_weight_sharpness") && type_of(param_grid_weight_sharpness) != "()" {
+        grid_weight_sharpness = param_grid_weight_sharpness.to_float();
+    }
+    let grid_max_bit = 20;
+    if is_def_var("param_grid_max_bit") && type_of(param_grid_max_bit) != "()" {
+        grid_max_bit = param_grid_max_bit.to_int();
     }
     let lookback_secs = 2 * 24 * 3600;
     if is_def_var("param_lookback_secs") && type_of(param_lookback_secs) != "()" {
@@ -199,7 +207,9 @@ fn trading_cfg() {
         strategy: strategy,
         grid_levels: grid_levels,
         sl_pct: sl_pct,
-        smoothing_k: smoothing_k,
+        grid_min_trades: grid_min_trades,
+        grid_weight_sharpness: grid_weight_sharpness,
+        grid_max_bit: grid_max_bit,
         lookback_secs: lookback_secs,
         review_interval_secs: review_interval_secs,
         trading_candle_secs: trading_candle_secs,
@@ -216,6 +226,136 @@ fn trading_cfg() {
         cfg.dag = param_dag;
     }
     cfg
+}
+
+// ── Strategy: `fn rebuild` — dựng plan lưới lệnh ───────────────────────────
+//
+// Kernel (`Strategy::rebuild`) gọi hàm này mỗi `review_interval_secs`:
+// nhận nến do kernel fetch, trả plan dạng dữ liệu. Cùng ý `Graph` (DAG) —
+// chiến lược là **genome khai báo được**, không phải class Rust phải sửa rồi
+// compile lại. Xem `opsense-rhai::ScriptStrategy` + `opsense-qlib::plan`.
+//
+//   candles = [#{ t, o, h, l, c, v }, …]   nến trong cửa sổ lookback
+//   prev    = [#{ long_win, long_lost, short_win, short_lost }, …]
+//            thống kê lệnh đã đóng của plan cũ (kernel giữ, không mất khi
+//            script dựng lại plan)
+//   params  = #{ grid_levels, sl_pct, lookback_secs, min_trades,
+//                weight_sharpness, max_bit, level_edge_amp, … }
+//
+// Trả: một plan cho **mỗi** ô của AnalysisGrid (kernel ghép mỗi plan thành một
+// lưới lệnh riêng trong khoảng giá của ô đó).
+//
+// Quy trình: sieve tìm số ô (AnalysisGrid) → xác suất chuyển trạng thái
+// (TransitionAnalysis) → win-prob mô hình theo ô, lệch dần theo bậc (bậc ngoài
+// gần giá hiện tại thì drift càng mạnh) → nếu đủ lệnh đã đóng thì tin tỉ lệ
+// thắng thực tế.
+
+fn rebuild(candles, prev, params) {
+    let levels = params.grid_levels.to_int();
+    let max_bit = params.max_bit.to_int();
+    let min_trades = params.min_trades.to_int();
+    let amp = params.level_edge_amp.to_float();
+    let sharpness = params.weight_sharpness.to_float();
+
+    // Khoảng giá quan sát + interval trung vị (transition cần step thời gian).
+    let lo = candles[0].l;
+    let hi = candles[0].h;
+    let closes = [];
+    let points = [];
+    for k in candles {
+        if k.l < lo { lo = k.l; }
+        if k.h > hi { hi = k.h; }
+        closes += [k.c];
+        points += [#{ ts: k.t, value: k.c }];
+    }
+    if candles.len() < 2 || hi <= lo { return []; }
+
+    let interval = median_gap(candles);
+
+    let g = grid_fit_values(closes, lo, hi, max_bit);
+    if type_of(g) == "()" { return []; }
+    let t = transition_analysis(g, points, interval);
+    if type_of(t) == "()" { return []; }
+
+    let ups = up_probabilities(t);
+    let downs = down_probabilities(t);
+    let step = grid_step(g);
+    let n_cells = num_cells(g);
+
+    let plans = [];
+    for cell in 0..n_cells {
+        let cell_lo = lo + cell * step;
+        let up = pick(ups, cell);
+        let down = pick(downs, cell);
+        let total = up + down;
+        // Drift = (up - down) / (up + down) trong [-1, 1].
+        let drift = if total > 0.0 { (up - down) / total } else { 0.0 };
+
+        // Lưới lệnh trong ô: K bậc đều, level đầu = đáy ô.
+        let lv = [];
+        for j in 0..levels { lv += [cell_lo + step * j / levels]; }
+        let long_win = [];
+        let short_win = [];
+        let stats = if cell < prev.len() { prev[cell] } else { #{ } };
+
+        for j in 0..levels {
+            // t = 0 ở bậc dưới, 1 ở bậc trên: bậc càng xa giá hiện tại càng
+            // nhiều drift ⇒ long khó thắng hơn, short dễ thắng hơn (và ngược lại).
+            let x = j / (levels - 1);
+            let model_long = clamp01(0.5 + drift + (1.0 - x) * amp);
+            let model_short = clamp01(0.5 - drift + x * amp);
+
+            let lw = wins(stats, "long_win", j);
+            let ll = losses(stats, "long_lost", j);
+            let sw = wins(stats, "short_win", j);
+            let sl = losses(stats, "short_lost", j);
+
+            // Đủ mẫu thì tin thực tế, chưa đủ thì tin mô hình.
+            long_win += [if lw + ll >= min_trades { clamp01(lw / (lw + ll)) } else { model_long }];
+            short_win += [if sw + sl >= min_trades { clamp01(sw / (sw + sl)) } else { model_short }];
+        }
+
+        plans += [#{ levels: lv,
+                     sl_pct: params.sl_pct,
+                     weight_sharpness: sharpness,
+                     long_win: long_win,
+                     short_win: short_win }];
+    }
+    plans
+}
+
+/// Median gap (giây) giữa các nến — dùng làm interval cho transition.
+fn median_gap(candles) {
+    let gaps = [];
+    for i in 1..candles.len() { gaps += [candles[i].t - candles[i - 1].t]; }
+    if gaps.len() == 0 { return 60; }
+    gaps.sort();
+    gaps[gaps.len() / 2]
+}
+
+/// Phần tử thứ `i` của mảng, thiếu → 0.0.
+fn pick(arr, i) {
+    if i < arr.len() { arr[i] } else { 0.0 }
+}
+
+/// Số lần thắng ở bậc `j` (thiếu → 0).
+fn wins(stats, key, j) {
+    if type_of(stats) == "()" { return 0; }
+    if type_of(stats[key]) == "()" { return 0; }
+    if j >= stats[key].len() { return 0; }
+    stats[key][j]
+}
+
+/// Số lần thua ở bậc `j` (thiếu → 0).
+fn losses(stats, key, j) {
+    if type_of(stats) == "()" { return 0; }
+    if type_of(stats[key]) == "()" { return 0; }
+    if j >= stats[key].len() { return 0; }
+    stats[key][j]
+}
+
+fn clamp01(x) {
+    if x < 0.25 { 0.25 } else if x > 0.75 { 0.75 } else { x }
 }
 
 // ── tick: gộp trade price vào candle bucket ────────────────────────────────

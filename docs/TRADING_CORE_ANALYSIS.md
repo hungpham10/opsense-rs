@@ -26,13 +26,19 @@ These are the self-contained, pure-computation types and functions in `opsense-q
 | `Report` | `portfolio.rs` | Performance metrics (win_rate, sharpe, sortino, max_drawdown) | Pure computation |
 | `Tick` | `tick.rs` | Raw market tick data | Pure data |
 
-### 1.2 Trading Strategies (`opsense-qlib/src/strategies/`)
+### 1.2 Trading Strategies
 
-| Strategy | File | Trait Impl | Description |
-|----------|------|------------|-------------|
-| `GridStrategy` | `strategies/grid.rs` | `Strategy` | Fixed grid with Bayesian win-probability blending |
-| `VolatilityAdaptiveGridStrategy` | `strategies/volatility_adaptive_grid.rs` | `Strategy` | ATR-based dynamic grid sizing |
-| `Graph` | `graph.rs` | `Strategy` | ONNX genotype DAG — ML neuroevolution path |
+Không còn `opsense-qlib/src/strategies/` — chiến lược là **genome khai báo
+được**, không phải class Rust phải sửa rồi recompile:
+
+| Strategy | Where | Trait Impl | Description |
+|----------|-------|------------|-------------|
+| `ScriptStrategy` | `opsense-rhai/src/strategy.rs` | `Strategy` | `fn rebuild(candles, prev, params)` trong script Rhai (strategy = "rhai") |
+| `Graph` | `opsense-qlib/src/graph/` | `Strategy` | ONNX genotype DAG — ML neuroevolution path (strategy = "dag") |
+
+Script strategy trả plan dạng dữ liệu (`opsense_qlib::plan::GridPlan`), kernel
+dựng lại `TradingGrid` và chép bộ đếm win/lost của plan cũ — nên đổi chiến
+lược = sửa file `.rhai`.
 
 **Strategy trait signature** (from `opsense-qlib/src/lib.rs:128`):
 ```rust
@@ -134,8 +140,8 @@ These modules require I/O, network, storage, or external services. They are the 
 | `opsense-mlib/src/bloom/` | Bloom filters | Remove unless needed |
 | `opsense-mlib/src/radix/` | Radix tree | Remove unless needed |
 | `opsense-mlib/src/sgd.rs` | SGD optimizer | Keep — used by Portfolio::optimize() |
-| `opsense-mlib/src/transition.rs` | Transition analysis | Keep — used by GridStrategy |
-| `opsense-mlib/src/grid.rs` | AnalysisGrid | Keep — used by trading strategies |
+| `opsense-mlib/src/transition.rs` | Transition analysis | Keep — used by script `fn rebuild` |
+| `opsense-mlib/src/grid.rs` | AnalysisGrid | Keep — used by script `fn rebuild` |
 
 ### 2.5 Pipeline Components (opsense-components)
 
@@ -186,9 +192,8 @@ The **cleanest boundary** between "build" and "integrate" is:
 │  Order ────────┤                                                │
 │  Report ───────┤── Portfolio::forward() ──┐                      │
 │                │                          │                      │
-│  GridStrategy ─┤── Strategy::rebuild() ───┤                      │
-│  VAGStrategy ──┤                          │                      │
-│  Graph (ONNX) ─┤                          │                      │
+│  ScriptStrategy ┤─ Strategy::rebuild() ───┤                      │
+│  Graph (ONNX) ──┤                          │                      │
 │                │                          │                      │
 │  Fee ──────────┤                          │                      │
 │  Calendar ─────┤                          │                      │
@@ -284,7 +289,7 @@ The `backtest_executor` component is already typetag-registered in `opsense-qlib
 ```toml
 [[pipeline.components]]
 type = "backtest_executor"
-config = { strategy = "GridStrategy", grid_levels = 10, sl_pct = 0.02 }
+config = { strategy = "rhai", grid_levels = 10, sl_pct = 0.02 }
 ```
 
 ### 5.3 What Needs to Change
@@ -305,7 +310,7 @@ To make opsense primarily a trading system:
 | `opsense-qlib/src/candle.rs` | **Build** | ✅ Keep | None |
 | `opsense-qlib/src/grid.rs` | **Build** | ✅ Keep | None |
 | `opsense-qlib/src/portfolio.rs` (core methods) | **Build** | ✅ Keep | None |
-| `opsense-qlib/src/strategies/` | **Build** | ✅ Keep | None |
+| `opsense-rhai/src/strategy.rs` (ScriptStrategy) | **Build** | ✅ Keep | None — thay `opsense-qlib/src/strategies/` đã xoá |
 | `opsense-qlib/src/models/` | **Build** | ✅ Keep | None |
 | `opsense-qlib/src/fee.rs` | **Build** | ✅ Keep | None |
 | `opsense-qlib/src/calendar.rs` | **Build** | ✅ Keep | None |
@@ -341,7 +346,7 @@ The following queries were executed against the semantic graph to produce this a
 |-------|------|--------|
 | Symbol search: Portfolio | `codegraph_search_symbol` | 3 results (struct + impl + module) |
 | Symbol search: TradingGrid | `codegraph_search_symbol` | 3 results (struct + impl + Display) |
-| Symbol search: GridStrategy | `codegraph_search_symbol` | 5 results (struct + impl + Strategy) |
+| Symbol search: ScriptStrategy | `codegraph_search_symbol` | struct + impl + Strategy |
 | Symbol search: CandleStick | `codegraph_search_symbol` | 9 results (struct + impl + DataLoader) |
 | Symbol search: forward (method) | `codegraph_search_symbol` | 2 results (forward + test) |
 | Symbol search: evaluate_grid_entries | `codegraph_search_symbol` | 1 result |
@@ -349,7 +354,7 @@ The following queries were executed against the semantic graph to produce this a
 | Symbol search: calculate_order_size | `codegraph_search_symbol` | 3 results |
 | Class detail: TradingGrid | `codegraph_graphcode_class` | 39 methods, all pure computation |
 | Class detail: Portfolio | `codegraph_graphcode_class` | 18 methods (core + integrate) |
-| Class detail: GridStrategy | `codegraph_graphcode_class` | 8 methods (Strategy impl) |
+| Class detail: ScriptStrategy | `codegraph_graphcode_class` | methods (Strategy impl) |
 | Class detail: Graph | `codegraph_graphcode_class` | 20 methods (ONNX + Strategy) |
 | Class detail: DataLoader trait | `codegraph_graphcode_class` | Trait interface at lib.rs:99 |
 | Class detail: Strategy trait | `codegraph_graphcode_class` | Trait interface at lib.rs:128 |

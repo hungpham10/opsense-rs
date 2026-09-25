@@ -1641,7 +1641,6 @@ mod tests {
 
     use crate::fee::SimpleFixedFee;
     use crate::score::SharpeScore;
-    use crate::strategies::GridStrategy;
     // `Future`/`Pin`/`LoaderFuture` đã có ở scope cha (qua `use super::*`).
 
     /// Price series 1m (openTime giây, cách nhau 60s), dùng cho cả kernel lẫn
@@ -1672,11 +1671,67 @@ mod tests {
         }
     }
 
+    /// Strategy tối giản cho test kernel: một lưới phẳng bộc kín khoảng
+    /// `[min low, max high]` của dữ liệu fetch được.
+    ///
+    /// Test kernel cần *một* strategy thật (để plan có hiệu lực, có lệnh để
+    /// kiểm tra settlement/idempotency), không cần logic sieve của
+    /// `AnalysisGrid` — nên ở lại đây thay vì kéo cả grid strategy vào crate
+    /// này. Strategy viết bằng script (Rhai) là đường production: xem
+    /// `opsense-rhai::ScriptStrategy`.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct FlatStrategy {
+        levels: usize,
+        sl_pct: f64,
+        review_interval_secs: u64,
+    }
+
+    // Trait `Strategy` có typetag khi bật feature `json` (workspace build bật vì
+    // opsense-rhai dùng) → impl test cũng phải có 2 method sinh ra.
+    #[typetag::serde(name = "test_flat")]
+    #[async_trait::async_trait]
+    impl Strategy for FlatStrategy {
+        fn init(&self) -> Vec<f64> {
+            vec![0.25, 100_000.0, self.levels as f64, self.sl_pct, 2.0 * 24.0 * 3600.0]
+        }
+
+        async fn next(&self, current: u64) -> u64 {
+            current + self.review_interval_secs
+        }
+
+        async fn rebuild(
+            &self,
+            current_ts: u64,
+            _grids: &[TradingGrid],
+            fetch: FetchFn<'_>,
+            param: ParamFn<'_>,
+        ) -> Result<Vec<TradingGrid>, Error> {
+            let lookback = param(4) as u64;
+            let data = fetch(current_ts.saturating_sub(lookback), current_ts).await?;
+            if data.len() < 10 {
+                return Err(Error::other("not enough analysis data"));
+            }
+            let min = data.iter().map(|c| c.l).fold(f64::INFINITY, f64::min);
+            let max = data.iter().map(|c| c.h).fold(f64::NEG_INFINITY, f64::max);
+            let Some(g) = TradingGrid::new(self.levels, min, max) else {
+                return Err(Error::other("price range hợp lệ?"));
+            };
+            Ok(vec![g.with_sl_pct(param(3))])
+        }
+    }
+
+    fn flat_strategy() -> Arc<dyn Strategy + Sync + Send> {
+        Arc::new(FlatStrategy {
+            levels: 5,
+            sl_pct: 0.008,
+            review_interval_secs: 900,
+        })
+    }
+
     fn portfolio(config: PortfolioConfig) -> Portfolio {
-        let strategy = Arc::new(GridStrategy::new(5, 0.008, 10.0, 2 * 24 * 3600, 900, 300));
         Portfolio::new(
             Arc::new(NoLoader),
-            strategy,
+            flat_strategy(),
             Arc::new(SimpleFixedFee::new(0.0005)),
             Arc::new(SharpeScore),
             Arc::new(crate::calendar::CryptoCalendar),
@@ -1957,7 +2012,7 @@ mod tests {
             data,
         });
 
-        let strategy = Arc::new(GridStrategy::new(5, 0.008, 10.0, 2 * 24 * 3600, 900, 300));
+        let strategy = flat_strategy();
         let config = PortfolioConfig {
             cache_enabled: false,
             ..grid_config(0)

@@ -108,10 +108,17 @@ script_path = "strategies/binance/grid.rhai"
    # Các tham số dưới là tham số engine cho nhánh đó — đổi ở đây, không sửa script.
    mode = "analysis"
    calendar = "crypto"
-   strategy = "grid"
+   # `strategy = "rhai"` (mặc định): plan lưới lệnh do chính script này dựng ở
+   # `fn rebuild(candles, prev, params)` — đổi chiến lược = sửa file .rhai, không
+   # phải viết class Rust rồi recompile (xem `opsense-rhai::ScriptStrategy`).
+   strategy = "rhai"
    grid_levels = 5
    sl_pct = 0.008
-   smoothing_k = 10.0
+   # Knob cho `fn rebuild`: số lệnh đóng tối thiểu trước khi tin tỉ lệ thắng
+   # thực tế, độ nhọn phân bổ vốn, sieve max_bit.
+   grid_min_trades = 3
+   grid_weight_sharpness = 4.0
+   grid_max_bit = 20
    lookback_secs = 172800
    review_interval_secs = 900
    trading_candle_secs = 60
@@ -121,7 +128,7 @@ script_path = "strategies/binance/grid.rhai"
    # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.
    settlement_candles = 0
 
-   # `strategy = "dag"` thay "grid": dùng DAG model build riêng (Python) làm
+   # `strategy = "dag"` thay "rhai": dùng DAG model build riêng (Python) làm
    # predictor — `Graph` tự emit ONNX từ `ops` + `nodes` rồi chạy bằng tract,
    # đầu ra map thành win-prob cho TradingGrid. Đây là **cầu nối** giữa model
    # ngoài và kernel, nên không cần loader .onnx riêng (file .onnx chỉ là chỗ
