@@ -63,21 +63,22 @@ impl Version {
     }
 }
 
-/// Một bản ghi cụm kèm phiên bản.
+/// Một bản ghi cụm kèm phiên bản — chi tiết triển khai, không public.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Entry {
-    pub cluster: Cluster,
-    pub version: Version,
+struct Entry {
+    cluster: Cluster,
+    version: Version,
 }
 
-/// Toàn bộ trạng thái phân cụm mà một node biết.
+/// Toàn bộ trạng thái phân cụm mà một node biết — đây là **payload trao đổi qua
+/// API** (`GET/POST /api/cluster/v1/internal/state`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClusterState {
     /// Lamport lớn nhất từng thấy — tăng khi áp dụng state của node khác.
     pub lamport: u64,
     /// Cụm theo id, kèm phiên bản để hợp nhất LWW.
     #[serde(default)]
-    pub clusters: BTreeMap<String, Entry>,
+    clusters: BTreeMap<String, Entry>,
 }
 
 impl ClusterState {
@@ -90,6 +91,25 @@ impl ClusterState {
     #[must_use]
     pub fn cluster(&self, id: &str) -> Option<&Cluster> {
         self.clusters.get(id).map(|e| &e.cluster)
+    }
+
+    /// Sửa cụm tại chỗ (dùng khi tăng `epoch` khi lên master).
+    pub fn cluster_mut(&mut self, id: &str) -> Option<&mut Cluster> {
+        self.clusters.get_mut(id).map(|e| &mut e.cluster)
+    }
+
+    /// Danh sách cụm.
+    #[must_use]
+    pub fn iter(&self) -> impl Iterator<Item = &Cluster> {
+        self.clusters.values().map(|e| &e.cluster)
+    }
+
+    /// **Nội dung** các cụm, bỏ qua `lamport`/version — dùng để so sánh "hai node
+    /// đã hội tử chưa" mà không vướng đồng hồ Lamport (vốn có thể lệch nhau
+    /// khi tới đồng hồ khác nhau).
+    #[must_use]
+    pub fn snapshot(&self) -> BTreeMap<String, Cluster> {
+        self.clusters.iter().map(|(id, e)| (id.clone(), e.cluster.clone())).collect()
     }
 
     /// Ghi đè cụm ở phía cục bộ: tăng lamport của mình rồi đặt bản ghi.
