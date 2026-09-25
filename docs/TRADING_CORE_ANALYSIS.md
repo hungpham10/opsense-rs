@@ -3,6 +3,21 @@
 > Generated via MCP codegraph semantic graph analysis
 > Date: 2026-09-16
 > Status: Document & analysis only — no code changes
+>
+> **Cập nhật 2026-09-25:** đây là **ảnh chụp phân tích tại một thời điểm**; phần
+> "tích hợp" và các khuyến nghị ở đây đã được thực hiện theo hướng khác:
+> - Kernel trading realtime **đã có**: `Portfolio::evaluate` + `Session`, dùng chung
+>   cho backtest và realtime; `StreamingPortfolio`/`QlibEngine` đã bị gỡ.
+> - Lệnh + cursor T+N là **observation trong station** nên sống qua restart
+>   (`labels.kind = "trading_step"`).
+> - Chiến lược **không còn là class Rust**: `GridStrategy`/
+>   `VolatilityAdaptiveGridStrategy` đã xoá; thay bằng `ScriptStrategy`
+>   (`fn rebuild` trong `.rhai`) và `Graph` (DAG genome → ONNX).
+> - Script strategy gọi kernel qua binding `portfolio_feed`; state do kernel tái
+>   dựng từ station, không giữ trong RAM.
+>
+> Mô tả đang chạy: [`architecture.md`](./architecture.md) §4–§5 và
+> [`GUIDE.md`](./GUIDE.md) §8.
 
 ## Overview
 
