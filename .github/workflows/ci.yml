@@ -115,7 +115,10 @@ jobs:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
           NEXTEST_EXPERIMENTAL_LIBTEST_HARNESS: "1"
-        run: cargo nextest run --workspace --locked --cargo-profile release --jobs $(nproc)
+        # `opsense-mlib/cluster` bật module mesh (logic phân cụm/election).
+        # Feature này mặc định tắt nên phải bật ở đây, nếu không test mesh sẽ
+        # bị nextest bỏ qua âm thầm.
+        run: cargo nextest run --workspace --locked --cargo-profile release --features opsense-mlib/cluster --jobs $(nproc)
 
   # Chiến lược script (Rhai) + trading realtime — **không** cần compose/network.
   #

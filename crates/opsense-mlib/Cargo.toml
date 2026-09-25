@@ -16,6 +16,9 @@ rhai = ["dep:rhai"]
 parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:object_store"]
 sqlite = ["dep:sqlx"]
 redis = ["dep:redis"]
+# Cluster/membership state + election (pure logic, no I/O — transport lives in
+# `opsense::cluster`). Off by default so this dependency-light crate stays lean.
+cluster = []
 
 [dependencies]
 arrow-array = { workspace = true, optional = true }
@@ -52,4 +55,10 @@ rustls = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+# Test mesh cần feature `cluster`; khai `required-features` để build không bật
+# feature vẫn xanh thay vì hỏng vì không tìm thấy module.
+[[test]]
+name = "mesh_convergence"
+required-features = ["cluster"]
 

@@ -38,3 +38,7 @@ pub mod vector;
 
 #[cfg(feature = "rhai")]
 pub mod script;
+
+// Cluster membership / state / election — logic thuần cho mesh nhiều node.
+#[cfg(feature = "cluster")]
+pub mod mesh;
