@@ -34,6 +34,7 @@ opsense get-param grid /params/sl_pct
 opsense set-param grid /params/sl_pct 0.02   # sửa 1 param, không cần gửi cả pipeline
 opsense query grid --signal order            # lọc server-side, có limit
 opsense orders grid --status open           # lệnh đang mở
+opsense query opsense-audit --label-kind config_edit   # ai đổi gì, lúc nào
 ```
 
 `opsense init [path] [--force]`:
@@ -69,6 +70,16 @@ MCP là **client mỏng** của `opsense serve`: mỗi tool = 1 GraphQL round-tr
 > Sửa cấu hình: `opsense_get_config` (đọc) → `opsense_set_param` (sửa một
 > chỗ). Chỉ khi cần thêm/xoá cả node mới dùng `opsense_reload`; patch hỏng thì
 > server báo lỗi và **runtime giữ nguyên** (deserialize trước, reload sau).
+
+> **Mọi lần sửa đều được ghi lại** vào station `opsense-audit`
+> (`labels.kind = "config_edit"`, kèm `node`/`path`/`from`/`to`) — đọc lại bằng
+> chính đường query của mọi state khác:
+> `opsense query opsense-audit --label-kind config_edit`.
+> Sửa qua `reload` cũng được ghi (nhãn `kind = "config_reload"`).
+
+> Lưu ý: patch/reload chỉ có tác dụng trong RAM của tiến trình đang chạy;
+> `config.toml` **không** tự cập nhật (xem G5 của plan MCP/CLI) nên restart sẽ
+> trở về cấu hình trong file.
 
 ### Lưu trữ & con trỏ qua restart
 

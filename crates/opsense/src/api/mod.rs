@@ -21,13 +21,17 @@ use headers::Header;
 use http::{HeaderName, HeaderValue};
 use tokio::sync::RwLock;
 
-use opsense_core::{Config, Context, StationKind};
+use opsense_core::{Config, Context, Observation, StationKind};
 use opsense_mlib::vector::components::{clock, null};
 use opsense_mlib::vector::runtime::{Component, Event, Runtime};
 use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
 
 use crate::api::oauth::OAuthMetrics;
+
+/// Station chứa lịch sử thay đổi cấu hình (`labels.kind = "config_edit"`).
+/// Đọc lại bằng `opsense query opsense-audit --label-kind config_edit`.
+pub const AUDIT_STATION: &str = "opsense-audit";
 
 #[derive(Debug)]
 pub struct XTenantId(i64);
@@ -269,5 +273,59 @@ impl AppState {
                 .filter(|c| c.get("id").and_then(serde_json::Value::as_str) == Some(id))
                 .collect(),
         }
+    }
+
+    /// Ghi 1 dòng audit vào station [`AUDIT_STATION`].
+    ///
+    /// Đổi cấu hình mà không để lại dấu vết thì không ai biết chuyện gì vừa xảy
+    /// ra. Audit cũng là **observation**, nên đọc lại được bằng đúng đường đọc
+    /// của mọi state khác:
+    /// `opsense query opsense-audit --label-kind config_edit`.
+    ///
+    /// Best-effort: audit hỏng không được làm hỏng thao tác đã thành công.
+    pub async fn audit(&self, obs: Observation) {
+        const ID: &str = AUDIT_STATION;
+        let station = match self
+            .context
+            .station::<Arc<RwLock<opsense_core::TimeseriesStation>>>(ID)
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => {
+                let made = match opsense_core::TimeseriesStation::from_storage(ID, self.context.storage()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "không tạo được station audit");
+                        return;
+                    }
+                };
+                let wrapped = Arc::new(RwLock::new(made));
+                if let Err(e) = self
+                    .context
+                    .registry(ID, opsense_core::Station::Timeseries(wrapped.clone()))
+                    .await
+                {
+                    // `AlreadyExists` = có người tạo trước → lấy lại từ context.
+                    if e.kind() != ErrorKind::AlreadyExists {
+                        tracing::warn!(error = %e, "không đăng ký được station audit");
+                        return;
+                    }
+                }
+                match self
+                    .context
+                    .station::<Arc<RwLock<opsense_core::TimeseriesStation>>>(ID)
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "không lấy được station audit");
+                        return;
+                    }
+                }
+            }
+        };
+        let ts = obs.ts;
+        let st = station.read().await;
+        st.update_range(std::slice::from_ref(&obs), ts, ts, ts);
     }
 }

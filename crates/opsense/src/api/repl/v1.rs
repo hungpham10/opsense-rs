@@ -364,6 +364,33 @@ impl QueryRoot {
 // Mutation root
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Observation audit cho một lần sửa cấu hình.
+///
+/// Tách thành hàm thuần để test được: nội dung audit **phải** đủ để trả lời
+/// "ai đổi gì, từ giá trị nào sang giá trị nào, lúc nào" mà không cần log file.
+pub fn config_edit_observation(
+    node: &str,
+    path: &str,
+    old: &serde_json::Value,
+    new: &serde_json::Value,
+    ts: i64,
+) -> Observation {
+    use opsense_model::events::{Signal, TelemetryKind};
+    let mut o = Observation::new(
+        ts,
+        "config_edit".to_string(),
+        TelemetryKind::Metric,
+        Signal::Summary,
+        1.0,
+    );
+    o.labels.insert("kind".into(), "config_edit".into());
+    o.labels.insert("node".into(), node.to_string());
+    o.labels.insert("path".into(), path.to_string());
+    o.labels.insert("from".into(), old.to_string());
+    o.labels.insert("to".into(), new.to_string());
+    o
+}
+
 pub struct MutationRoot;
 
 #[Object]
@@ -394,7 +421,7 @@ impl MutationRoot {
         })
     }
 
-    /// Sửa **một** thành phần của **một** node, không cần gửi lại cả pipeline.
+    /// Ghi 1 thành phần của **một** node, không cần gửi lại cả pipeline.
     ///
     /// `path` là JSON pointer vào config đang chạy (vd `params.sl_pct`,
     /// `script_path`, `params.grid_min_trades`). Server đọc cấu hình hiện tại
@@ -431,6 +458,14 @@ impl MutationRoot {
 
         // Validate TRƯỚC khi chạm runtime: ghép node vừa patch với các node còn
         // lại (lấy lại toàn bộ để không mất node nào) rồi deserialize hết.
+        let old_value = target
+            .pointer(path.trim_start_matches('/'))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let new_value = patched
+            .pointer(path.trim_start_matches('/'))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let mut all = s.components(None).await;
         let slot = all
             .iter_mut()
@@ -449,6 +484,14 @@ impl MutationRoot {
         drop(runtime);
 
         tracing::info!(node = %id, path = %path, "config patched qua GraphQL");
+        s.audit(config_edit_observation(
+            &id,
+            path.trim_start_matches('/'),
+            &old_value,
+            &new_value,
+            opsense_components::signal::now_secs(),
+        ))
+        .await;
         Ok(EditResult {
             reloaded: true,
             nodes: s.status().await.nodes,
@@ -631,6 +674,26 @@ mod tests {
         assert!(err.message.contains("limit"), "{}", err.message);
         let err = check_query_bounds(now - day, now, Some(0)).unwrap_err();
         assert!(err.message.contains(">= 1"), "{}", err.message);
+    }
+
+    /// Audit phải đủ để trả lời "đổi gì, từ giá trị nào sang nào, ở node nào,
+    /// lúc nào" — và phải lọc được bằng `labels.kind` qua đúng đường query.
+    #[test]
+    fn config_edit_observation_is_queryable() {
+        let obs = config_edit_observation(
+            "grid",
+            "params/sl_pct",
+            &serde_json::json!(0.008),
+            &serde_json::json!(0.02),
+            1_800_000_000,
+        );
+        assert_eq!(obs.ts, 1_800_000_000);
+        assert_eq!(obs.metric_id, "config_edit");
+        assert_eq!(obs.labels.get("kind").map(String::as_str), Some("config_edit"));
+        assert_eq!(obs.labels.get("node").map(String::as_str), Some("grid"));
+        assert_eq!(obs.labels.get("path").map(String::as_str), Some("params/sl_pct"));
+        assert_eq!(obs.labels.get("from").map(String::as_str), Some("0.008"));
+        assert_eq!(obs.labels.get("to").map(String::as_str), Some("0.02"));
     }
 
     /// Giá trị sai kiểu phải chết ở deserialize (typetag), **trước** khi runtime

@@ -48,6 +48,43 @@ async fn connect() -> Option<OpsenseClient> {
 }
 
 #[tokio::test]
+async fn config_edit_is_audited_in_station() {
+    let Some(c) = connect().await else { return };
+
+    let all = c.components(None).await.expect("Query.components");
+    let Some(target) = all.first() else { return };
+    let path = "/params/audit_probe";
+    let value = format!("{}", opsense_components::signal::now_secs());
+
+    c.patch_component(&target.id, path, &value)
+        .await
+        .expect("patch probe");
+
+    // Audit là observation trong station `opsense-audit` → đọc lại được bằng
+    // đúng đường query của mọi state khác (không cần log file).
+    let audit = c
+        .query_station(
+            "opsense-audit",
+            None,
+            None,
+            Some(100),
+            None,
+            Some("config_edit"),
+        )
+        .await
+        .expect("đọc station audit");
+    let mine = audit
+        .observations
+        .iter()
+        .find(|o| {
+            o.labels.get("node").map(String::as_str) == Some(target.id.as_str())
+                && o.labels.get("path").map(String::as_str) == Some("params/audit_probe")
+        })
+        .expect("phải có audit cho patch vừa rồi");
+    assert_eq!(mine.labels.get("to").map(String::as_str), Some(value.as_str()));
+}
+
+#[tokio::test]
 async fn query_station_rejects_unbounded_window() {
     let Some(c) = connect().await else { return };
 

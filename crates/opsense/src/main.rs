@@ -195,8 +195,29 @@ enum Commands {
     },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lệnh CLI phải parse được mà không cần server. Nếu đổi tên/cờ mà quên đổi
+    /// script/CI thì chết ở đây chứ không phải lúc chạy.
+    #[test]
+    fn cli_subcommands_parse() {
+        for args in [
+            vec!["opsense", "status"],
+            vec!["opsense", "components"],
+            vec!["opsense", "components", "grid"],
+            vec!["opsense", "get-param", "grid", "/params/sl_pct"],
+            vec!["opsense", "set-param", "grid", "/params/sl_pct", "0.02"],
+            vec!["opsense", "query", "grid", "--signal", "order", "--limit", "10"],
+            vec!["opsense", "orders", "grid", "--status", "open"],
+        ] {
+            Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} không parse: {e}"));
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {    dotenvy::dotenv().ok();
     // Register sqlx `any` drivers (mysql/postgres/sqlite) before the Resolver
     // builds its connection pools.
     sqlx::any::install_default_drivers();
