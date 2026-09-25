@@ -115,16 +115,44 @@ async fn write(ctx: &Arc<Context>, station_id: &str, obs: &[Observation], now: i
 }
 
 async fn run(ctx: &Arc<Context>, trigger: Option<String>, input: Value) -> Vec<Value> {
+    run_with(ctx, params(), trigger, input).await
+}
+
+async fn run_with(
+    ctx: &Arc<Context>,
+    params: BTreeMap<String, Value>,
+    trigger: Option<String>,
+    input: Value,
+) -> Vec<Value> {
     call_process_with(
         ScriptSource::Inline(SCRIPT.into()),
         input,
-        params(),
+        params,
         attrs(),
         trigger,
         Some(ctx.clone()),
     )
     .await
     .expect("script chạy")
+}
+
+/// Params bật nhánh trading (giống hệt `strategies/binance/config.toml`).
+fn trading_params() -> BTreeMap<String, Value> {
+    let mut m = params();
+    m.insert("mode".into(), Value::from("trading"));
+    m.insert("calendar".into(), Value::from("crypto"));
+    m.insert("strategy".into(), Value::from("grid"));
+    m.insert("grid_levels".into(), Value::from(5));
+    m.insert("sl_pct".into(), Value::from(0.008));
+    m.insert("smoothing_k".into(), Value::from(10.0));
+    m.insert("lookback_secs".into(), Value::from(172_800));
+    m.insert("review_interval_secs".into(), Value::from(900));
+    m.insert("trading_candle_secs".into(), Value::from(60));
+    m.insert("fee_rate".into(), Value::from(0.0005));
+    m.insert("kelly_fraction".into(), Value::from(0.25));
+    m.insert("base_capital".into(), Value::from(100_000.0));
+    m.insert("settlement_candles".into(), Value::from(0));
+    m
 }
 
 #[tokio::test]
@@ -301,4 +329,105 @@ async fn snapshot_empty_when_history_station_missing() {
 
     let out = run(&ctx, None, Value::Array(vec![])).await;
     assert!(out.is_empty(), "thiếu station history → không output");
+}
+
+// ── Nhánh trading: kernel đặt lệnh qua `portfolio_feed` ─────────────────────
+
+/// Nạp candle đã đóng vào station `grid` (như tick branch sẽ ghi) sao cho
+/// nến CUỐI là nến đang mở (để nhánh trading bỏ qua, đúng hành vi thật).
+///
+/// Nến đóng gần nhất có range rộng (biến động) để chắc chắn chạm level grid —
+/// nến range hẹp chỉ trúng level khi giá rơi đúng bậc, quá phụ thuộc dữ liệu.
+async fn seed_candles(ctx: &Arc<Context>, closed: i64, open: i64) {
+    let mut rows = Vec::new();
+    for i in 0..closed {
+        let price = 100.0 + ((i % 30) as f64) - 15.0;
+        let ts = open - (closed - i) * 60;
+        let (h, l) = if i == closed - 1 {
+            (price + 15.0, price - 15.0) // nến biến động: phủ hết các cell
+        } else {
+            (price + 0.5, price - 0.5)
+        };
+        rows.extend(candle_rows(ts, price, h, l, price, 5.0));
+    }
+    // Nến đang mở (bucket = now) — chưa đóng nên không được giao.
+    rows.extend(candle_rows(open, 100.0, 101.0, 99.0, 100.5, 1.0));
+    write(ctx, "grid", &rows, now()).await;
+}
+
+#[tokio::test]
+async fn trading_mode_places_orders_and_writes_cursor() {
+    let ctx = make_ctx().await;
+    let now = now();
+    let open_bucket = now / 60 * 60;
+    // 40 nến đã đóng + 1 nến đang mở.
+    seed_candles(&ctx, 40, open_bucket).await;
+
+    let out = run_with(
+        &ctx,
+        trading_params(),
+        None,
+        Value::Array(vec![]),
+    )
+    .await;
+    let rows = to_observations(&out);
+
+    let orders: Vec<&Observation> = rows.iter().filter(|o| o.signal == Signal::Order).collect();
+    assert!(
+        !orders.is_empty(),
+        "giá nhấn sóng phải chạm grid level → có lệnh: {out:?}"
+    );
+    for o in &orders {
+        assert_eq!(o.metric_id, SYMBOL);
+        assert_eq!(o.labels.get("status").map(String::as_str), Some("open"));
+        assert!(o.value > 0.0, "entry price dương: {o:?}");
+        assert!(o.labels.contains_key("sl") && o.labels.contains_key("tp"));
+        assert!(o.labels.contains_key("order_id"));
+        assert_eq!(
+            o.ts, open_bucket - 60,
+            "lệnh gắn với nến ĐÃ ĐÓNG gần nhất, không phải nến đang mở"
+        );
+    }
+
+    // Cursor: lần gọi sau không chạy lại nến đã xử lý.
+    let cursor: Vec<&Observation> = rows
+        .iter()
+        .filter(|o| o.labels.get("kind").map(String::as_str) == Some("trading_step"))
+        .collect();
+    assert_eq!(cursor.len(), 1, "phải có 1 cursor: {out:?}");
+    assert_eq!(cursor[0].ts, open_bucket - 60);
+}
+
+#[tokio::test]
+async fn trading_mode_is_idempotent_across_calls() {
+    let ctx = make_ctx().await;
+    let open_bucket = now() / 60 * 60;
+    seed_candles(&ctx, 40, open_bucket).await;
+
+    let first = run_with(&ctx, trading_params(), None, Value::Array(vec![])).await;
+    // Ghi output (lệnh + cursor) vào station như transform sẽ làm.
+    let rows = to_observations(&first);
+    assert!(!rows.is_empty(), "lần đầu phải có output: {first:?}");
+    write(&ctx, "grid", &rows, now()).await;
+
+    let second = run_with(&ctx, trading_params(), None, Value::Array(vec![])).await;
+    let orders = second
+        .iter()
+        .filter(|v| v["signal"] == "order")
+        .count();
+    assert_eq!(orders, 0, "cursor chặn chạy lại nến đã xử lý: {second:?}");
+}
+
+#[tokio::test]
+async fn trading_mode_skips_open_candle_only() {
+    let ctx = make_ctx().await;
+    let open_bucket = now() / 60 * 60;
+
+    // Chỉ có nến đang mở (chưa đóng nến nào trong window) → không được giao.
+    let rows = candle_rows(open_bucket, 100.0, 101.0, 99.0, 100.5, 1.0);
+    write(&ctx, "grid", &rows, now()).await;
+
+    let out = run_with(&ctx, trading_params(), None, Value::Array(vec![])).await;
+    let orders = out.iter().filter(|v| v["signal"] == "order").count();
+    assert_eq!(orders, 0, "nến chưa đóng thì không đặt lệnh: {out:?}");
 }

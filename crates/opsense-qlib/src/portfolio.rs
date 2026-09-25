@@ -18,6 +18,7 @@ use opsense_mlib::sgd::SGDOptimizer;
 use serde::{Deserialize, Serialize};
 
 use super::calendar::to_timestamp_secs;
+use super::session::Session;
 use super::{
     Calendar, DataLoader, Fee, FetchFn, GridSnapshot, NotifyFn, OrderEvent, ParamFn, Score,
     Strategy,
@@ -58,6 +59,9 @@ impl BlockCache {
 
 /// LRU cache cho một cache key (ví dụ "1H:analysis"), keyed by block_id.
 type BlockLru = opsense_mlib::lru::LruCache<i64, BlockCache, 32>;
+
+/// Future một fetch closure trả về (`'static` — closure tự sở hữu capture).
+type LoaderFuture = Pin<Box<dyn Future<Output = Result<Vec<CandleStick>, Error>> + Send + 'static>>;
 
 // Helper functions.
 // Đây là free functions để tránh borrow-checker issues với self.
@@ -218,15 +222,46 @@ pub struct Portfolio {
 
     /// configure
     try_random_search: usize,
-    resolution_for_test: String,
-    resolution_for_rebuild: String,
-
-    /// T+N: số cây nến phải chờ trước khi được phép đóng lệnh. 0 = tắt.
-    settlement_candles: u64,
+    config: PortfolioConfig,
 
     /// Per-resolution LRU block cache. Skip serialize.
     #[cfg_attr(feature = "json", serde(skip, default = "default_block_cache"))]
     cache: Arc<RwLock<HashMap<String, BlockLru>>>,
+}
+
+/// Cấu hình chạy của [`Portfolio`] — phần bất biến, không phụ thuộc runtime
+/// (`loader`/`cache` là runtime nên không khai ở đây).
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "json", derive(Serialize, Deserialize))]
+pub struct PortfolioConfig {
+    /// Resolution của nến giao dịch (stream nến đưa vào kernel).
+    pub resolution_for_test: String,
+    /// Resolution dùng cho phân tích/rebuild (thường rộng hơn `resolution_for_test`).
+    pub resolution_for_rebuild: String,
+
+    /// T+N: số cây nến phải chờ trước khi được phép đóng lệnh.
+    /// 0 = theo thị trường (`Calendar::settlement_candles`).
+    pub settlement_candles: u64,
+
+    /// Dùng weekly-block LRU cache nội bộ không.
+    ///
+    /// `true` (mặc định) — backtest: cache cắt hẳn áp lực `DataLoader::range`
+    /// vì rebuild cần đọc lại cửa sổ lookback mỗi chu kỳ review.
+    /// `false` — mọi range đi thẳng ra `DataLoader` (bỏ cả prefetch lẫn
+    /// cache read/write); hợp khi loader rẻ và stateless (station, file local)
+    /// hoặc khi chạy một lần trên dữ liệu đã nằm sẵn trong RAM.
+    pub cache_enabled: bool,
+}
+
+impl Default for PortfolioConfig {
+    fn default() -> Self {
+        Self {
+            resolution_for_test: "1m".to_string(),
+            resolution_for_rebuild: "1D".to_string(),
+            settlement_candles: DEFAULT_SETTLEMENT_CANDLES,
+            cache_enabled: true,
+        }
+    }
 }
 
 /// Mặc định T+0 (không khóa). Khi truyền `0` vào `Portfolio::new`, engine dùng
@@ -263,16 +298,13 @@ fn default_loader() -> Arc<dyn DataLoader + Sync + Send> {
 }
 
 impl Portfolio {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         loader: Arc<dyn DataLoader + Sync + Send>,
         strategy: Arc<dyn Strategy + Sync + Send>,
         fee: Arc<dyn Fee + Sync + Send>,
         score: Arc<dyn Score + Sync + Send>,
         calendar: Arc<dyn Calendar + Sync + Send>,
-        resolution_for_rebuild: String,
-        resolution_for_test: String,
-        settlement_candles: u64,
+        config: PortfolioConfig,
     ) -> Result<Self, Error> {
         Ok(Self {
             loader,
@@ -281,9 +313,7 @@ impl Portfolio {
             score,
             calendar,
             try_random_search: 30,
-            resolution_for_rebuild,
-            resolution_for_test,
-            settlement_candles,
+            config,
             cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -343,41 +373,19 @@ impl Portfolio {
             let (from, to) = windows[0];
 
             handles.push(tokio::spawn(async move {
-                let mut orders = Vec::new();
-                let mut history = Vec::new();
-
-                let loader = pf.loader.clone();
-                let cache = pf.cache.clone();
-                let cal = pf.calendar.clone();
-                let ckt = format!("{}:trade", pf.resolution_for_test);
-                let rts = pf.resolution_for_test.clone();
-
+                let mut session = Session::new();
                 match pf
-                    .forward(
-                        &mut orders,
-                        &mut history,
+                    .backtest(
+                        &mut session,
                         lookback,
                         from,
                         to,
                         &|id| trial[id],
-                        &mut |current, next| {
-                            let loader = loader.clone();
-                            let cache = cache.clone();
-                            let cal = cal.clone();
-                            let ck = ckt.clone();
-                            let r = rts.clone();
-                            Box::pin(async move {
-                                Self::fetch_candles_from_loader(
-                                    &loader, &cache, &cal, current, next, &r, &ck,
-                                )
-                                .await
-                            })
-                        },
                         &mut |_| Box::pin(async move { Ok(()) }),
                     )
                     .await
                 {
-                    Ok(()) => Portfolio::convert_order_history_into_report(&history),
+                    Ok((_, report)) => report,
                     Err(_) => Report::default(),
                 }
             }));
@@ -415,43 +423,20 @@ impl Portfolio {
                             let mut total = 0.0f64;
 
                             for &(eval_from, eval_to) in &win {
-                                let mut orders = Vec::new();
-                                let mut history = Vec::new();
+                                let mut session = Session::new();
 
-                                let ckt = format!("{}:trade", sgd_self.resolution_for_test);
-                                let loader = sgd_self.loader.clone();
-                                let cache = sgd_self.cache.clone();
-                                let cal = sgd_self.calendar.clone();
-                                let rts = sgd_self.resolution_for_test.clone();
-
-                                if let Ok(()) = sgd_self
-                                    .forward(
-                                        &mut orders,
-                                        &mut history,
+                                if let Ok((score, _)) = sgd_self
+                                    .backtest(
+                                        &mut session,
                                         lookback,
                                         eval_from,
                                         eval_to,
                                         &|id| params[id],
-                                        &mut |current, next| {
-                                            let loader = loader.clone();
-                                            let cache = cache.clone();
-                                            let cal = cal.clone();
-                                            let ck = ckt.clone();
-                                            let r = rts.clone();
-                                            Box::pin(async move {
-                                                Self::fetch_candles_from_loader(
-                                                    &loader, &cache, &cal, current, next, &r, &ck,
-                                                )
-                                                .await
-                                            })
-                                        },
                                         &mut |_| Box::pin(async move { Ok(()) }),
                                     )
                                     .await
                                 {
-                                    let report =
-                                        Portfolio::convert_order_history_into_report(&history);
-                                    total += sgd_self.score.score(&report);
+                                    total += score;
                                 }
                             }
 
@@ -464,204 +449,152 @@ impl Portfolio {
             .await)
     }
 
-    pub async fn evaluate(
-        &self,
-        orders: &mut Vec<Order>,
-        history: &mut Vec<Order>,
-        lookback: u64,
-        from: u64,
-        to: u64,
-        notify: Option<NotifyFn<'_>>,
-    ) -> Result<(f64, Report), Error> {
-        let params = self.strategy.init();
-        let loader = self.loader.clone();
-        let cache = self.cache.clone();
-        let cal = self.calendar.clone();
-        let rts = self.resolution_for_test.clone();
-        let ckt = format!("{}:trade", self.resolution_for_test);
-
-        let mut noop =
-            move |_: OrderEvent| -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> {
-                Box::pin(async move { Ok(()) })
-            };
-
-        match notify {
-            Some(notify) => {
-                self.forward(
-                    orders,
-                    history,
-                    lookback,
-                    from,
-                    to,
-                    &move |id| params[id],
-                    &mut move |current, next| {
-                        let loader = loader.clone();
-                        let cache = cache.clone();
-                        let cal = cal.clone();
-                        let ck = ckt.clone();
-                        let r = rts.clone();
-                        Box::pin(async move {
-                            Self::fetch_candles_from_loader(
-                                &loader, &cache, &cal, current, next, &r, &ck,
-                            )
-                            .await
-                        })
-                    },
-                    notify,
-                )
-                .await?
-            }
-            None => {
-                self.forward(
-                    orders,
-                    history,
-                    lookback,
-                    from,
-                    to,
-                    &move |id| params[id],
-                    &mut move |current, next| {
-                        let loader = loader.clone();
-                        let cache = cache.clone();
-                        let cal = cal.clone();
-                        let ck = ckt.clone();
-                        let r = rts.clone();
-                        Box::pin(async move {
-                            Self::fetch_candles_from_loader(
-                                &loader, &cache, &cal, current, next, &r, &ck,
-                            )
-                            .await
-                        })
-                    },
-                    &mut noop,
-                )
-                .await?
-            }
-        }
-
-        let report = Self::convert_order_history_into_report(history);
-        Ok((self.score.score(&report), report))
-    }
-
+    /// Backtest entry: warm cache (nếu bật) rồi chạy kernel
+    /// [`Self::evaluate`] với fetch đóng từ `self.loader` / block cache.
+    ///
+    /// Đây là đường backtest: có prefetch + LRU + calendar alignment, và mỗi
+    /// trial SGD chạy trên `Session` riêng. Realtime thì gọi thẳng
+    /// [`Self::evaluate`] với fetch đóng từ station.
     #[allow(clippy::too_many_arguments)]
-    #[inline]
-    pub async fn hands_on(
+    pub async fn backtest(
         &self,
-        orders: &mut Vec<Order>,
-        history: &mut Vec<Order>,
-        lookback: u64,
-        from: u64,
-        to: u64,
-        last_candle: FetchFn<'_>,
-        notify: NotifyFn<'_>,
-    ) -> Result<(f64, Report), Error> {
-        let params = self.strategy.init();
-
-        self.forward(
-            orders,
-            history,
-            lookback,
-            from,
-            to,
-            &move |id| params[id],
-            last_candle,
-            notify,
-        )
-        .await?;
-
-        let report = Self::convert_order_history_into_report(history);
-        Ok((self.score.score(&report), report))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[inline]
-    async fn forward(
-        &self,
-        orders: &mut Vec<Order>,
-        history: &mut Vec<Order>,
+        session: &mut Session,
         lookback: u64,
         from: u64,
         to: u64,
         params: ParamFn<'_>,
-        fetch: FetchFn<'_>,
         notify: NotifyFn<'_>,
-    ) -> Result<(), Error> {
+    ) -> Result<(f64, Report), Error> {
+        if self.config.cache_enabled {
+            self.prefetch_cache(lookback, from, to).await?;
+        }
+
+        let mut trade = self.loader_fetch(&self.config.resolution_for_test, "trade");
+        let mut analysis = self.loader_fetch(&self.config.resolution_for_rebuild, "analysis");
+
+        self.evaluate(
+            session,
+            from,
+            to,
+            params,
+            &mut *trade,
+            &mut *analysis,
+            notify,
+        )
+        .await
+    }
+
+    /// Kernel: đưa nến vào `session`, mỗi nến một bước (check exit → rebuild
+    /// nếu tới hạn → evaluate entry). Không tự I/O: nến đến từ `fetch`, dữ
+    /// liệu phân tích đến từ `analysis_fetch` — kernel không biết dữ liệu nằm
+    /// ở loader/cache hay station.
+    ///
+    /// Có thể gọi nhiều lần trên cùng `Session` để **chạy tiếp**: `session.review_at`
+    /// / `candle_seq` / `orders` / `plan` đều mang qua lời gọi, và
+    /// `session.candle_ts` chặn xử lý lại nến đã thấy.
+    ///
+    /// `fetch` và `analysis_fetch` tách riêng vì backtest dùng 2 resolution
+    /// (trade = `resolution_for_test`, rebuild = `resolution_for_rebuild`).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn evaluate(
+        &self,
+        session: &mut Session,
+        from: u64,
+        to: u64,
+        params: ParamFn<'_>,
+        fetch: FetchFn<'_>,
+        analysis_fetch: FetchFn<'_>,
+        notify: NotifyFn<'_>,
+    ) -> Result<(f64, Report), Error> {
         const KELLY_FRACTION: usize = 0;
         const BASE_CAPITAL: usize = 1;
 
-        let cache_key_rebuild = format!("{}:analysis", self.resolution_for_rebuild);
+        let resolution = self.config.resolution_for_test.clone();
         let kelly_fraction = params(KELLY_FRACTION);
         let base_capital = params(BASE_CAPITAL);
         let fee_rate = self.fee.rate();
 
         // T+N: `settlement_candles == 0` → theo thị trường (StockCalendar → T+3,
         // Crypto/Forex → T+0); giá trị >0 → ép T+N cố định.
-        let settlement = if self.settlement_candles > 0 {
-            self.settlement_candles
+        let settlement = if self.config.settlement_candles > 0 {
+            self.config.settlement_candles
         } else {
             self.calendar.settlement_candles()
         };
 
-        // Warm cache trước simulation loop
-        self.prefetch_cache(lookback, from, to).await?;
-
         // Advance to first valid trading time (tránh rebuild ở ngoài giờ giao dịch,
         // khiến strategy fetch data không có nến → ATR/analysis fail).
         let mut current = {
-            let step_ts = to_timestamp_secs(&self.resolution_for_test);
+            let step_ts = to_timestamp_secs(&resolution);
             let first_valid = self
                 .calendar
-                .next(from.saturating_sub(step_ts), &self.resolution_for_test);
+                .next(from.saturating_sub(step_ts), &resolution);
             if first_valid > from && first_valid < to {
                 first_valid
             } else {
                 from
             }
         };
-        let mut candle_seq = 0; // thứ tự nến toàn cục, tăng dần qua cả backtest (không reset khi rebuild)
-        let mut review = 0;
-        let mut candle_id = 0;
-        let mut candle_ts = 0;
-        let mut plan = Vec::<TradingGrid>::new();
 
         while current < to {
-            if review <= current {
+            if session.review_at <= current {
                 #[cfg(debug_assertions)]
                 let t_rebuild = std::time::Instant::now();
 
-                (review, plan) = self
-                    .rebuild_strategy(current, plan.as_slice(), &cache_key_rebuild, params)
-                    .await?;
+                match self
+                    .rebuild_strategy(
+                        current,
+                        session.plan.as_slice(),
+                        &mut *analysis_fetch,
+                        params,
+                    )
+                    .await
+                {
+                    Ok((review, plan)) => {
+                        session.review_at = review;
+                        session.plan = plan;
 
-                notify(OrderEvent::Rebuilt {
-                    ts: current,
-                    grids: plan
-                        .iter()
-                        .map(|g| GridSnapshot {
-                            levels: g.levels().to_vec(),
+                        notify(OrderEvent::Rebuilt {
+                            ts: current,
+                            grids: session
+                                .plan
+                                .iter()
+                                .map(|g| GridSnapshot {
+                                    levels: g.levels().to_vec(),
+                                })
+                                .collect(),
                         })
-                        .collect(),
-                })
-                .await?;
+                        .await?;
 
-                #[cfg(debug_assertions)]
-                println!(
-                    "  [debug] forward: rebuild at {}  next review={}  took {:.0}ms",
-                    current,
-                    review,
-                    t_rebuild.elapsed().as_secs_f64() * 1000.0,
-                );
+                        #[cfg(debug_assertions)]
+                        println!(
+                            "  [debug] evaluate: rebuild at {}  next review={}  took {:.0}ms",
+                            current,
+                            session.review_at,
+                            t_rebuild.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                    Err(error) => {
+                        // Rebuild fail (chưa đủ data, market closed, …) → giữ plan
+                        // cũ và **tiến `review_at`**, nếu không realtime sẽ thử
+                        // lại ở mọi nến. Session vẫn nhất quán: chỉ mốc thời gian
+                        // đổi, không mất lệnh/plan.
+                        session.review_at = self.strategy.next(current).await;
+                        return Err(error);
+                    }
+                }
 
-                candle_id = 0;
+                session.candle_id = 0;
             }
 
-            let next = std::cmp::min(review, to);
+            let next = std::cmp::min(session.review_at, to);
             #[cfg(debug_assertions)]
             let t_fetch = std::time::Instant::now();
             let candles = fetch(current, next).await?;
             #[cfg(debug_assertions)]
             if t_fetch.elapsed().as_secs_f64() * 1000.0 > 50.0 {
                 println!(
-                    "  [debug] forward: fetch [{}, {})  got {} candles  took {:.0}ms",
+                    "  [debug] evaluate: fetch [{}, {})  got {} candles  took {:.0}ms",
                     current,
                     next,
                     candles.len(),
@@ -670,13 +603,18 @@ impl Portfolio {
             }
 
             for candle in &candles {
-                if candle.t <= candle_ts {
+                if candle.t <= session.candle_ts {
                     continue;
                 }
-                candle_seq += 1;
-                let current_seq = candle_seq;
+                session.candle_seq += 1;
+                let current_seq = session.candle_seq;
 
-                let prev_hist_len = history.len();
+                let prev_hist_len = session.history.len();
+
+                // `plan`/`orders` đưa ra local rồi ghi lại cuối nến — giữ nguyên
+                // cách `forward` cũ làm, tránh giữ borrow `session` qua `.await`.
+                let mut plan = std::mem::take(&mut session.plan);
+                let mut orders = std::mem::take(&mut session.orders);
 
                 orders.retain_mut(|order| {
                     if let Some((exit_price, pnl_pct)) =
@@ -693,7 +631,7 @@ impl Portfolio {
                             );
                         }
 
-                        history.push(*order);
+                        session.history.push(*order);
                         false
                     } else {
                         true
@@ -701,7 +639,7 @@ impl Portfolio {
                 });
 
                 // Notify về các lệnh vừa đóng trong nến này
-                for order in &history[prev_hist_len..] {
+                for order in &session.history[prev_hist_len..] {
                     notify(OrderEvent::Closed {
                         ts: candle.t.max(0) as u64,
                         order: *order,
@@ -712,10 +650,10 @@ impl Portfolio {
                 // Ngưỡng mở khóa = thứ tự nến hiện tại + N (T+N)
                 let unlock_seq = current_seq + settlement;
                 let events = Self::evaluate_grid_entries(
-                    candle_id,
+                    session.candle_id,
                     candle,
-                    plan.as_slice(),
-                    orders,
+                    &plan,
+                    &mut orders,
                     fee_rate,
                     kelly_fraction,
                     base_capital,
@@ -727,23 +665,66 @@ impl Portfolio {
                     notify(event).await?;
                 }
 
-                candle_id += 1;
+                session.plan = plan;
+                session.orders = orders;
+                session.candle_id += 1;
             }
 
-            // ── Phase 3: Advance simulation time ─────────────────────
+            // ── Advance simulation time ───────────────────────────────
             current = if !candles.is_empty() {
                 next
             } else {
-                self.calendar.next(current, &self.resolution_for_test)
+                self.calendar.next(current, &resolution)
             };
 
             if !candles.is_empty() {
-                candle_ts = candles.last().map_or(candle_ts, |c| c.t);
+                session.candle_ts = candles.last().map_or(session.candle_ts, |c| c.t);
             }
         }
 
-        Ok(())
+        let report = Self::convert_order_history_into_report(&session.history);
+        Ok((self.score.score(&report), report))
     }
+
+    /// Fetch closure đóng quanh `self.loader` + block cache + calendar: kernel
+    /// gọi bất kỳ lúc nào với range bất kỳ, không cần biết nguồn dữ liệu.
+    ///
+    /// Closure clone sẵn `Arc`/`String` nên future `'static` — thỏa [`FetchFn`],
+    /// tức kernel có thể reborrow nó cho `rebuild_strategy`.
+    fn loader_fetch(
+        &self,
+        resolution: &str,
+        kind: &'static str,
+    ) -> Box<dyn FnMut(u64, u64) -> LoaderFuture + Send + Sync + '_> {
+        let loader = self.loader.clone();
+        let cache = self.cache.clone();
+        let calendar = self.calendar.clone();
+        let resolution = resolution.to_string();
+        let cache_key = format!("{resolution}:{kind}");
+        let cache_enabled = self.config.cache_enabled;
+
+        Box::new(move |from: u64, to: u64| {
+            let loader = loader.clone();
+            let cache = cache.clone();
+            let calendar = calendar.clone();
+            let resolution = resolution.clone();
+            let cache_key = cache_key.clone();
+            Box::pin(async move {
+                Self::fetch_candles_from_loader(
+                    &loader,
+                    &cache,
+                    &calendar,
+                    from,
+                    to,
+                    &resolution,
+                    &cache_key,
+                    cache_enabled,
+                )
+                .await
+            })
+        })
+    }
+
 
     /// Pre-fetch trade + analysis data into cache before simulation loop runs.
     /// Avoids cache MISS/EXTEND during rebuild since data is already warmed.
@@ -767,8 +748,8 @@ impl Portfolio {
         };
 
         // ── Trade data ─────────────────────────────────────────────────
-        let cache_key_trade = format!("{}:trade", self.resolution_for_test);
-        if let Some(adj_from) = adjust_from(from, &self.resolution_for_test) {
+        let cache_key_trade = format!("{}:trade", self.config.resolution_for_test);
+        if let Some(adj_from) = adjust_from(from, &self.config.resolution_for_test) {
             #[cfg(debug_assertions)]
             if adj_from != from {
                 println!(
@@ -782,8 +763,9 @@ impl Portfolio {
                 &self.calendar,
                 adj_from,
                 safe_to,
-                &self.resolution_for_test,
+                &self.config.resolution_for_test,
                 &cache_key_trade,
+                self.config.cache_enabled,
             )
             .await?;
         } else {
@@ -795,10 +777,10 @@ impl Portfolio {
         }
 
         // ── Analysis / rebuild data ────────────────────────────────────
-        let cache_key_rebuild = format!("{}:analysis", self.resolution_for_rebuild);
+        let cache_key_rebuild = format!("{}:analysis", self.config.resolution_for_rebuild);
         let analysis_from = from.saturating_sub(lookback);
         if analysis_from < safe_to {
-            if let Some(adj_from) = adjust_from(analysis_from, &self.resolution_for_rebuild) {
+            if let Some(adj_from) = adjust_from(analysis_from, &self.config.resolution_for_rebuild) {
                 #[cfg(debug_assertions)]
                 if adj_from != analysis_from {
                     println!(
@@ -812,8 +794,9 @@ impl Portfolio {
                     &self.calendar,
                     adj_from,
                     safe_to,
-                    &self.resolution_for_rebuild,
+                    &self.config.resolution_for_rebuild,
                     &cache_key_rebuild,
+                    self.config.cache_enabled,
                 )
                 .await?;
             } else {
@@ -828,53 +811,22 @@ impl Portfolio {
         Ok(())
     }
 
-    /// Rebuild strategy plan: gọi `Strategy::next` + `Strategy::rebuild`
-    /// với closure fetch candles từ cache/loader và closure tính VolumeProfile.
+    /// Rebuild strategy plan: gọi `Strategy::next` + `Strategy::rebuild` với
+    /// `fetch` do kernel truyền vào — strategy tự fetch range lookback nó cần,
+    /// không cần biết nguồn dữ liệu.
     #[inline]
     pub(crate) async fn rebuild_strategy(
         &self,
         current: u64,
         plan: &[TradingGrid],
-        cache_key_rebuild: &str,
+        fetch: FetchFn<'_>,
         params: ParamFn<'_>,
     ) -> Result<(u64, Vec<TradingGrid>), Error> {
         #[cfg(debug_assertions)]
         let t = std::time::Instant::now();
         let review = self.strategy.next(current).await;
 
-        let loader = self.loader.clone();
-        let cache = self.cache.clone();
-        let cal = self.calendar.clone();
-        let ck = cache_key_rebuild.to_string();
-
-        let plan = self
-            .strategy
-            .rebuild(
-                current,
-                plan,
-                &mut |from: u64, to: u64| {
-                    let resolution = self.resolution_for_rebuild.clone();
-                    let loader = loader.clone();
-                    let cache = cache.clone();
-                    let cal = cal.clone();
-                    let ck = ck.clone();
-
-                    Box::pin(async move {
-                        Self::fetch_candles_from_loader(
-                            &loader,
-                            &cache,
-                            &cal,
-                            from,
-                            to,
-                            &resolution,
-                            &ck,
-                        )
-                        .await
-                    })
-                },
-                params,
-            )
-            .await?;
+        let plan = self.strategy.rebuild(current, plan, fetch, params).await?;
 
         #[cfg(debug_assertions)]
         if t.elapsed().as_secs_f64() * 1000.0 > 1000.0 {
@@ -893,7 +845,7 @@ impl Portfolio {
     /// Trả về các biến cố (Placed/Rejected) để vòng forward notify ra ngoài.
     #[inline]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn evaluate_grid_entries(
+    pub fn evaluate_grid_entries(
         id: usize,
         candle: &CandleStick,
         plan: &[TradingGrid],
@@ -984,7 +936,7 @@ impl Portfolio {
     }
 
     #[inline]
-    pub(crate) fn check_order_exit(
+    pub fn check_order_exit(
         order: &Order,
         candle: &CandleStick,
         fee_rate: f64,
@@ -1425,6 +1377,11 @@ impl Portfolio {
     /// Dùng `calendar` để bỏ qua khoảng thời gian không có giao dịch
     /// (ví dụ cuối tuần StockCalendar, ngoài giờ VN), tránh query API
     /// tốn thời gian chỉ để nhận về empty candles.
+    ///
+    /// `cache_enabled = false` bỏ qua LRU hoàn toàn: mỗi range gọi thẳng
+    /// `loader.range` (vẫn giữ calendar alignment + retry live-lag). Hợp khi
+    /// loader rẻ và stateless — không tốn RAM cache và không phải quản lý
+    /// coverage cho dữ liệu không cần giữ.
     #[inline]
     async fn fetch_candles_from_loader(
         loader: &Arc<dyn DataLoader + Sync + Send>,
@@ -1434,6 +1391,7 @@ impl Portfolio {
         to: u64,
         resolution: &str,
         cache_key: &str,
+        cache_enabled: bool,
     ) -> Result<Vec<CandleStick>, Error> {
         if from >= to {
             return Err(Error::new(
@@ -1443,7 +1401,7 @@ impl Portfolio {
         }
 
         // --- 1. Thử block cache trước ---
-        {
+        if cache_enabled {
             let guard = cache.read().await;
             if let Some(lru) = guard.get(cache_key)
                 && let Some(candles) = Self::try_read_blocks(lru, from, to)
@@ -1478,26 +1436,33 @@ impl Portfolio {
             return Ok(vec![]);
         }
 
-        // --- 2. Cache miss → gọi loader full blocks (từ fetch_from → fetch_to) ---
-        let start_bid = Self::block_id(fetch_from);
-        let end_bid = Self::block_id(fetch_to.saturating_sub(1));
-        let block_from = (start_bid * BLOCK_SECS) as u64;
-        let block_to = ((end_bid + 1) * BLOCK_SECS) as u64;
-
-        #[cfg(debug_assertions)]
-        let t_fetch = std::time::Instant::now();
-
+        // --- 2. Cache miss → gọi loader ---
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| Error::other(e.to_string()))?
             .as_secs();
+
+        // Cache bật: mở rộng ra full weekly blocks để coverage LRU khớp ranh
+        // giới block (đọc lại cửa sổ lookback ở lần sau không phải fetch lại).
+        // Cache tắt: chỉ hỏi đúng range cần, không mở rộng — mở rộng chỉ có
+        // nghĩa khi kết quả được giữ lại.
+        let (block_from, block_to) = if cache_enabled {
+            let start_bid = Self::block_id(fetch_from);
+            let end_bid = Self::block_id(fetch_to.saturating_sub(1));
+            ((start_bid * BLOCK_SECS) as u64, ((end_bid + 1) * BLOCK_SECS) as u64)
+        } else {
+            (fetch_from, fetch_to)
+        };
+
+        #[cfg(debug_assertions)]
+        let t_fetch = std::time::Instant::now();
 
         let candles_full =
             Self::fetch_direct(loader, resolution, block_from, block_to, now).await?;
 
         #[cfg(debug_assertions)]
         println!(
-            "  [debug] fetch_candles: MISS [{}, {}) → blocks [{}, {})  got {} candles  {:.0}ms  key={}",
+            "  [debug] fetch_candles: MISS [{}, {}) → blocks [{}, {})  got {} candles  {:.0}ms  key={}  cache={}",
             from,
             to,
             block_from,
@@ -1505,10 +1470,11 @@ impl Portfolio {
             candles_full.len(),
             t_fetch.elapsed().as_secs_f64() * 1000.0,
             cache_key,
+            cache_enabled,
         );
 
         // --- 3. Lưu vào LRU blocks ---
-        {
+        if cache_enabled {
             let mut guard = cache.write().await;
             let lru = guard
                 .entry(cache_key.to_string())
@@ -1671,9 +1637,365 @@ mod tests {
         assert_eq!(report.total_trades, 0);
     }
 
-    #[test]
-    #[ignore]
-    fn test_forward_basic() {
-        // Integration test: cần loader thật — bỏ qua trong CI
+    // ── Kernel `evaluate` + `Session` ───────────────────────────────────────
+
+    use crate::fee::SimpleFixedFee;
+    use crate::score::SharpeScore;
+    use crate::strategies::GridStrategy;
+    // `Future`/`Pin`/`LoaderFuture` đã có ở scope cha (qua `use super::*`).
+
+    /// Price series 1m (openTime giây, cách nhau 60s), dùng cho cả kernel lẫn
+    /// dữ liệu analysis.
+    fn candles(n: i64, from_ts: i64, f: impl Fn(i64) -> f64) -> Vec<CandleStick> {
+        (0..n)
+            .map(|i| {
+                let price = f(i);
+                CandleStick::new(
+                    from_ts + i * 60,
+                    price,
+                    price + 0.5,
+                    price - 0.5,
+                    price,
+                    10.0,
+                )
+            })
+            .collect()
+    }
+
+    /// Loader rỗng — kernel không hỏi loader (fetch do caller đóng), chỉ cần
+    /// một giá trị hợp lệ cho `Portfolio::new`.
+    struct NoLoader;
+    #[async_trait::async_trait]
+    impl DataLoader for NoLoader {
+        async fn range(&self, _from: u64, _to: u64, _res: &str) -> Result<Vec<CandleStick>, Error> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn portfolio(config: PortfolioConfig) -> Portfolio {
+        let strategy = Arc::new(GridStrategy::new(5, 0.008, 10.0, 2 * 24 * 3600, 900, 300));
+        Portfolio::new(
+            Arc::new(NoLoader),
+            strategy,
+            Arc::new(SimpleFixedFee::new(0.0005)),
+            Arc::new(SharpeScore),
+            Arc::new(crate::calendar::CryptoCalendar),
+            config,
+        )
+        .unwrap()
+    }
+
+    fn grid_config(settlement: u64) -> PortfolioConfig {
+        PortfolioConfig {
+            resolution_for_test: "1m".to_string(),
+            resolution_for_rebuild: "1m".to_string(),
+            settlement_candles: settlement,
+            cache_enabled: false,
+        }
+    }
+
+    /// Fetch đóng trên 1 slice cố định: kernel gọi bất kỳ range nào cũng được,
+    /// không cần biết dữ liệu nằm ở đâu — đúng abstraction của `FetchFn`.
+    fn slice_fetch(
+        data: Vec<CandleStick>,
+    ) -> Box<
+        dyn FnMut(u64, u64) -> LoaderFuture + Send + Sync,
+    > {
+        Box::new(move |from: u64, to: u64| {
+            let out: Vec<CandleStick> = data
+                .iter()
+                .copied()
+                .filter(|c| c.t >= 0 && (c.t as u64) >= from && (c.t as u64) < to)
+                .collect();
+            Box::pin(async move { Ok(out) })
+        })
+    }
+
+    /// Notify thu event vào vector (boxed để coerce được sang `NotifyFn`).
+    fn notify_box<'a>(
+        sink: &'a mut Vec<OrderEvent>,
+    ) -> Box<
+        dyn FnMut(OrderEvent) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>
+            + Send
+            + Sync
+            + 'a,
+    > {
+        Box::new(move |e: OrderEvent| {
+            sink.push(e);
+            Box::pin(async move { Ok(()) })
+        })
+    }
+
+    /// Mốc bắt đầu series + số nến warm-up đủ cho `AnalysisGrid` (≥10).
+    /// Kernel rebuild tại `from` bằng cửa sổ `[from - lookback, from)`, nên
+    /// series phải có dữ liệu **trước** `from` — đúng như backtest thật.
+    const BASE: i64 = 1_700_000_000;
+    const WARMUP: i64 = 60;
+
+    fn from_ts() -> u64 {
+        (BASE + WARMUP * 60) as u64
+    }
+
+    fn grid_params() -> Vec<f64> {
+        vec![0.25, 1_000.0, 5.0, 0.008, (2 * 24 * 3600) as f64]
+    }
+
+    #[tokio::test]
+    async fn kernel_advances_session_one_candle_at_a_time() {
+        // Giá nhấn sóng để giá chạm nhiều grid level → có lệnh đặt/đóng.
+        let data = candles(WARMUP + 40, BASE, |i| 100.0 + (i % 40) as f64 - 20.0);
+        let pf = portfolio(grid_config(0));
+        let params = grid_params();
+        let mut session = Session::new();
+        let mut events = Vec::new();
+        let from = from_ts();
+
+        // 10 lời gọi × 4 nến: mỗi lời gọi nhận cửa sổ MỚI và chỉ tiến session
+        // (đúng cách realtime gọi từng nến) — không reset plan/seq/lệnh.
+        for i in 0..10u64 {
+            let mut trade = slice_fetch(data.clone());
+            let mut analysis = slice_fetch(data.clone());
+            let mut notify = notify_box(&mut events);
+            pf.evaluate(
+                &mut session,
+                from + i * 4 * 60,
+                from + (i + 1) * 4 * 60,
+                &|id| params[id],
+                &mut *trade,
+                &mut *analysis,
+                &mut *notify,
+            )
+            .await
+            .expect("kernel chạy");
+        }
+
+        assert_eq!(session.candle_seq, 40, "mỗi nến đếm đúng 1 lần");
+        assert_eq!(session.candle_ts, from as i64 + 39 * 60);
+        assert!(
+            !session.plan.is_empty(),
+            "rebuild phải dựng được plan từ candle: {session:?}"
+        );
+        assert!(
+            session.orders.len() + session.history.len() > 0,
+            "phải có lệnh: {session:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, OrderEvent::Placed { .. })),
+            "notify phải nhận Placed: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn kernel_is_idempotent_for_already_processed_candles() {
+        let data = candles(WARMUP + 20, BASE, |i| 100.0 + (i % 10) as f64);
+        let pf = portfolio(grid_config(0));
+        let params = grid_params();
+        let mut session = Session::new();
+        let from = from_ts();
+
+        for _ in 0..2 {
+            let mut trade = slice_fetch(data.clone());
+            let mut analysis = slice_fetch(data.clone());
+            let mut events = Vec::new();
+            let mut notify = notify_box(&mut events);
+            pf.evaluate(
+                &mut session,
+                from,
+                from + 20 * 60,
+                &|id| params[id],
+                &mut *trade,
+                &mut *analysis,
+                &mut *notify,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            session.candle_seq, 20,
+            "nến đã xử lý không được đếm lại (session.candle_ts chặn)"
+        );
+    }
+
+    #[tokio::test]
+    async fn settlement_blocks_exit_until_n_more_candles() {
+        // T+3: lệnh mở ở nến 100 phải còn mở qua các nến 101..103.
+        let pf = portfolio(grid_config(3));
+        let params = grid_params();
+        let from = from_ts();
+
+        // Nạp đủ history để plan có level quanh 100, rồi đẩy giá xuống sâu để
+        // chạm SL — nhưng T+3 chặn nên lệnh phải còn mở.
+        let mut data: Vec<CandleStick> = candles(WARMUP + 30, BASE, |i| 100.0 - i as f64 * 0.1);
+        let mut session = Session::new();
+        let mut events = Vec::new();
+
+        {
+            let mut trade = slice_fetch(data.clone());
+            let mut analysis = slice_fetch(data.clone());
+            let mut notify = notify_box(&mut events);
+            pf.evaluate(
+                &mut session,
+                from,
+                from + 30 * 60,
+                &|id| params[id],
+                &mut *trade,
+                &mut *analysis,
+                &mut *notify,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert!(!session.plan.is_empty(), "sau 30 nến plan phải có");
+        let open = session.orders.len();
+        if open > 0 {
+            // Nến giảm mạnh chạm SL/TP mọi level.
+            let crash_ts = u64::try_from(session.candle_ts + 60).unwrap();
+            data.push(CandleStick::new(
+                i64::try_from(crash_ts).unwrap(),
+                1.0,
+                101.0,
+                0.5,
+                1.0,
+                10.0,
+            ));
+            let mut trade = slice_fetch(data.clone());
+            let mut analysis = slice_fetch(data.clone());
+            {
+                let mut notify = notify_box(&mut events);
+                pf.evaluate(
+                    &mut session,
+                    crash_ts,
+                    crash_ts + 60,
+                    &|id| params[id],
+                    &mut *trade,
+                    &mut *analysis,
+                    &mut *notify,
+                )
+                .await
+                .unwrap();
+            }
+            assert_eq!(
+                session.orders.len(),
+                open,
+                "T+3: lệnh chưa đủ nến chờ nên không đóng được"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_failure_advances_review_and_keeps_plan() {
+        // Chưa đủ 10 nến analysis → rebuild fail; session phải vẫn tiến
+        // `review_at` (không thử lại mỗi nến) và giữ plan rỗng.
+        let data = candles(3, BASE, |_| 100.0);
+        let pf = portfolio(grid_config(0));
+        let params = grid_params();
+        let mut session = Session::new();
+        let mut events = Vec::new();
+        let mut notify = notify_box(&mut events);
+
+        let mut trade = slice_fetch(data.clone());
+        let mut analysis = slice_fetch(data.clone());
+        let result = pf
+            .evaluate(
+                &mut session,
+                BASE as u64,
+                BASE as u64 + 3 * 60,
+                &|id| params[id],
+                &mut *trade,
+                &mut *analysis,
+                &mut notify,
+            )
+            .await;
+
+        assert!(result.is_err(), "thiếu data phải báo lỗi rebuild");
+        assert!(
+            session.review_at > 0,
+            "review_at phải tiến dù rebuild fail, nếu không sẽ retry mỗi nến"
+        );
+        assert!(session.plan.is_empty(), "plan cũ (rỗng) được giữ nguyên");
+    }
+
+    #[tokio::test]
+    async fn cache_disabled_skips_lru_and_asks_loader_exact_range() {
+        // Loader đếm số lần được hỏi + range nhận được: tắt cache phải hỏi
+        // đúng range cần (không mở rộng full weekly block) và không lưu LRU.
+        struct CountingLoader {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+            last: Arc<std::sync::Mutex<Option<(u64, u64)>>>,
+            data: Vec<CandleStick>,
+        }
+        #[async_trait::async_trait]
+        impl DataLoader for CountingLoader {
+            async fn range(
+                &self,
+                from: u64,
+                to: u64,
+                _resolution: &str,
+            ) -> Result<Vec<CandleStick>, Error> {
+                self.calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *self.last.lock().unwrap() = Some((from, to));
+                Ok(self
+                    .data
+                    .iter()
+                    .copied()
+                    .filter(|c| c.t >= 0 && (c.t as u64) >= from && (c.t as u64) < to)
+                    .collect())
+            }
+        }
+
+        let data = candles(WARMUP + 200, BASE, |i| 100.0 + (i % 10) as f64);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let last = Arc::new(std::sync::Mutex::new(None));
+        let loader = Arc::new(CountingLoader {
+            calls: calls.clone(),
+            last: last.clone(),
+            data,
+        });
+
+        let strategy = Arc::new(GridStrategy::new(5, 0.008, 10.0, 2 * 24 * 3600, 900, 300));
+        let config = PortfolioConfig {
+            cache_enabled: false,
+            ..grid_config(0)
+        };
+        let pf = Portfolio::new(
+            loader,
+            strategy,
+            Arc::new(SimpleFixedFee::new(0.0005)),
+            Arc::new(SharpeScore),
+            Arc::new(crate::calendar::CryptoCalendar),
+            config,
+        )
+        .unwrap();
+
+        let params = grid_params();
+        let mut session = Session::new();
+        let mut events = Vec::new();
+        let mut notify = notify_box(&mut events);
+        pf.backtest(
+            &mut session,
+            3600,
+            from_ts(),
+            from_ts() + 200 * 60,
+            &|id| params[id],
+            &mut notify,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "loader phải được hỏi"
+        );
+        let (from, to) = last.lock().unwrap().expect("loader phải được hỏi ít nhất 1 lần");
+        assert!(
+            to - from < 7 * 24 * 3600,
+            "cache tắt: không mở rộng full weekly block, hỏi đúng range ({from}, {to})"
+        );
+        assert_eq!(session.candle_seq, 200, "vẫn chạy đủ nến qua loader");
     }
 }

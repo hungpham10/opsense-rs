@@ -48,12 +48,166 @@ fn process(observations) {
         lw = param_live_window_secs.to_int();
     }
 
+    // `params.mode`:
+    //   "analysis" (mặc định) — chỉ dựng AnalysisGrid + TransitionAnalysis và
+    //     phát snapshot; không đặt lệnh.
+    //   "trading" — thêm bước đặt lệnh: candle VỪA ĐÓNG chạy qua kernel
+    //     `portfolio_feed` (cùng kernel backtest dùng), lệnh ghi thành
+    //     observation `signal = "order"` trong own station.
+    let mode = "analysis";
+    if is_def_var("param_mode") && type_of(param_mode) != "()" {
+        mode = param_mode;
+    }
+
     if trigger() == "tick" {
         return tick_accumulate(observations, own, symbol, resolution);
     }
 
     // Clock ping (trigger "") hoặc klines mới (trigger "history") → recompute.
-    snapshot(hist_src, own, symbol, resolution, hw, lw)
+    let out = snapshot(hist_src, own, symbol, resolution, hw, lw);
+
+    if mode == "trading" {
+        out += trade(hist_src, own, symbol, resolution, hw);
+    }
+    out
+}
+
+// ── trading: chạy kernel đặt lệnh cho candle vừa đóng ─────────────────────
+//
+// Station là state duy nhất: `portfolio_feed` tự tái dựng session từ các
+// observation `signal = "order"` + cursor `labels.kind = "trading_step"` trong
+// own station, nên script không giữ gì cả và restart không mất lệnh.
+
+fn trade(hist_src, own, symbol, resolution, hw) {
+    let now = now_secs();
+    let from = now - hw;
+    let step = bucket_secs(resolution);
+
+    // Series phân tích = kline history + candle live; cùng bucket thì live thắng
+    // (nến đang tích cực phản ánh giá thực tế, không phải nến đã đóng của API).
+    let hist = station_candles(hist_src, from, now, resolution);
+    let live = station_candles(own, from, now, resolution);
+    if type_of(hist) == "()" && type_of(live) == "()" { return []; }
+    let series = merge_candles(empty_if_missing(hist), empty_if_missing(live));
+    // ≥ 10 nến để AnalysisGrid dựng được plan.
+    if series.len() < 10 { return []; }
+
+    // Chỉ giao trên nến ĐÃ ĐÓNG: bucket + step <= now.
+    let closed = last_closed(series, now, step);
+    if type_of(closed) == "()" { return []; }
+
+    // Lệnh/cursor đều nằm ở own station.
+    let state = station_query(own, from, now);
+    if type_of(state) == "()" { return []; }
+    if already_traded(state, closed["t"].to_int()) { return []; }
+
+    portfolio_feed(series, state, closed, trading_cfg(), symbol)
+}
+
+/// `()` (station chưa có) → mảng rỗng để merge.
+fn empty_if_missing(candles) {
+    if type_of(candles) == "()" { [] } else { candles }
+}
+
+/// Nến cuối đã đóng (bucket + step <= now), hoặc `()` nếu tất cả còn đang mở.
+fn last_closed(candles, now, step) {
+    let i = candles.len() - 1;
+    while i >= 0 {
+        let c = candles[i];
+        if c["t"].to_int() + step <= now { return c; }
+        i -= 1;
+    }
+    ()
+}
+
+/// Cursor `labels.kind = "trading_step"` lưu nến đã chạy → không chạy lại nến đó.
+fn already_traded(state, last_ts) {
+    for o in state {
+        if o["labels"]["kind"] == "trading_step" && o["ts"] >= last_ts { return true; }
+    }
+    false
+}
+
+/// Độ dài bucket (giây) theo resolution.
+fn bucket_secs(resolution) {
+    if resolution == "1" || resolution == "1m" { return 60; }
+    if resolution == "5" || resolution == "5m" { return 300; }
+    if resolution == "15" || resolution == "15m" { return 900; }
+    if resolution == "1H" || resolution == "60" { return 3600; }
+    if resolution == "1D" { return 86400; }
+    60
+}
+
+/// Cấu hình engine lấy từ `params` của node (đổi chiến lược = đổi TOML).
+fn trading_cfg() {
+    let resolution = "1m";
+    if is_def_var("param_resolution") && type_of(param_resolution) != "()" {
+        resolution = param_resolution;
+    }
+    let calendar = "crypto";
+    if is_def_var("param_calendar") && type_of(param_calendar) != "()" {
+        calendar = param_calendar;
+    }
+    let strategy = "grid";
+    if is_def_var("param_strategy") && type_of(param_strategy) != "()" {
+        strategy = param_strategy;
+    }
+    let grid_levels = 5;
+    if is_def_var("param_grid_levels") && type_of(param_grid_levels) != "()" {
+        grid_levels = param_grid_levels.to_int();
+    }
+    let sl_pct = 0.008;
+    if is_def_var("param_sl_pct") && type_of(param_sl_pct) != "()" {
+        sl_pct = param_sl_pct.to_float();
+    }
+    let smoothing_k = 10.0;
+    if is_def_var("param_smoothing_k") && type_of(param_smoothing_k) != "()" {
+        smoothing_k = param_smoothing_k.to_float();
+    }
+    let lookback_secs = 2 * 24 * 3600;
+    if is_def_var("param_lookback_secs") && type_of(param_lookback_secs) != "()" {
+        lookback_secs = param_lookback_secs.to_int();
+    }
+    let review_interval_secs = 900;
+    if is_def_var("param_review_interval_secs") && type_of(param_review_interval_secs) != "()" {
+        review_interval_secs = param_review_interval_secs.to_int();
+    }
+    let trading_candle_secs = 60;
+    if is_def_var("param_trading_candle_secs") && type_of(param_trading_candle_secs) != "()" {
+        trading_candle_secs = param_trading_candle_secs.to_int();
+    }
+    let fee_rate = 0.0005;
+    if is_def_var("param_fee_rate") && type_of(param_fee_rate) != "()" {
+        fee_rate = param_fee_rate.to_float();
+    }
+    let kelly_fraction = 0.25;
+    if is_def_var("param_kelly_fraction") && type_of(param_kelly_fraction) != "()" {
+        kelly_fraction = param_kelly_fraction.to_float();
+    }
+    let base_capital = 100000.0;
+    if is_def_var("param_base_capital") && type_of(param_base_capital) != "()" {
+        base_capital = param_base_capital.to_float();
+    }
+    let settlement_candles = 0;
+    if is_def_var("param_settlement_candles") && type_of(param_settlement_candles) != "()" {
+        settlement_candles = param_settlement_candles.to_int();
+    }
+
+    #{
+        resolution: resolution,
+        calendar: calendar,
+        strategy: strategy,
+        grid_levels: grid_levels,
+        sl_pct: sl_pct,
+        smoothing_k: smoothing_k,
+        lookback_secs: lookback_secs,
+        review_interval_secs: review_interval_secs,
+        trading_candle_secs: trading_candle_secs,
+        fee_rate: fee_rate,
+        kelly_fraction: kelly_fraction,
+        base_capital: base_capital,
+        settlement_candles: settlement_candles
+    }
 }
 
 // ── tick: gộp trade price vào candle bucket ────────────────────────────────

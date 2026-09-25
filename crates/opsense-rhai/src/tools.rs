@@ -146,4 +146,8 @@ pub fn register_all(eng: &mut rhai::Engine, attributes: std::collections::BTreeM
     crate::time_fns::register(eng);
     crate::ts_ops::register(eng);
     crate::attributes::register(eng, attributes);
+
+    // Realtime grid trading: `portfolio_feed` — kernel chạy trên Session tái
+    // dựng từ observation order trong station (xem `orders`).
+    crate::orders::register(eng);
 }

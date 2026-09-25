@@ -27,6 +27,7 @@ use opsense_components::signal;
 use opsense_components::station::TimeseriesStationSink;
 use opsense_components::vector::runtime::Runtime;
 use opsense_core::{Config, Context, Observation, TimeseriesStation};
+use opsense_model::events::Signal;
 use opsense_mlib::cast::CastType;
 use opsense_mlib::jq::JsonQuery;
 use opsense_mlib::vector::components::clock::Clock;
@@ -325,6 +326,141 @@ async fn full_pipeline_ticks_and_snapshot() {
             .any(|o| o.labels.get("kind").map(String::as_str) == Some("snapshot")),
         "sink terminal phải nhận snapshot từ grid: {sink_obs:?}"
     );
+}
+
+/// ── Tầng 3: `params.mode = "trading"` trên chính config thật ────────────────
+///
+/// Cùng graph + mock như trên, chỉ bật nhánh đặt lệnh: candle 1m từ klines +
+/// candle realtime từ aggTrade → `portfolio_feed` chạy kernel →
+/// observation `signal = "order"` trong station `grid`.
+///
+/// Mock klines dùng **giá nhấn sóng** + candle cuối biến động rộng để chắc
+/// chắn giá chạm level grid (nến range hẹp chỉ trúng khi giá rơi đúng bậc).
+#[tokio::test(flavor = "multi_thread")]
+async fn full_pipeline_trading_emits_orders() {
+    let _sub = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+
+    let now = signal::now_secs();
+    let mut cfg = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
+    let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
+    let script = dir.join("grid.rhai");
+
+    let (src_addr, _reqs) = spawn_http_mock(swing_klines_body(now)).await;
+    let src_url = format!("http://{src_addr}/api/v3/klines?symbol={SYMBOL}&interval=1m");
+    let ws_uri = spawn_ws_mock();
+
+    if let Some(p) = &mut cfg.pipeline {
+        for comp in &mut p.components {
+            let Some(obj) = comp.as_object_mut() else {
+                continue;
+            };
+            match obj.get("id").and_then(Value::as_str) {
+                Some(STATION_HISTORY) => {
+                    obj.insert("url".into(), json!(src_url));
+                }
+                Some(NODE_TICK_FEED) => {
+                    obj.insert("uri".into(), json!(ws_uri));
+                }
+                Some(STATION_GRID) => {
+                    obj.insert("script_path".into(), json!(script.to_string_lossy().as_ref()));
+                    let params = obj
+                        .get_mut("params")
+                        .and_then(Value::as_object_mut)
+                        .expect("grid node có params");
+                    params.insert("mode".into(), json!("trading"));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let secret = Secret::new().await.expect("secret init");
+    let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
+    let components = pipeline_from_config(&cfg).expect("config graph deserialize");
+    let mut rt = Runtime::new();
+    rt.set_context(ctx.clone());
+    rt.reload(components).expect("valid component graph");
+    let _runtime_handle = rt.start(|_| async {}).unwrap();
+
+    let obs = wait_orders(&ctx, 90).await;
+    let orders: Vec<&Observation> = obs
+        .iter()
+        .filter(|o| o.signal == Signal::Order)
+        .collect();
+    assert!(!orders.is_empty(), "trading mode phải sinh order: {obs:?}");
+    for order in &orders {
+        assert_eq!(order.metric_id, SYMBOL);
+        assert_eq!(order.labels.get("status").map(String::as_str), Some("open"));
+        assert!(order.value > 0.0, "entry price dương: {order:?}");
+        for key in ["order_id", "dtype", "grid", "level", "size", "sl", "tp"] {
+            assert!(order.labels.contains_key(key), "thiếu label `{key}`: {order:?}");
+        }
+    }
+
+    // Cursor đánh dấu nến đã chạy trading step (T+N + idempotent sau restart).
+    let cursor: Vec<&Observation> = obs
+        .iter()
+        .filter(|o| o.labels.get("kind").map(String::as_str) == Some("trading_step"))
+        .collect();
+    assert_eq!(cursor.len(), 1, "phải có đúng 1 cursor: {obs:?}");
+    assert!(
+        cursor[0]
+            .labels
+            .get("candle_seq")
+            .and_then(|v| v.parse::<u64>().ok())
+            .is_some_and(|seq| seq >= 1),
+        "cursor phải lưu candle_seq: {cursor:?}"
+    );
+}
+
+/// Klines giá nhấn sóng; candle cuối có range rộng để chạm level grid.
+fn swing_klines_body(now: i64) -> String {
+    let base = now / 60 * 60;
+    let rows: Vec<Value> = (1..=20)
+        .map(|i| {
+            let i = i as f64;
+            let close = 100.0 + (i % 10.0) - 5.0;
+            let (high, low) = if i == 20.0 {
+                (close + 20.0, close - 20.0)
+            } else {
+                (close + 0.5, close - 0.5)
+            };
+            json!([
+                (base - 60 * i as i64) * 1000,
+                close,
+                high,
+                low,
+                close,
+                12.5
+            ])
+        })
+        .collect();
+    json!(rows).to_string()
+}
+
+async fn wait_orders(ctx: &Arc<Context>, timeout_secs: u64) -> Vec<Observation> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        if let Ok(st) = ctx.station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID).await {
+            let now = signal::now_secs();
+            let obs = st
+                .write()
+                .await
+                .query_recent(now - 3600, now)
+                .await
+                .unwrap_or_default();
+            if obs.iter().any(|o| o.signal == Signal::Order) {
+                return obs;
+            }
+        }
+        if Instant::now() >= deadline {
+            panic!("station `{STATION_GRID}` không có order sau {timeout_secs}s");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// Binance `klines` rows: `[openTimeMs, open, high, low, close, volume]`.

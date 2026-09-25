@@ -101,6 +101,26 @@ script_path = "strategies/binance/grid.rhai"
    history_secs = 3600
    live_window_secs = 300
 
+   # mode = "analysis" (mặc định) — chỉ dựng grid + transition, phát snapshot.
+   # mode = "trading" — thêm bước đặt lệnh: candle đã đóng chạy qua kernel
+   # `portfolio_feed` (cùng kernel backtest dùng), lệnh ghi thành observation
+   # `signal = "order"` trong station `grid` (open/close theo `labels.status`).
+   # Các tham số dưới là tham số engine cho nhánh đó — đổi ở đây, không sửa script.
+   mode = "analysis"
+   calendar = "crypto"
+   strategy = "grid"
+   grid_levels = 5
+   sl_pct = 0.008
+   smoothing_k = 10.0
+   lookback_secs = 172800
+   review_interval_secs = 900
+   trading_candle_secs = 60
+   fee_rate = 0.0005
+   kelly_fraction = 0.25
+   base_capital = 100000.0
+   # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.
+   settlement_candles = 0
+
 # Terminal node (bắt buộc: transform non-sink phải có consumer). Chỉ giữ
 # snapshots + candles trong memory — không persist / không MinIO (v1).
 [[pipeline.components]]

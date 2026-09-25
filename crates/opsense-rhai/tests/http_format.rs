@@ -93,8 +93,19 @@ async fn http_source_maps_prometheus_through_jq() {
 
     let _handle = rt.start(|_| async {}).unwrap();
 
-    // Wait for at least one poll cycle
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Chờ có điều kiện thay vì sleep cứng: khi chạy song song cả workspace, 500ms
+    // không bảo đảm clock đã kịp tick + http source đã bắn request.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if !requests.lock().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no HTTP request made"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // Verify request was made with interpolated bindings
     let reqs = requests.lock().unwrap();

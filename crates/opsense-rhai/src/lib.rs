@@ -22,6 +22,7 @@
 //! `examples/prometheus-demo/rhai/` for example scripts.
 
 mod attributes;
+mod orders;
 mod rhai_collect;
 mod runtime;
 mod station;
