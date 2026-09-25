@@ -401,29 +401,55 @@ async fn full_pipeline_trading_emits_orders() {
     }
 
     // Cursor đánh dấu nến đã chạy trading step (T+N + idempotent sau restart).
-    let cursor: Vec<&Observation> = obs
+    // Append-only: mỗi nến live đóng trong lúc test chờ sinh một cursor, nên
+    // assert theo tính chất (có cursor, đều có `candle_seq`, không trùng nến)
+    // chứ không khoá cứng vào con số — con số phụ thuộc tốc độ máy.
+    let mut cursor: Vec<&Observation> = obs
         .iter()
         .filter(|o| o.labels.get("kind").map(String::as_str) == Some("trading_step"))
         .collect();
-    assert_eq!(cursor.len(), 1, "phải có đúng 1 cursor: {obs:?}");
+    assert!(!cursor.is_empty(), "phải có cursor trading_step: {obs:?}");
+    for c in &cursor {
+        assert!(
+            c.labels
+                .get("candle_seq")
+                .and_then(|v| v.parse::<u64>().ok())
+                .is_some_and(|seq| seq >= 1),
+            "cursor phải lưu candle_seq: {c:?}"
+        );
+        // Nến đã đóng = ts của cursor, luôn trùng bucket 60s của resolution 1m.
+        assert_eq!(c.ts % 60, 0, "cursor ts phải theo bucket 60s: {c:?}");
+        assert_eq!(c.value, c.ts as f64, "cursor value = candle_ts: {c:?}");
+    }
+    cursor.sort_by_key(|c| c.ts);
+    let ts: Vec<i64> = cursor.iter().map(|c| c.ts).collect();
+    let mut uniq = ts.clone();
+    uniq.dedup();
+    assert_eq!(ts, uniq, "mỗi nến chỉ có một cursor: {cursor:?}");
+    // Nến đóng gần nhất phải đã được xử lý (cursor ts ≥ ts của mọi order).
+    let last_order_ts = orders.iter().map(|o| o.ts).max().unwrap_or_default();
     assert!(
-        cursor[0]
-            .labels
-            .get("candle_seq")
-            .and_then(|v| v.parse::<u64>().ok())
-            .is_some_and(|seq| seq >= 1),
-        "cursor phải lưu candle_seq: {cursor:?}"
+        ts.last().is_some_and(|last| *last >= last_order_ts),
+        "cursor phải không cũ hơn order: {cursor:?}"
     );
 }
 
-/// Klines giá nhấn sóng; candle cuối có range rộng để chạm level grid.
+/// Klines giá nhấn sóng; **candle mới nhất** có range rộng để chạm level grid.
+///
+/// Vì sao range rộng phải nằm ở candle mới nhất (i = 1) chứ không chỉ ở
+/// candle cũ nhất: candle live từ websocket có thể rơi vào **cùng bucket** với
+/// candle kline mới nhất (tick ts = now-5s, nên bucket phụ thuộc giây lúc test
+/// khởi động). Merge quy tắc "live thắng cùng bucket" → candle rộng bị live che
+/// mất, kernel nhận nến hẹp không cắt level nào → không đặt lệnh cho tới khi có
+/// nến live đóng tiếp theo. Đặt range rộng ở cả đầu (i=1) và cuối (i=20) để nến
+/// nào là nến "vừa đóng" cũng chạm level.
 fn swing_klines_body(now: i64) -> String {
     let base = now / 60 * 60;
     let rows: Vec<Value> = (1..=20)
         .map(|i| {
             let i = i as f64;
             let close = 100.0 + (i % 10.0) - 5.0;
-            let (high, low) = if i == 20.0 {
+            let (high, low) = if i == 1.0 || i == 20.0 {
                 (close + 20.0, close - 20.0)
             } else {
                 (close + 0.5, close - 0.5)
@@ -541,27 +567,39 @@ async fn ws_handler(ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(handle_ticks)
 }
 
+/// Phát tick **liên tục** suốt đời test, mỗi vòng 2 giây 2 tick ở hai đầu
+/// dải giá (`95.0` / `112.0`) cách nhau 1s, timestamp `now-5s` / `now-4s`.
+///
+/// Vì sao phải liên tục chứ không bắn 4 tick rồi im: nến "vừa đóng" mà
+/// `trade()` chọn là nến live, mà tick thì chỉ có 4 cái lúc connect ⇒ sau đó
+/// data đứng yên. Kernel chỉ có **một** cơ hội đặt lệnh; nếu lần đó nến live
+/// rơi vào bucket chỉ nhận 1 tick (range = 0, không cắt level nào) thì cursor
+/// `trading_step` đánh dấu nến đó và mọi vòng clock sau bị idempotency bỏ qua
+/// ⇒ test treo tới deadline. Phát liên tục ⇒ mỗi phút có một nến live đóng
+/// với range thật (`95..112`) đủ chạm level, và nến đóng mới ⇒ cursor mới ⇒
+/// kernel thử lại được.
 async fn handle_ticks(mut socket: WebSocket) {
-    let base_ms = signal::now_secs() * 1000;
-    let prices = ["100.2", "101.7", "99.9", "102.4"];
-    for (i, p) in prices.iter().enumerate() {
-        let tick = json!({
-            "e": "aggTrade",
-            "E": base_ms - 40_000 + (i as i64 * 1_000),
-            "s": SYMBOL,
-            "p": p,
-            "q": "0.01",
-            "t": i as i64 + 1,
-            "m": false
-        });
-        if socket
-            .send(WsMessage::Text(tick.to_string().into()))
-            .await
-            .is_err()
-        {
-            return;
+    let start_ms = signal::now_secs() * 1000;
+    for round in 0..90i64 {
+        for (i, price) in ["95.0", "112.0"].iter().enumerate() {
+            let tick = json!({
+                "e": "aggTrade",
+                "E": start_ms - 5_000 + round * 2_000 + (i as i64 * 1_000),
+                "s": SYMBOL,
+                "p": price,
+                "q": "0.01",
+                "t": round * 2 + i as i64 + 1,
+                "m": false
+            });
+            if socket
+                .send(WsMessage::Text(tick.to_string().into()))
+                .await
+                .is_err()
+            {
+                return;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
     }
     // Giữ connection mở tới khi client đóng (runtime không cần frame nữa).
     while socket.recv().await.is_some() {}
