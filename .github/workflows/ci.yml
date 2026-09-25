@@ -147,7 +147,7 @@ jobs:
         uses: rui314/setup-mold@v1
 
       - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.1.8
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

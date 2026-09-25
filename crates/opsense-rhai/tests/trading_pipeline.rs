@@ -199,18 +199,33 @@ async fn grid_trading_emits_order_events_through_runtime() {
     }
 
     // State sống trong station: cursor đánh dấu nến đã chạy trading step.
-    let cursor: Vec<&Observation> = obs
+    //
+    // Append-only nên **không** khoá cứng số cursor: pipeline chạy bao lâu trước
+    // khi assert phụ thuộc tốc độ máy (CI chậm hơn local, chạy được 2 nến đóng
+    // → 2 cursor; local ~0.5s chỉ kịp 1 nến). Assert theo tính chất: có
+    // cursor, mỗi nến đúng 1 cursor, và nến cuối đã đóng nhất định có cursor.
+    let mut cursor: Vec<&Observation> = obs
         .iter()
         .filter(|o| o.labels.get("kind").map(String::as_str) == Some("trading_step"))
         .collect();
-    assert_eq!(cursor.len(), 1, "phải có đúng 1 cursor: {obs:?}");
-    assert_eq!(cursor[0].ts, last_closed);
+    assert!(!cursor.is_empty(), "phải có cursor trading_step: {obs:?}");
+    cursor.sort_by_key(|c| c.ts);
+    let ts: Vec<i64> = cursor.iter().map(|c| c.ts).collect();
+    let mut uniq = ts.clone();
+    uniq.dedup();
+    assert_eq!(ts, uniq, "mỗi nến chỉ có một cursor: {cursor:?}");
     assert!(
-        cursor[0]
-            .labels
-            .get("candle_seq")
-            .and_then(|v| v.parse::<u64>().ok())
-            .is_some_and(|seq| seq >= 1),
-        "cursor phải lưu candle_seq để T+N hoạt động sau restart: {cursor:?}"
+        ts.contains(&last_closed),
+        "cursor phải có nến vừa đóng gần nhất ({last_closed}): {cursor:?}"
     );
+    for c in &cursor {
+        assert_eq!(c.ts % 60, 0, "cursor ts theo bucket 60s: {c:?}");
+        assert!(
+            c.labels
+                .get("candle_seq")
+                .and_then(|v| v.parse::<u64>().ok())
+                .is_some_and(|seq| seq >= 1),
+            "cursor phải lưu candle_seq để T+N hoạt động sau restart: {cursor:?}"
+        );
+    }
 }
