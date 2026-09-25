@@ -10,9 +10,10 @@
 //! trên dữ liệu thật là dùng được: có ô, level tăng dần trong khoảng giá quan
 //! sát, win-prob trong (0, 1), và kernel `Portfolio` nhận plan đó đặt được lệnh.
 //!
-//! Endpoint: thử `data-api.binance.vision` trước rồi `api.binance.com`, vì
-//! **CI runner của GitHub bị Binance trả 451** (geo-block) cho `api.binance.com`.
-//! Ghi đè bằng `OPSENSE_BINANCE_KLINES_URL` nếu cần.
+//! Nguồn: **OKX** trước, rồi hai endpoint Binance. Binance chặn IP runner của
+//! GitHub (HTTP **451 Unavailable For Legal Reasons**), OKX thì không. Vì script
+//! chỉ cần chuỗi nến đã đóng, test này chạy được trên nhiều sàn — cũng là cách
+//! kiểm tra chiến lược không bị dính vào định dạng riêng của một sàn.
 
 use std::path::PathBuf;
 
@@ -46,69 +47,76 @@ fn params(i: usize) -> f64 {
     [KELLY, CAPITAL, GRID_LEVELS, SL_PCT, LOOKBACK][i]
 }
 
-/// Endpoint klines, thử lần lượt (xem [`fetch_klines`]).
+/// OKX dùng cặp `BTC-USDT` và bar `1m` (cùng độ phân giải), tối đa 300 nến/lần.
+const OKX_INST: &str = "BTC-USDT";
+const OKX_LIMIT: usize = 300;
+
+/// Sàn nguồn — khác nhau ở **format** và thứ tự, không khác ở dữ liệu: script
+/// chỉ cần chuỗi nến đã đóng nên test này cũng kiểm tra giả định đó.
+#[derive(Clone, Copy, PartialEq)]
+enum Feed {
+    Binance,
+    Okx,
+}
+
+struct Endpoint {
+    feed: Feed,
+    url: String,
+}
+
+/// Endpoint theo thứ tự ưu tiên, tự chuyển sang cái sau khi cái trước fail.
 ///
-/// Ưu tiên `data-api.binance.vision` — host **public market data** của Binance,
-/// không phục vụ giao dịch nên ít bị chặn hơn `api.binance.com` (CI runner của
-/// GitHub bị trả **451 Unavailable For Legal Reasons** cho `api.binance.com`).
-/// Ghi đè được bằng `OPSENSE_BINANCE_KLINES_URL` khi cần.
-fn endpoints() -> Vec<String> {
-    match std::env::var("OPSENSE_BINANCE_KLINES_URL") {
-        Ok(url) => vec![url],
-        Err(_) => vec![
-            "https://data-api.binance.vision/api/v3/klines".into(),
-            "https://api.binance.com/api/v3/klines".into(),
-        ],
+/// - **OKX** đứng đầu: `www.okx.com` không chặn IP CI (khác Binance trả
+///   **451 Unavailable For Legal Reasons** cho runner của GitHub).
+/// - `data-api.binance.vision` rồi `api.binance.com`: public market data host,
+///   không phục vụ giao dịch nên ít bị chặn hơn.
+///
+/// Ghi đè bằng `OPSENSE_BINANCE_KLINES_URL` (luôn theo format Binance).
+fn endpoints() -> Vec<Endpoint> {
+    if let Ok(url) = std::env::var("OPSENSE_BINANCE_KLINES_URL") {
+        return vec![Endpoint {
+            feed: Feed::Binance,
+            url,
+        }];
     }
+    vec![
+        Endpoint {
+            feed: Feed::Okx,
+            // OKX chặn `limit` ở 300 nến/lần.
+            url: format!(
+                "https://www.okx.com/api/v5/market/candles?instId={OKX_INST}&bar={INTERVAL}&limit={OKX_LIMIT}"
+            ),
+        },
+        Endpoint {
+            feed: Feed::Binance,
+            url: format!(
+                "https://data-api.binance.vision/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit={LIMIT}"
+            ),
+        },
+        Endpoint {
+            feed: Feed::Binance,
+            url: format!(
+                "https://api.binance.com/api/v3/klines?symbol={SYMBOL}&interval={INTERVAL}&limit={LIMIT}"
+            ),
+        },
+    ]
 }
 
-/// Binance `klines`: `[openTimeMs, open, high, low, close, volume]`.
-async fn fetch_klines() -> Vec<CandleStick> {
-    let client = reqwest::Client::new();
-    let mut seen = Vec::new();
-    for base in endpoints() {
-        let url = format!("{base}?symbol={SYMBOL}&interval={INTERVAL}&limit={LIMIT}");
-        let resp = match client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                seen.push(format!("{base} → transport: {e}"));
-                continue;
-            }
-        };
-        let status = resp.status();
-        if !status.is_success() {
-            seen.push(format!("{base} → HTTP {status}"));
-            continue;
-        }
-        let body: Vec<Value> = match resp.json().await {
-            Ok(v) => v,
-            Err(e) => {
-                seen.push(format!("{base} → parse JSON: {e}"));
-                continue;
-            }
-        };
-        println!("klines lấy từ {base}");
-        return parse_klines(&body);
-    }
-    panic!(
-        "không endpoint nào trả được klines (thử {}): {}",
-        endpoints().len(),
-        seen.join(" | ")
-    );
+/// Binance trí số ở dạng JSON number (openTimeMs là integer, giá có thể float
+/// **hoặc** string) → đọc qua một cổng duy nhất cho cả hai sàn.
+fn num(v: &Value) -> f64 {
+    v.as_f64()
+        .or_else(|| v.as_i64().map(|i| i as f64))
+        .or_else(|| v.as_u64().map(|u| u as f64))
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or_else(|| panic!("không đọc được số: {v}"))
 }
 
-fn parse_klines(body: &[Value]) -> Vec<CandleStick> {
-    assert!(body.len() >= 10, "Binance trả {} nến", body.len());
-    // Binance trí số ở dạng JSON number (openTimeMs là integer, giá có thể là
-    // float **hoặc** string) → đọc qua một cổng duy nhất.
-    let num = |v: &Value| -> f64 {
-        v.as_f64()
-            .or_else(|| v.as_i64().map(|i| i as f64))
-            .or_else(|| v.as_u64().map(|u| u as f64))
-            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-            .unwrap_or_else(|| panic!("không đọc được số từ klines: {v}"))
-    };
-    body.iter()
+/// Binance `klines`: `[openTimeMs, open, high, low, close, volume]`, cũ → mới.
+fn parse_binance(body: &Value) -> Vec<CandleStick> {
+    let rows = body.as_array().expect("klines Binance = mảng dòng");
+    assert!(rows.len() >= 10, "Binance trả {} nến", rows.len());
+    rows.iter()
         .map(|row| {
             let r = row.as_array().expect("mỗi dòng klines là mảng");
             CandleStick::new(
@@ -121,6 +129,83 @@ fn parse_klines(body: &[Value]) -> Vec<CandleStick> {
             )
         })
         .collect()
+}
+
+/// OKX `candles`: `[tsMs, o, h, l, c, vol, volCcy, volCcyQuote, confirm]`,
+/// **mới → cũ** và `confirm = "0"` là nến đang chạy (phải bỏ — `trade()` chỉ
+/// giao trên nến đã đóng).
+fn parse_okx(body: &Value) -> Vec<CandleStick> {
+    assert_eq!(
+        body["code"].as_str(),
+        Some("0"),
+        "OKX trả lỗi: {}",
+        body["msg"]
+    );
+    let rows = body["data"]
+        .as_array()
+        .expect("OKX: data = mảng dòng");
+    let mut out: Vec<CandleStick> = rows
+        .iter()
+        .filter_map(|row| {
+            let r = row.as_array()?;
+            if r.len() < 9 {
+                return None;
+            }
+            // `confirm` = "1" nến đã đóng.
+            if r[8].as_str() != Some("1") {
+                return None;
+            }
+            Some(CandleStick::new(
+                (num(&r[0]) / 1000.0) as i64,
+                num(&r[1]),
+                num(&r[2]),
+                num(&r[3]),
+                num(&r[4]),
+                num(&r[5]),
+            ))
+        })
+        .collect();
+    out.reverse(); // OKX trả mới trước; kernel giả định tăng dần theo thời gian
+    assert!(out.len() >= 10, "OKX trả {} nến đã đóng", out.len());
+    out
+}
+
+/// Nến đã đóng + tên sàn để in ra log (nguồn có thể là OKX hoặc Binance).
+async fn fetch_klines() -> (String, Vec<CandleStick>) {
+    let client = reqwest::Client::new();
+    let mut seen = Vec::new();
+    for ep in endpoints() {
+        let resp = match client.get(&ep.url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                seen.push(format!("{} → transport: {e}", ep.url));
+                continue;
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            seen.push(format!("{} → HTTP {status}", ep.url));
+            continue;
+        }
+        let body: Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                seen.push(format!("{} → parse JSON: {e}", ep.url));
+                continue;
+            }
+        };
+        let (venue, out) = match ep.feed {
+            Feed::Binance => ("binance".to_string(), parse_binance(&body)),
+            Feed::Okx => ("okx".to_string(), parse_okx(&body)),
+        };
+        println!("klines lấy từ {venue}: {}", ep.url);
+        return (venue, out);
+    }
+    panic!(
+        "không endpoint nào trả được klines (thử {}): {}",
+        endpoints().len(),
+        seen.join(" | ")
+    );
 }
 
 fn slice_fetch(
@@ -141,12 +226,12 @@ fn slice_fetch(
 #[tokio::test]
 #[ignore = "cần network: Binance public API"]
 async fn rebuild_on_live_binance_data_yields_usable_plan() {
-    let data = fetch_klines().await;
+    let (venue, data) = fetch_klines().await;
     let lo = data.iter().map(|c| c.l).fold(f64::INFINITY, f64::min);
     let hi = data.iter().map(|c| c.h).fold(f64::NEG_INFINITY, f64::max);
     let last = *data.last().expect("có nến");
     println!(
-        "binance {SYMBOL} {INTERVAL}: {} nến, giá {:.2}..{:.2}, nến cuối t={} c={:.2}",
+        "{venue} {INTERVAL}: {} nến đã đóng, giá {:.2}..{:.2}, nến cuối t={} c={:.2}",
         data.len(),
         lo,
         hi,
