@@ -20,6 +20,7 @@
 > | GraphQL ở `POST /graphql` | `POST /api/repl/graphql`; thêm `components` + `patchComponent` (đọc/sửa cấu hình không cần gửi lại cả pipeline) |
 > | chưa có trading realtime | đã có: lệnh + cursor T+N lưu trong station, `opsense orders`, `opsense query --label-kind trading_step` |
 > | 4 integration test files | **10 file** trong `crates/opsense/tests/` + 14 trong `crates/opsense-rhai/tests/` |
+> | crate `opsense_libs` / `opsense_store` / `opsense_session` / `opsense_mcp` / `opsense_repl` | đã gộp: `opsense-mlib`, `opsense-core`, (bỏ), `opsense` (mcp + repl là module), (bỏ) — xem bảng crate ở `architecture.md` §2 |
 
 ## Vấn đề
 

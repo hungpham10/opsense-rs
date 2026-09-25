@@ -144,7 +144,7 @@ Execution phân tích nặng (Python/Julia) chạy ở process riêng; gateway c
 state.
 
 ```bash
-export OPSENSE_KERNEL_BIN=./target/release/opsense-kernel-python  # hoặc -julia / -echo
+export OPSENSE_KERNEL=./target/release/opsense-kernel-python      # hoặc -julia / -echo
 opsense repl --runner 127.0.0.1:50051   # REPL nói chuyện runner qua gRPC
 opsense runner 127.0.0.1:50051          # hoặc tự chạy runner
 ```

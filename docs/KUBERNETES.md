@@ -939,13 +939,13 @@ forward-only; dự phòng bằng backup trước nâng.
    và fallback `cargo build` (Earthfile `+build-binaries`) đều đã truyền
    `--features opsense-core/parquet`, nên binary build lại sẽ biên dịch Parquet
    và `backend="parquet"` (hoặc alias `"duckdb"`/`"s3"`/`"lakehouse"`)
-   mở được station (xem §5.1.3 ✅). Còn lại: **chạy lại workflow `push-image`
-   cho tag `v1.0.10`** để image cũ base lên binary mới.
+   mở được station (xem §5.1.3 ✅). Còn lại: **build lại image release** vì
+   workflow hiện tại là cargo-dist (không còn job `push-image` của bản cũ).
 7. **`template.toml` của `opsense init` — ĐÃ SỬA** — đồng bộ với code hiện tại:
    `backend = "parquet"`/`data_dir = ".opsense/parquet"`, bỏ `items`/`fields`/
    `constants`/`params`/`initial_lookback_secs`/`bind`, `clock_source`/
    `ingest_source`/`persist_sink`, và các field cũ của sink (`block_secs`/
    `max_hot_blocks`/`max_hot_mb`/`data_dir`/`cold_retention_secs`) — dùng
    `clock`/`input` + `bindings` thay thế.
-6. **REPL/export CLI, join multi-series** (xem `docs/CHECKLIST.MD` Part B) —
+8. **REPL/export CLI, join multi-series** (xem `docs/CHECKLIST.MD` Part B) —
    ngoài phạm vi v1.0.10 go-live.
