@@ -30,6 +30,8 @@ opsense mcp
 # 3c) CLI dạng script — mỗi lệnh = 1 GraphQL round-trip (JSON ra stdout)
 opsense status                 # topology node + station
 opsense components [grid]      # cấu hình ĐANG CHẠY (kể cả params của script)
+opsense get-param grid /params/sl_pct
+opsense set-param grid /params/sl_pct 0.02   # sửa 1 param, không cần gửi cả pipeline
 ```
 
 `opsense init [path] [--force]`:
@@ -53,6 +55,7 @@ MCP là **client mỏng** của `opsense serve`: mỗi tool = 1 GraphQL round-tr
 | `opsense_set_attribute({name, value})` | `Mutation.setAttribute` | Set attribute (cảnh báo nếu `OPSENSE_ATTR_<NAME>` đang ghi đè). |
 | `opsense_remove_attribute({name})` | `Mutation.removeAttribute` | Xoá attribute, trả `true` nếu key tồn tại. |
 | `opsense_query_timeseries({node, from_ts?, to_ts?})` | `Query.queryTimeseries` | Đọc observation của một `timeseries` station trong cửa sổ. |
+| `opsense_set_param({id, path, value})` | `Mutation.patchComponent` | Sửa **một** trường của node (JSON pointer `params.sl_pct` + JSON literal). Server đọc cấu hình hiện tại, patch, validate toàn bộ rồi mới reload. **Đường sửa mặc định.** |
 | `opsense_reload({components_json})` | `Mutation.reload` | **Thay toàn bộ** danh sách node. Thô — thiếu một node là mất node đó. |
 
 > Station là nguồn sự thật cho **state runtime**: lệnh giao dịch (`signal = "order"`,
@@ -60,9 +63,9 @@ MCP là **client mỏng** của `opsense serve`: mỗi tool = 1 GraphQL round-tr
 > `candle_seq`) và snapshot grid đều là observation trong station, nên đọc lại được
 > qua `opsense_query_timeseries` (lọc theo `signal`/`labels.kind` ở client).
 
-> Sửa cấu hình: `opsense_get_config` → sửa JSON → `opsense_reload`. Hiện chưa có
-> `patch` một param (đang lên kế hoạch), nên **đọc trước** là bắt buộc — không đọc
-> thì phải đoán cấu hình cũ.
+> Sửa cấu hình: `opsense_get_config` (đọc) → `opsense_set_param` (sửa một
+> chỗ). Chỉ khi cần thêm/xoá cả node mới dùng `opsense_reload`; patch hỏng thì
+> server báo lỗi và **runtime giữ nguyên** (deserialize trước, reload sau).
 
 ### Lưu trữ & con trỏ qua restart
 

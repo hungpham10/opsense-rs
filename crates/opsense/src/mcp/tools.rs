@@ -73,6 +73,24 @@ pub async fn query_timeseries(
         .and_then(|obs| json_dump(&obs).map_err(|e| format!("{e}")))
 }
 
+/// Sửa **một** thành phần của một node (vd `params.sl_pct` → `0.02`).
+///
+/// Đường sửa mặc định: `opsense_reload` nhận danh sách node **đầy đủ**, thiếu một
+/// node là mất node đó. Ở đây server tự đọc cấu hình hiện tại, patch đúng một chỗ,
+/// validate lại toàn bộ rồi mới reload.
+pub async fn set_param(
+    client: &OpsenseClient,
+    id: &str,
+    path: &str,
+    value: &str,
+) -> Result<String, String> {
+    client
+        .patch_component(id, path, value)
+        .await
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|r| json_dump(&r).map_err(|e| format!("{e}")))
+}
+
 /// `components_json` is a JSON array of component objects. Each element:
 /// `{ "type": "...", "id": "...", "config": {...}, "inputs": [...] }`.
 pub async fn reload_from_json(

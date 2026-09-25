@@ -264,8 +264,32 @@ impl OpsenseClient {
         self.gql(MUTATION, Vars { components }).await
     }
 
-    pub async fn set_attribute(
+    /// Sửa **một** thành phần của một node (vd `/params/sl_pct` → `0.02`).
+    ///
+    /// `value` là JSON literal. Server đọc cấu hình hiện tại, patch, validate
+    /// toàn bộ danh sách qua typetag rồi mới reload — nên không cần gửi lại cả
+    /// pipeline, và patch hỏng thì runtime giữ nguyên.
+    pub async fn patch_component(
         &self,
+        id: &str,
+        path: &str,
+        value: &str,
+    ) -> anyhow::Result<EditResult> {
+        const MUTATION: &str = r#"
+            mutation($id: String!, $path: String!, $value: String!) {
+                patchComponent(id: $id, path: $path, value: $value) { reloaded nodes { id type inputs } }
+            }
+        "#;
+        #[derive(Serialize)]
+        struct Vars<'a> {
+            id: &'a str,
+            path: &'a str,
+            value: &'a str,
+        }
+        self.gql(MUTATION, Vars { id, path, value }).await
+    }
+
+    pub async fn set_attribute(        &self,
         name: &str,
         value: &str,
     ) -> anyhow::Result<SetAttributeResult> {

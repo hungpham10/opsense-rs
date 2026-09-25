@@ -55,6 +55,48 @@ pub(crate) async fn components_value(
         .context("Query.components")
 }
 
+/// `opsense get-param <node> <path>` — đọc một trường trong cấu hình đang chạy.
+///
+/// `path` là JSON pointer (`params.sl_pct`). Trả về JSON literal nên pipe được.
+pub async fn get_param(endpoint: Option<String>, id: &str, path: &str) -> Result<()> {
+    let value = get_param_value(endpoint, id, path).await?;
+    println!("{value}");
+    Ok(())
+}
+
+pub(crate) async fn get_param_value(
+    endpoint: Option<String>,
+    id: &str,
+    path: &str,
+) -> Result<serde_json::Value> {
+    let list = components_value(endpoint, Some(id)).await?;
+    let comp = list
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("không có node '{id}' (xem `opsense status`)"))?;
+    comp.config
+        .pointer(path)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("node '{id}' không có path '{path}'"))
+}
+
+/// `opsense set-param <node> <path> <json-value>` — sửa MỘT thành phần.
+///
+/// Ưu tiên hơn `reload`: không cần gửi lại cả danh sách node, nên không sợ mất
+/// node. Server validate trước khi reload, patch hỏng thì runtime giữ nguyên.
+pub async fn set_param(
+    endpoint: Option<String>,
+    id: &str,
+    path: &str,
+    value: &str,
+) -> Result<()> {
+    let r = client(endpoint)?
+        .patch_component(id, path, value)
+        .await
+        .context("Mutation.patchComponent")?;
+    print_json(&r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

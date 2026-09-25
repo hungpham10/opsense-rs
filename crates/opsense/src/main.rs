@@ -72,6 +72,35 @@ enum Commands {
         endpoint: Option<String>,
     },
 
+    /// Read ONE field of a node's live config (JSON pointer).
+    ///
+    /// `opsense get-param grid /params/sl_pct`
+    GetParam {
+        /// Node id, vd `grid`.
+        id: String,
+        /// JSON pointer, vd `/params/sl_pct`.
+        path: String,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
+    /// Patch ONE field of a node's live config (JSON pointer + JSON literal).
+    ///
+    /// `opsense set-param grid /params/sl_pct 0.02`
+    ///
+    /// Ưu tiên hơn `reload`: không gửi lại cả danh sách node. Server validate
+    /// trước khi reload, nên patch hỏng thì runtime giữ nguyên.
+    SetParam {
+        /// Node id, vd `grid`.
+        id: String,
+        /// JSON pointer, vd `/params/sl_pct`.
+        path: String,
+        /// JSON literal: `0.02`, `"trading"`, `true`, `[1,2]`.
+        value: String,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
     /// Run the opsense REPL client.
     ///
     /// Without `--runner` this talks to a running gateway over GraphQL
@@ -157,6 +186,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(Commands::Components { id, endpoint }) => {
                     if let Err(e) = opsense::cli::components(endpoint, id).await {
                         eprintln!("components error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::GetParam { id, path, endpoint }) => {
+                    if let Err(e) = opsense::cli::get_param(endpoint, &id, &path).await {
+                        eprintln!("get-param error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::SetParam {
+                    id,
+                    path,
+                    value,
+                    endpoint,
+                }) => {
+                    if let Err(e) = opsense::cli::set_param(endpoint, &id, &path, &value).await {
+                        eprintln!("set-param error: {e}");
                         std::process::exit(1);
                     }
                 }

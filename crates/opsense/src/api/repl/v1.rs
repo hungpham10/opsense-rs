@@ -130,6 +130,65 @@ fn parse_component(input: &ComponentInput) -> async_graphql::Result<Arc<dyn Comp
         .map_err(|e| async_graphql::Error::new(format!("component '{}': {}", input.id, e)))
 }
 
+/// JSON trả về từ `Runtime::components()` (typetag phẳng + `id`) → component.
+///
+/// Validate miễn phí: type lạ / field thiếu / sai kiểu đều lỗi ở đây, **trước**
+/// khi chạm vào runtime.
+fn parse_component_json(value: serde_json::Value) -> async_graphql::Result<Arc<dyn Component>> {
+    let id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<no id>")
+        .to_string();
+    serde_json::from_value::<Box<dyn Component>>(value)
+        .map(Arc::from)
+        .map_err(|e| async_graphql::Error::new(format!("component '{id}': {e}")))
+}
+
+/// Ghi `new_value` vào `path` (JSON pointer, vd `params.sl_pct`).
+///
+/// - Đường dẫn phải bắt đầu bằng `/` và có ít nhất 1 segment.
+/// - Segment **cuối** được tạo mới nếu chưa có (thêm knob mới vào `params` là
+///   việc hợp lệ); nhưng không tạo được cha — `params.a.b` khi `params.a` chưa có
+///   thì lỗi, thay vì âm thầm tạo object rỗng.
+fn patch_json_pointer(
+    mut root: serde_json::Value,
+    path: &str,
+    new_value: serde_json::Value,
+) -> async_graphql::Result<serde_json::Value> {
+    if !path.starts_with('/') || path == "/" {
+        return Err(async_graphql::Error::new(format!(
+            "path phải là JSON pointer bắt đầu bằng '/', vd \"params.sl_pct\" (nhận `{path}`)"
+        )));
+    }
+    let segments: Vec<String> = path
+        .trim_start_matches('/')
+        .split('/')
+        .map(|s| s.replace("~1", "/").replace("~0", "~"))
+        .collect();
+    let (last, parents) = segments.split_last().expect("path != \"/\" đã kiểm tra");
+
+    let mut cursor = &mut root;
+    for seg in parents {
+        let next = cursor
+            .as_object_mut()
+            .and_then(|o| o.get_mut(seg))
+            .ok_or_else(|| {
+                async_graphql::Error::new(format!("path `{path}`: không có `{seg}` để đi tiếp"))
+            })?;
+        cursor = next;
+    }
+    let obj = cursor.as_object_mut().ok_or_else(|| {
+        async_graphql::Error::new(format!("path `{path}`: cha không phải object"))
+    })?;
+    if let Some(existing) = obj.get_mut(last) {
+        *existing = new_value;
+    } else {
+        obj.insert(last.clone(), new_value);
+    }
+    Ok(root)
+}
+
 /// True when `OPSENSE_ATTR_<NAME>` is set and non-empty.
 fn env_attr_override(name: &str) -> bool {
     std::env::var(format!("OPSENSE_ATTR_{}", name.to_uppercase()))
@@ -239,8 +298,68 @@ impl MutationRoot {
         })
     }
 
-    async fn set_attribute(
+    /// Sửa **một** thành phần của **một** node, không cần gửi lại cả pipeline.
+    ///
+    /// `path` là JSON pointer vào config đang chạy (vd `params.sl_pct`,
+    /// `script_path`, `params.grid_min_trades`). Server đọc cấu hình hiện tại
+    /// (nên không cần client tự dựng lại), patch, deserialize **toàn bộ** danh
+    /// sách qua typetag, rồi mới reload — hỏng ở bước deserialize thì runtime
+    /// giữ nguyên, không để lại pipeline nửa vời.
+    ///
+    /// `value` là JSON literal (`0.02`, `"rhai"`, `true`, `[1,2]`). Thay cả
+    /// pipeline thì dùng `reload`.
+    async fn patch_component(
         &self,
+        ctx: &Context<'_>,
+        id: String,
+        path: String,
+        value: String,
+    ) -> async_graphql::Result<EditResult> {
+        let s = state(ctx);
+        let current = s.components(Some(&id)).await;
+        let Some(target) = current.into_iter().next() else {
+            return Err(async_graphql::Error::new(format!(
+                "không có node '{id}' (xem Query.status để xem id hiện có)"
+            )));
+        };
+        let new_value: serde_json::Value = serde_json::from_str(&value).map_err(|e| {
+            async_graphql::Error::new(format!("`{value}` không phải JSON hợp lệ: {e}"))
+        })?;
+        let patched = patch_json_pointer(target.clone(), &path, new_value)?;
+        if patched == target {
+            return Ok(EditResult {
+                reloaded: false,
+                nodes: s.status().await.nodes,
+            });
+        }
+
+        // Validate TRƯỚC khi chạm runtime: ghép node vừa patch với các node còn
+        // lại (lấy lại toàn bộ để không mất node nào) rồi deserialize hết.
+        let mut all = s.components(None).await;
+        let slot = all
+            .iter_mut()
+            .find(|c| c.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()))
+            .ok_or_else(|| async_graphql::Error::new(format!("không có node '{id}'")))?;
+        *slot = patched;
+        let parsed = all
+            .iter()
+            .map(|c| parse_component_json(c.clone()))
+            .collect::<async_graphql::Result<Vec<_>>>()?;
+
+        let runtime = s.runtime.write().await;
+        runtime
+            .reload(parsed)
+            .map_err(|e| async_graphql::Error::new(format!("runtime.reload: {e}")))?;
+        drop(runtime);
+
+        tracing::info!(node = %id, path = %path, "config patched qua GraphQL");
+        Ok(EditResult {
+            reloaded: true,
+            nodes: s.status().await.nodes,
+        })
+    }
+
+    async fn set_attribute(        &self,
         ctx: &Context<'_>,
         name: String,
         value: String,
@@ -297,6 +416,7 @@ mod tests {
             "attributes",
             "queryTimeseries",
             "reload",
+            "patchComponent",
             "setAttribute",
             "removeAttribute",
         ] {
@@ -336,5 +456,79 @@ mod tests {
         let cfg = component_config(serde_json::json!({ "id": "x", "type": "clock" }))
             .expect("map được");
         assert!(cfg.inputs.is_empty());
+    }
+
+    /// `patchComponent` chỉ được đổi **đúng một** chỗ, và phải tạo được knob mới
+    /// (thêm key vào `params` là việc hợp lệ) nhưng không tự chế ra object cha.
+    #[test]
+    fn patch_json_pointer_touches_one_place() {
+        let base = || {
+            serde_json::json!({
+                "type": "rhai_transform",
+                "id": "grid",
+                "script_path": "strategies/binance/grid.rhai",
+                "params": { "strategy": "rhai", "sl_pct": 0.008 },
+            })
+        };
+
+        // 1. Sửa giá trị có sẵn, phần còn lại giữ nguyên.
+        let out = patch_json_pointer(base(), "/params/sl_pct", serde_json::json!(0.02)).unwrap();
+        assert_eq!(out["params"]["sl_pct"], serde_json::json!(0.02));
+        assert_eq!(out["params"]["strategy"], "rhai");
+        assert_eq!(out["script_path"], "strategies/binance/grid.rhai");
+
+        // 2. Thêm knob mới vào `params`, các key cũ giữ nguyên.
+        let out = patch_json_pointer(
+            base(),
+            "/params/grid_min_trades",
+            serde_json::json!(5),
+        )
+        .unwrap();
+        assert_eq!(out["params"]["grid_min_trades"], serde_json::json!(5));
+        assert_eq!(out["params"]["strategy"], "rhai");
+        assert_eq!(out["params"]["sl_pct"], serde_json::json!(0.008));
+
+        // 3. Path sai cú pháp / không có cha → lỗi, không im lặng bỏ qua.
+        let err = patch_json_pointer(base(), "params.sl_pct", serde_json::json!(0.02))
+            .unwrap_err();
+        let err = err.message.clone();
+        assert!(err.contains("JSON pointer"), "{err}");
+        let err = patch_json_pointer(base(), "/params/a/b", serde_json::json!(1))
+            .unwrap_err();
+        let err = err.message.clone();
+        assert!(err.contains("không có"), "{err}");
+        // Dấu chấm là ký tự thường trong JSON pointer: `/params.a.b` là MỘT key
+        // tên `params.a.b`, không phải hai tầng — giữ đúng chuẩn RFC 6901.
+        let out = patch_json_pointer(base(), "/params.a.b", serde_json::json!(1)).unwrap();
+        assert_eq!(out["params.a.b"], serde_json::json!(1));
+    }
+
+    /// Giá trị sai kiểu phải chết ở deserialize (typetag), **trước** khi runtime
+    /// bị đụng tới — đây là chốt chặn "patch làm hỏng cả pipeline".
+    #[test]
+    fn parse_component_json_rejects_broken_config() {
+        // Component không tồn tại trong inventory.
+        let err = parse_component_json(serde_json::json!({
+            "type": "khong_ton_tai", "id": "x"
+        }))
+        .expect_err("type lạ phải lỗi");
+        assert!(
+            err.message.contains("khong_ton_tai"),
+            "{}",
+            err.message
+        );
+
+        // Sai kiểu field: `interval_secs` của clock phải là số.
+        let err = parse_component_json(serde_json::json!({
+            "type": "clock", "id": "c", "interval_secs": "khong-phai-so"
+        }))
+        .expect_err("sai kiểu phải lỗi");
+        assert!(err.message.contains('c'), "{}", err.message);
+
+        // Hợp lệ thì deserialize được.
+        parse_component_json(serde_json::json!({
+            "type": "clock", "id": "c", "interval_secs": 10
+        }))
+        .expect("clock hợp lệ phải parse được");
     }
 }

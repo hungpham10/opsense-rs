@@ -79,6 +79,97 @@ async fn components_returns_live_config() {
 }
 
 #[tokio::test]
+async fn patch_component_changes_only_one_field() {
+    let Some(c) = connect().await else { return };
+
+    // Chọn node `rhai_transform` để patch được `params` (script Rhai).
+    let all = c.components(None).await.expect("Query.components");
+    let Some(target) = all.iter().find(|x| x.kind == "rhai_transform") else {
+        eprintln!("skipping: config không dùng rhai_transform");
+        return;
+    };
+    let before = target.config["params"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let old = before.get("sl_pct").cloned();
+
+    // Patch một param; đọc lại phải thấy giá trị mới, phần khác giữ nguyên.
+    let new_value = 0.0123;
+    c.patch_component(&target.id, "/params/sl_pct", &new_value.to_string())
+        .await
+        .expect("patchComponent phải thành công");
+
+    let after = c
+        .components(Some(&target.id))
+        .await
+        .expect("Query.components")
+        .into_iter()
+        .next()
+        .expect("node vẫn tồn tại sau patch");
+    assert_eq!(
+        after.config["params"]["sl_pct"],
+        serde_json::json!(new_value),
+        "giá trị mới phải được áp dụng"
+    );
+    // Các param khác không bị đụng.
+    for (k, v) in &before {
+        if k == "sl_pct" {
+            continue;
+        }
+        assert_eq!(after.config["params"][k], *v, "param `{k}` bị đổi ngoài ý muốn");
+    }
+
+    // Trả lại giá trị cũ (nếu config gốc không có `sl_pct` thì xoá: patch `null`
+    // không đúng nghĩa → dùng `set_param` không hỗ trợ xoá, nên chỉ khôi phục
+    // khi có giá trị cũ).
+    if let Some(old) = old {
+        c.patch_component(&target.id, "/params/sl_pct", &old.to_string())
+            .await
+            .expect("khôi phục giá trị cũ");
+    }
+}
+
+#[tokio::test]
+async fn patch_component_rejects_broken_value_without_touching_runtime() {
+    let Some(c) = connect().await else { return };
+
+    let all = c.components(None).await.expect("Query.components");
+    let before: Vec<_> = all.iter().map(|x| x.config.clone()).collect();
+    let Some(target) = all.first() else { return };
+
+    // (a) Giá trị không phải JSON.
+    assert!(
+        c.patch_component(&target.id, "/params/sl_pct", "{khong-phai-json}")
+            .await
+            .is_err(),
+        "JSON hỏng phải báo lỗi"
+    );
+    // (b) Path không phải JSON pointer.
+    assert!(
+        c.patch_component(&target.id, "params.sl_pct", "0.02")
+            .await
+            .is_err(),
+        "path thiếu '/' phải báo lỗi"
+    );
+    // (c) Node không tồn tại.
+    assert!(
+        c.patch_component("__no_such_node__", "/params/x", "1")
+            .await
+            .is_err(),
+        "node lạ phải báo lỗi"
+    );
+
+    // Runtime phải **y nguyên** sau các lần patch hỏng.
+    let after = c.components(None).await.expect("Query.components");
+    assert_eq!(
+        after.iter().map(|x| &x.config).collect::<Vec<_>>(),
+        before.iter().collect::<Vec<_>>(),
+        "patch hỏng phải không đổi cấu hình nào"
+    );
+}
+
+#[tokio::test]
 async fn components_exposes_rhai_params() {
     let Some(c) = connect().await else { return };
 

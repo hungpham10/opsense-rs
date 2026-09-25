@@ -61,6 +61,19 @@ pub struct GetConfigParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetParamParams {
+    /// Node id, vd "grid".
+    #[schemars(description = "Node id, e.g. \"grid\"")]
+    pub id: String,
+    /// JSON pointer into the live config, vd "params.sl_pct" or "script_path".
+    #[schemars(description = "JSON pointer, e.g. \"params.sl_pct\"")]
+    pub path: String,
+    /// JSON literal, e.g. 0.02 | "trading" | true.
+    #[schemars(description = "JSON literal value")]
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReloadParams {
     /// JSON array of component objects, each: `{"type": "...", "id": "...", "config": {...}, "inputs": [...]}`.
     #[schemars(description = "JSON array of component objects")]
@@ -142,6 +155,19 @@ impl OpsenseMcpServer {
     ) -> Result<String, String> {
         tools::reload_from_json(&self.client, &p.components_json).await
     }
+
+    /// Sửa MỘT thành phần. **Dùng cái này thay `opsense_reload`** khi chỉ cần
+    /// đổi một param: reload thay toàn bộ danh sách node nên thiếu một node là
+    /// mất node đó.
+    #[tool(
+        description = "Patch ONE field of a node's live config (JSON pointer, e.g. \"params.sl_pct\" = 0.02). Server re-reads current config, patches, validates everything, then reloads. Preferred over opsense_reload."
+    )]
+    async fn opsense_set_param(
+        &self,
+        Parameters(p): Parameters<SetParamParams>,
+    ) -> Result<String, String> {
+        tools::set_param(&self.client, &p.id, &p.path, &p.value).await
+    }
 }
 
 #[tool_handler]
@@ -153,7 +179,11 @@ impl ServerHandler for OpsenseMcpServer {
             server_info: Implementation::default(),
             instructions: Some(
                 "opsense MCP — thin client to `opsense serve`. All tools are 1 GraphQL round-trip. \
-                 To edit pipeline, use opsense_reload with the full new component list."
+                 To EDIT a config: 1) opsense_get_config to read it, 2) opsense_set_param with a \
+                 JSON pointer (e.g. \"params.sl_pct\") — preferred; opsense_reload replaces the WHOLE \
+                 node list and loses any node you forget to include. \
+                 Runtime state (orders, T+N cursor, snapshots) lives in stations — read it with \
+                 opsense_query_timeseries."
                     .to_string(),
             ),
         }
