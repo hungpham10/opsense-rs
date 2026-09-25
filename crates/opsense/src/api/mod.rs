@@ -1,9 +1,10 @@
-//! HTTP API: health, config reload, and the source-health surface.
+//! HTTP API của gateway.
 //!
-//! `GET /sources` returns source health; `/health`, `/reload` and `/metrics`
-//! are carried over from the original skeleton. Observation data is queried
-//! through the stores instead — MCP `opsense_query` or a station_sink's
-//! `/observations` endpoint.
+//! Route thật (xem `serve::routes`): `GET /health`, `POST /api/repl/graphql`,
+//! `/api/admin/*`, `/api/oauth/*`. Không có `/reload`, `/sources` hay `/metrics`.
+//! Đọc dữ liệu thì qua station: `Query.queryTimeseries` trong GraphQL, tức
+//! `opsense query` / MCP tool; đổi cấu hình qua `Mutation.patchComponent`
+//! hoặc `Mutation.reload`.
 
 pub mod admin;
 pub mod oauth;
