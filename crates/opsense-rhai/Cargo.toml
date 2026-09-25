@@ -19,7 +19,8 @@ opsense-model = { path = "../opsense-model" }
 # `graph` = DAG genome → ONNX (ops/nodes tự emit protobuf, chạy bằng tract):
 # cầu nối cho DAG model build riêng ở Python, dùng làm `strategy = "dag"` cho
 # `portfolio_feed`. Ẩn dụng nó cũng bật `json` (typetag/serde cho `Graph`).
-opsense-qlib = { path = "../opsense-qlib", features = ["json", "graph"] }
+# `rhai` = hợp đồng plan cho `ScriptStrategy` (`fn rebuild` trong .rhai).
+opsense-qlib = { path = "../opsense-qlib", features = ["json", "graph", "rhai"] }
 rhai = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

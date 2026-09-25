@@ -21,7 +21,9 @@ pub use fee::{
 pub use grid::TradingGrid;
 
 /// Plan dạng dữ liệu cho strategy viết bằng script (Rhai) — xem [`plan`].
-#[cfg(feature = "json")]
+///
+/// Bật bằng feature `rhai` (đường script) hoặc `json` (đường DAG/typetag).
+#[cfg(any(feature = "json", feature = "rhai"))]
 pub mod plan;
 
 #[cfg(feature = "graph")]

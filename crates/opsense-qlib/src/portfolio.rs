@@ -1679,16 +1679,16 @@ mod tests {
     /// `AnalysisGrid` — nên ở lại đây thay vì kéo cả grid strategy vào crate
     /// này. Strategy viết bằng script (Rhai) là đường production: xem
     /// `opsense-rhai::ScriptStrategy`.
-    #[derive(serde::Serialize, serde::Deserialize)]
+    // `typetag` + serde chỉ có khi bật feature `json`; trait `Strategy` cũng chỉ
+    // mang supertrait typetag khi đó → helper test tự ẩn theo feature.
+    #[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
     struct FlatStrategy {
         levels: usize,
         sl_pct: f64,
         review_interval_secs: u64,
     }
 
-    // Trait `Strategy` có typetag khi bật feature `json` (workspace build bật vì
-    // opsense-rhai dùng) → impl test cũng phải có 2 method sinh ra.
-    #[typetag::serde(name = "test_flat")]
+    #[cfg_attr(feature = "json", typetag::serde(name = "test_flat"))]
     #[async_trait::async_trait]
     impl Strategy for FlatStrategy {
         fn init(&self) -> Vec<f64> {
