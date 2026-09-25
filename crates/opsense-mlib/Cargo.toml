@@ -62,3 +62,11 @@ tempfile = "3"
 name = "mesh_convergence"
 required-features = ["cluster"]
 
+
+[[test]]
+name = "mesh_election"
+required-features = ["cluster"]
+
+[[test]]
+name = "mesh_join"
+required-features = ["cluster"]

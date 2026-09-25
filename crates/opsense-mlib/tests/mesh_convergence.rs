@@ -35,19 +35,19 @@ fn all_nodes_converge_regardless_of_message_order() {
     order3.apply(&b);
     order3.apply(&a);
 
-    assert_eq!(order1.clusters, order2.clusters, "hoán đổi b/c phải cho kết quả giống nhau");
-    assert_eq!(order1.clusters, order3.clusters, "khác cả node khởi đầu vẫn phải giống nhau");
-    assert_eq!(order1.list().len(), 3);
+    assert_eq!(order1.snapshot(), order2.snapshot(), "hoán đổi b/c phải cho kết quả giống nhau");
+    assert_eq!(order1.snapshot(), order3.snapshot(), "khác cả node khởi đầu vẫn phải giống nhau");
+    assert_eq!(order1.iter().count(), 3);
 }
 
 #[test]
 fn apply_is_idempotent() {
     let (mut a, b, _) = three_node_world();
     assert!(a.apply(&b));
-    let snapshot = a.clusters.clone();
+    let snapshot = a.snapshot();
     // Nhận lại cùng một state (heartbeat lặp) không được đổi gì.
     assert!(!a.apply(&b));
-    assert_eq!(a.clusters, snapshot);
+    assert_eq!(a.snapshot(), snapshot);
 }
 
 #[test]
@@ -56,13 +56,13 @@ fn apply_is_idempotent_after_convergence() {
     let mut x = a.clone();
     x.apply(&b);
     x.apply(&c);
-    let converged = x.clone();
+    let converged = x.snapshot();
 
     // Hai lượt đồng bộ nữa, cả hai vòng đều phải là no-op.
     assert!(!x.apply(&a));
     assert!(!x.apply(&b));
     assert!(!x.apply(&c));
-    assert_eq!(x.clusters, converged.clusters);
+    assert_eq!(x.snapshot(), converged);
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn tie_on_lamport_resolves_by_author() {
     b.set_local("node-b", Cluster::solo("c1", "node-b", "from-b"));
     a.apply(&b);
     b.apply(&a);
-    assert_eq!(a.clusters, b.clusters, "tie phải phân giải giống nhau ở cả hai node");
+    assert_eq!(a.snapshot(), b.snapshot(), "tie phải phân giải giống nhau ở cả hai node");
     // "node-b" > "node-a" theo thứ tự từ điển.
     assert_eq!(a.cluster("c1").map(|c| c.pipeline.as_str()), Some("from-b"));
 }
