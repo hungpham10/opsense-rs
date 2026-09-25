@@ -17,7 +17,6 @@ graph = ["json", "dep:tract-onnx", "dep:prost"]
 
 [dependencies]
 opsense-mlib = { path = "../opsense-mlib" }
-itertools = "0.14"
 tracing = { workspace = true }
 reqwest = { workspace = true }
 

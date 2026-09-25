@@ -76,16 +76,21 @@ async fn rhai_transform_processes_through_script() {
     assert!(true);
 }
 
+/// Component deserialize từ **giá trị config** — đúng đường production:
+/// `config` (opsense-core) đọc TOML → `serde_json::Value` → typetag.
+///
+/// Dùng `serde_json` thay vì `toml` trực tiếp để không kéo thêm một cây `toml`
+/// vào workspace (đường đọc TOML đã được e2e `e2e_binance_config` chạy thật).
 #[tokio::test]
 async fn rhai_component_deserializes_from_config() {
-    let toml = r#"
-        id = "test-rhai"
-        inputs = ["source"]
-        script = "fn process(x) { x }"
-        script_path = ""
-        params = { foo = "bar", n = 42 }
-    "#;
-    let comp: RhaiTransform = toml::from_str(toml).expect("deserialize");
+    let value = serde_json::json!({
+        "id": "test-rhai",
+        "inputs": ["source"],
+        "script": "fn process(x) { x }",
+        "script_path": "",
+        "params": { "foo": "bar", "n": 42 }
+    });
+    let comp: RhaiTransform = serde_json::from_value(value).expect("deserialize");
     assert_eq!(comp.id, "test-rhai");
     assert_eq!(comp.inputs, vec!["source"]);
     assert_eq!(comp.script, "fn process(x) { x }");
