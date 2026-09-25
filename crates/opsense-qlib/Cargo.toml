@@ -9,7 +9,11 @@ repository.workspace = true
 [features]
 default = []
 json = ["dep:serde_json", "dep:serde", "dep:typetag", "opsense-mlib/json", "serde/rc"]
-graph = ["dep:tract-onnx", "dep:prost"]
+# `graph` = DAG genome → ONNX: ops/nodes tự emit protobuf rồi chạy bằng tract.
+# Cầu nối cho DAG model build riêng (Python) — nên nó **cần** `json` để có
+# serde + typetag: `Graph` là `Strategy` typetag `"dag"`, DAG spec phải đi
+# được qua pipeline config / JSON.
+graph = ["json", "dep:tract-onnx", "dep:prost"]
 
 [dependencies]
 opsense-mlib = { path = "../opsense-mlib" }

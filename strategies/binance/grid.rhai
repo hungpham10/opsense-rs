@@ -193,7 +193,7 @@ fn trading_cfg() {
         settlement_candles = param_settlement_candles.to_int();
     }
 
-    #{
+    let cfg = #{
         resolution: resolution,
         calendar: calendar,
         strategy: strategy,
@@ -207,7 +207,15 @@ fn trading_cfg() {
         kelly_fraction: kelly_fraction,
         base_capital: base_capital,
         settlement_candles: settlement_candles
+    };
+
+    // `strategy = "dag"`: genome DAG build riêng ở Python truyền vào qua
+    // `params.dag` (ops + nodes + weights). `Graph` tự emit ONNX rồi chạy
+    // bằng tract — cầu nối giữa model ngoài và kernel.
+    if is_def_var("param_dag") && type_of(param_dag) != "()" {
+        cfg.dag = param_dag;
     }
+    cfg
 }
 
 // ── tick: gộp trade price vào candle bucket ────────────────────────────────

@@ -121,6 +121,33 @@ script_path = "strategies/binance/grid.rhai"
    # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.
    settlement_candles = 0
 
+   # `strategy = "dag"` thay "grid": dùng DAG model build riêng (Python) làm
+   # predictor — `Graph` tự emit ONNX từ `ops` + `nodes` rồi chạy bằng tract,
+   # đầu ra map thành win-prob cho TradingGrid. Đây là **cầu nối** giữa model
+   # ngoài và kernel, nên không cần loader .onnx riêng (file .onnx chỉ là chỗ
+   # lưu model nếu cần).
+   #
+   # Genome tối giản: Last(1 feature) → Head(1 feature, 8 output). Output 0 =
+   # [market_bias, prob_base, bias_scale, level_trend, prob_max, prob_min,
+   # prob_short_max, prob_short_min]; output 1 = ATR.
+   # Bỏ comment để dùng:
+   # [pipeline.components.params.dag]
+   # ops = [
+   #   { type = "last" },
+   #   { type = "head", n_feat = 1, n_out = 8 },
+   # ]
+   # nodes = [
+   #   { op = 0, inputs = [{ FromExtractor = 0 }] },
+   #   { op = 1, inputs = [{ FromOperator = 0 }] },
+   # ]
+   # extractors = []
+   # inited_bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+   # inited_weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+   # window_size = 200
+   # num_of_grids = 8
+   # lookback_time_to_rebuild = 200
+   # interval_time_to_rebuild = 60
+
 # Terminal node (bắt buộc: transform non-sink phải có consumer). Chỉ giữ
 # snapshots + candles trong memory — không persist / không MinIO (v1).
 [[pipeline.components]]

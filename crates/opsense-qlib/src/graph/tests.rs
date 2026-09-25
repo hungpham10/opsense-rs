@@ -1,5 +1,6 @@
 use super::ops;
 use crate::graph::{Graph, In, Node, Op};
+use crate::Strategy;
 
 fn default_ops() -> Vec<Box<dyn Op>> {
     vec![
@@ -56,6 +57,39 @@ fn default_nodes() -> Vec<Node> {
             inputs: vec![In::FromOperator(6)],
         },
     ]
+}
+
+/// `init()` phải trả params giao dịch **không phải 0**: `Portfolio` đọc
+/// `params[0]=kelly`, `params[1]=base_capital`; bằng 0 thì mọi lệnh có size 0
+/// (không đặt được gì) mà test inference vẫn xanh — lỗi này rất dễ lọt.
+#[test]
+fn init_gives_trading_params_not_zeros() {
+    let g = Graph::new(
+        200,
+        default_ops(),
+        default_nodes(),
+        vec![],
+        vec![0.0; 16],
+        vec![0.0; 8],
+        8,
+        200,
+        60,
+    );
+    let params = Strategy::init(&g);
+    assert!(
+        params[crate::graph::P_KELLY] > 0.0,
+        "kelly phải > 0: {params:?}"
+    );
+    assert!(
+        params[crate::graph::P_CAPITAL] > 0.0,
+        "base_capital phải > 0: {params:?}"
+    );
+    assert!(params[crate::graph::P_GRID_LEVELS] >= 2.0, "grid_levels ≥ 2");
+    assert!(params[crate::graph::P_SL_PCT] > 0.0, "sl_pct phải > 0");
+    assert!(params[crate::graph::P_LOOKBACK] > 0.0, "lookback phải > 0");
+    // Phần trọng số vẫn phải đúng vị trí (params tối ưu được).
+    let n_feat = g.num_features().expect("num_features");
+    assert_eq!(params.len(), 6 + n_feat * 8 + 8);
 }
 
 #[test]

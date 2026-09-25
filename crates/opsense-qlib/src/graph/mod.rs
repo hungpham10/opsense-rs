@@ -28,6 +28,30 @@ use tract_onnx::tract_core::model::typed::TypedRunnableModel;
 use crate::grid::TradingGrid;
 use crate::{Extractor, FetchFn, ParamFn, Strategy};
 
+// ── Params layout ──────────────────────────────────────────────────
+//
+// `params` là vector phẳng mà `Portfolio` truyền cho `Strategy::rebuild` (và
+// `SGD` tối ưu trên đó). Index 0..5 là **cùng layout** với `GridStrategy::init`
+// để `Portfolio` dùng chung, từ 6 trở đi là trọng số + bias của DAG.
+
+/// `kelly_fraction` cho `Portfolio::evaluate`.
+pub const P_KELLY: usize = 0;
+/// `base_capital` cho `Portfolio::evaluate`.
+pub const P_CAPITAL: usize = 1;
+/// Số bậc lưới khi dựng plan.
+pub const P_GRID_LEVELS: usize = 2;
+/// Stop-loss mỗi lệnh (fraction).
+pub const P_SL_PCT: usize = 3;
+/// Cửa sổ nến (giây) cho lần rebuild.
+pub const P_LOOKBACK: usize = 4;
+/// Bắt đầu trọng số mô hình (`n_feat × num_of_grids`).
+pub const P_WEIGHTS: usize = 6;
+
+const DEFAULT_KELLY_FRACTION: f64 = 0.25;
+const DEFAULT_BASE_CAPITAL: f64 = 100_000.0;
+const DEFAULT_GRID_LEVELS: usize = 5;
+const DEFAULT_SL_PCT: f64 = 0.05;
+
 // ── Op trait ---------------------------------------------------------
 
 /// Trait đại diện cho một phép toán trong ONNX DAG.
@@ -430,7 +454,17 @@ impl Graph {
     }
 
     /// Decode ONNX outputs → TradingGrid.
-    fn setup(last_close: f64, outputs: &[Vec<f32>], grids: &[TradingGrid]) -> Vec<TradingGrid> {
+    ///
+    /// `grid_levels` / `sl_pct` đến từ `params` (`P_GRID_LEVELS`, `P_SL_PCT`) để
+    /// cùng một DAG vẫn cấu hình được như `GridStrategy` (SGD tối ưu chung
+    /// không gian params).
+    fn setup(
+        last_close: f64,
+        outputs: &[Vec<f32>],
+        grids: &[TradingGrid],
+        grid_levels: usize,
+        sl_pct: f64,
+    ) -> Vec<TradingGrid> {
         let gp = outputs.first().map(|v| v.as_slice()).unwrap_or(&[]);
         let atr = Self::finite_or(
             outputs
@@ -456,16 +490,18 @@ impl Graph {
         let atr_mult = 2.0;
         let half_width = atr_mult * atr / 2.0;
         let (grid_min, grid_max) = (last_close - half_width, last_close + half_width);
-        let grid_levels = 5.0_f64.round().clamp(2.0, 64.0) as usize;
+        // `TradingGrid::new` cần ≥ 2 bậc; params có thể vô lý (SGD) → clamp.
+        let grid_levels = grid_levels.clamp(2, 64);
 
         let Some(mut tg) = TradingGrid::new(grid_levels, grid_min, grid_max) else {
             return Vec::new();
         };
 
         tg = if direction == 0.0 {
-            tg.with_weights_normal(4.0)
+            tg.with_weights_normal(4.0).with_sl_pct(sl_pct)
         } else {
             tg.with_weights_trend(direction, strength)
+                .with_sl_pct(sl_pct)
         };
 
         let prob_base = Self::finite_or(gp.get(1).copied().unwrap_or(0.5) as f64, 0.5);
@@ -567,18 +603,39 @@ impl Graph {
 #[typetag::serde(name = "dag")]
 #[async_trait]
 impl Strategy for Graph {
+    /// Layout `params` (khớp `Portfolio` đọc qua `ParamFn`):
+    ///
+    /// | idx | ý nghĩa                                              |
+    /// |-----|-------------------------------------------------------|
+    /// | 0   | `kelly_fraction` (Portfolio::evaluate)                |
+    /// | 1   | `base_capital` (Portfolio::evaluate)                  |
+    /// | 2   | `grid_levels` — số bậc lưới khi dựng plan             |
+    /// | 3   | `sl_pct` — stop-loss mỗi lệnh                          |
+    /// | 4   | `lookback_secs` — cửa sổ nến cho rebuild              |
+    /// | 5   | reserved (chưa dùng)                                   |
+    /// | 6.. | trọng số mô hình (`n_feat × num_of_grids`)            |
+    /// | +w  | bias (`num_of_grids`)                                  |
+    ///
+    /// 0..5 **phải có giá trị thật**: `base_capital = 0` khiến
+    /// `calculate_order_size` trả 0 → mọi lệnh đặt ra không có size. Xem
+    /// `graph::tests::init_gives_trading_params_not_zeros`.
     fn init(&self) -> Vec<f64> {
         let n_feat = self.head_features().unwrap_or(0);
         let w_len = n_feat * self.num_of_grids;
         let mut params = vec![0.0; 6 + w_len + self.num_of_grids];
+        params[P_KELLY] = DEFAULT_KELLY_FRACTION;
+        params[P_CAPITAL] = DEFAULT_BASE_CAPITAL;
+        params[P_GRID_LEVELS] = DEFAULT_GRID_LEVELS as f64;
+        params[P_SL_PCT] = DEFAULT_SL_PCT;
+        params[P_LOOKBACK] = self.lookback_time_to_rebuild as f64;
         for (i, w) in self.inited_weights.iter().enumerate() {
             if i < w_len {
-                params[6 + i] = *w as f64;
+                params[P_WEIGHTS + i] = *w as f64;
             }
         }
         for (i, b) in self.inited_bias.iter().enumerate() {
             if i < self.num_of_grids {
-                params[6 + w_len + i] = *b as f64;
+                params[P_WEIGHTS + w_len + i] = *b as f64;
             }
         }
         params
@@ -611,7 +668,7 @@ impl Strategy for Graph {
             (0..w_len)
                 .map(|i| {
                     Self::finite_or(
-                        param(6 + i),
+                        param(P_WEIGHTS + i),
                         self.inited_weights.get(i).copied().unwrap_or(0.0) as f64,
                     )
                 })
@@ -621,7 +678,7 @@ impl Strategy for Graph {
             (0..self.num_of_grids)
                 .map(|i| {
                     Self::finite_or(
-                        param(6 + w_len + i),
+                        param(P_WEIGHTS + w_len + i),
                         default_b.get(i).copied().unwrap_or(0.0) as f64,
                     )
                 })
@@ -639,6 +696,8 @@ impl Strategy for Graph {
                     .as_slice(),
             )?,
             grids,
+            param(P_GRID_LEVELS) as usize,
+            Self::finite_or(param(P_SL_PCT), DEFAULT_SL_PCT),
         ))
     }
 }

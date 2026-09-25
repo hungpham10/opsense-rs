@@ -35,9 +35,9 @@ use std::sync::{Arc, Mutex};
 use opsense_core::Observation;
 use opsense_model::events::{Signal, TelemetryKind};
 use opsense_qlib::{
-    Calendar, CandleStick, CryptoCalendar, DataLoader, Fee, ForexCalendar, GridStrategy, Order,
-    OrderEvent, OrderType, Portfolio, PortfolioConfig, Score, Session, SharpeScore, SimpleFixedFee,
-    StockCalendar, Strategy, VolatilityAdaptiveGridStrategy,
+    Calendar, CandleStick, CryptoCalendar, DataLoader, Fee, ForexCalendar, Graph, GridStrategy,
+    Order, OrderEvent, OrderType, Portfolio, PortfolioConfig, Score, Session, SharpeScore,
+    SimpleFixedFee, StockCalendar, Strategy, VolatilityAdaptiveGridStrategy,
 };
 use rhai::{Array, Dynamic, Map};
 
@@ -127,6 +127,8 @@ struct Settings {
     kelly_fraction: f64,
     base_capital: f64,
     settlement_candles: u64,
+    /// Genome DAG cho `strategy = "dag"` (JSON như trong config pipeline).
+    dag: Option<serde_json::Value>,
 }
 
 impl Default for Settings {
@@ -145,6 +147,7 @@ impl Default for Settings {
             kelly_fraction: 0.25,
             base_capital: 100_000.0,
             settlement_candles: 0,
+            dag: None,
         }
     }
 }
@@ -198,12 +201,32 @@ impl Settings {
         if let Some(v) = int("settlement_candles") {
             s.settlement_candles = v.max(0) as u64;
         }
+        if let Some(dag) = cfg.get("dag") {
+            s.dag = rhai::serde::from_dynamic(dag).ok();
+        }
         s
     }
 
+    /// Genome DAG cho `strategy = "dag"` — deserialize trực tiếp từ
+    /// `params.dag` (typetag cho `Op` nên `{"type":"ema","period":9}` …).
+    fn dag(&self) -> Result<Graph, std::io::Error> {
+        let spec = self
+            .dag
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("strategy = \"dag\" cần `params.dag`"))?;
+        serde_json::from_value(spec.clone())
+            .map_err(|e| std::io::Error::other(format!("params.dag không hợp lệ: {e}")))
+    }
+
     /// Params đúng layout `GridStrategy::init()`: kernel đọc `kelly`/`capital`,
-    /// strategy đọc phần còn lại qua `ParamFn`.
+    /// strategy đọc phần còn lại qua `ParamFn`. Với DAG, `Graph::init()` tự
+    /// có layout riêng nên hai nhánh này không trùng nhau.
     fn params(&self) -> Vec<f64> {
+        if self.strategy == "dag" || self.strategy == "graph" {
+            if let Ok(graph) = self.dag() {
+                return graph.init();
+            }
+        }
         vec![
             self.kelly_fraction,
             self.base_capital,
@@ -231,6 +254,10 @@ impl Settings {
                     self.trading_candle_secs,
                 ))
             }
+            // DAG model: `params.dag` là genome (ops + nodes + weights) build
+            // riêng ở Python, truyền vào đây dạng JSON. `Graph` tự emit ONNX
+            // rồi chạy bằng tract — cầu nối giữa model ngoài và kernel.
+            "dag" | "graph" => Arc::new(self.dag()?),
             _ => Arc::new(GridStrategy::new(
                 self.grid_levels,
                 self.sl_pct,
@@ -716,6 +743,88 @@ mod tests {
         assert_eq!(first.labels[L_STATUS], STATUS_OPEN);
         assert!(first.value > 0.0, "entry price dương");
         assert!(first.labels.contains_key(L_SL) && first.labels.contains_key(L_TP));
+    }
+
+    /// Genome DAG tối giản: Last → Head(2 feature, 8 output) — model emit ONNX
+    /// rồi chạy bằng tract, đúng đường đi của DAG build từ Python.
+    fn dag_map(n_grids: i64) -> Map {
+        let json = serde_json::json!({
+            "ops": [
+                { "type": "last" },
+                { "type": "head", "n_feat": 1, "n_out": n_grids }
+            ],
+            "nodes": [
+                { "op": 0, "inputs": [{ "FromExtractor": 0 }] },
+                { "op": 1, "inputs": [{ "FromOperator": 0 }] }
+            ],
+            "extractors": [],
+            "inited_bias": vec![0.0; n_grids as usize],
+            "inited_weights": vec![0.0; n_grids as usize],
+            "window_size": 200,
+            "num_of_grids": n_grids,
+            "lookback_time_to_rebuild": 200,
+            "interval_time_to_rebuild": 60
+        });
+        rhai::serde::to_dynamic(json).expect("dag json").try_cast().expect("map")
+    }
+
+    #[test]
+    fn dag_strategy_deserializes_from_params() {
+        let mut cfg = cfg_map();
+        cfg.insert("strategy".into(), Dynamic::from("dag"));
+        cfg.insert("dag".into(), Dynamic::from(dag_map(8)));
+        let settings = Settings::from_map(&cfg);
+
+        let graph = settings.dag().expect("graph deserialize được");
+        assert_eq!(graph.num_features().expect("num_features"), 1);
+        // Params phải lấy từ `Graph::init()` (weights vị trí 6+), không phải
+        // layout của GridStrategy.
+        let params = settings.params();
+        assert_eq!(params.len(), 6 + 1 * 8 + 8);
+        assert!(params[1] > 0.0, "base_capital phải > 0: {params:?}");
+    }
+
+    #[test]
+    fn dag_strategy_requires_dag_param() {
+        let mut cfg = cfg_map();
+        cfg.insert("strategy".into(), Dynamic::from("dag"));
+        let settings = Settings::from_map(&cfg);
+        let err = settings.dag().expect_err("thiếu params.dag phải báo lỗi");
+        assert!(
+            err.to_string().contains("params.dag"),
+            "lỗi phải nói rõ thiếu gì: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dag_strategy_builds_plan_from_onnx_inference() {
+        // 20 nến + nhịp sóng để DAG (ATR ở output 1) dựng được grid.
+        let data: Vec<CandleStick> = (0..20)
+            .map(|i| {
+                let p = 100.0 + (i % 5) as f64;
+                CandleStick::new(1_700_000_000 + i * 60, p, p + 1.0, p - 1.0, p, 10.0)
+            })
+            .collect();
+        let mut cfg = cfg_map();
+        cfg.insert("strategy".into(), Dynamic::from("dag"));
+        cfg.insert("dag".into(), Dynamic::from(dag_map(8)));
+        let settings = Settings::from_map(&cfg);
+
+        let out = feed(
+            &data,
+            &State::from_observations(&Array::new()),
+            *data.last().expect("có nến"),
+            &settings,
+            "BTCUSDT",
+        )
+        .await;
+        // Dù không có lệnh (model zero-weight → prob ≈ 0.5, biên ATR hẹp),
+        // cursor phải được ghi → kernel đã chạy qua ONNX mà không lỗi.
+        let cursor = out
+            .iter()
+            .find(|o| o.labels.get(L_KIND).map(String::as_str) == Some(KIND_STEP))
+            .expect("cursor phải có → kernel evaluate đã chạy");
+        assert!(cursor.ts > 0);
     }
 
     #[tokio::test]
