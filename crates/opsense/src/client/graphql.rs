@@ -243,7 +243,7 @@ impl OpsenseClient {
                   $signal: String, $labelKind: String) {
                 queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs,
                                 limit: $limit, signal: $signal, labelKind: $labelKind) {
-                    observations { ts metric value labels }
+                    observations { ts metric signal value labels }
                     truncated
                     scanned
                 }

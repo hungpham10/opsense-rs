@@ -88,10 +88,18 @@ fn check_query_bounds(from: i64, to: i64, limit: Option<i64>) -> async_graphql::
             "cửa sổ đảo ngược: from={from} > to={to}"
         )));
     }
-    if to - from > MAX_QUERY_WINDOW_SECS {
+    // `checked_sub`, KHÔNG dùng `to - from`: với from=i64::MIN, to=i64::MAX thì
+    // phép trừ tràn — build debug panic, build release **wrap thành -1** khiến
+    // điều kiện "vượt trần" sai thành false ⇒ guard bị bỏ qua đúng cái truy vấn
+    // vô hạn mà nó sinh ra để chặn.
+    let width = to.checked_sub(from).ok_or_else(|| {
+        async_graphql::Error::new(format!(
+            "cửa sổ {from}..{to} quá rộng để tính; hãy truyền from/to cụ thể"
+        ))
+    })?;
+    if width > MAX_QUERY_WINDOW_SECS {
         return Err(async_graphql::Error::new(format!(
-            "cửa sổ {}s vượt trần {MAX_QUERY_WINDOW_SECS}s ({} ngày); chia làm nhiều lần gọi",
-            to - from,
+            "cửa sổ {width}s vượt trần {MAX_QUERY_WINDOW_SECS}s ({} ngày); chia làm nhiều lần gọi",
             MAX_QUERY_WINDOW_SECS / 86_400
         )));
     }
@@ -664,6 +672,15 @@ mod tests {
         let err = err.message.clone();
         assert!(err.contains("vượt trần"), "{err}");
         assert!(err.contains("chia"), "phải gợi ý cách chia: {err}");
+
+        // `from=i64::MIN, to=i64::MAX` làm phép trừ TRÀN: debug panic, release
+        // wrap thành số âm ⇒ guard im lặng bị bỏ qua. Phải bị chặn như trên.
+        let err = check_query_bounds(i64::MIN, i64::MAX, None).unwrap_err();
+        let err = err.message.clone();
+        assert!(
+            err.contains("quá rộng để tính") || err.contains("vượt trần"),
+            "cửa sổ tràn số phải bị chặn, không được lọt: {err}"
+        );
 
         // Cửa sổ đảo ngược.
         let err = check_query_bounds(now, now - day, None).unwrap_err();

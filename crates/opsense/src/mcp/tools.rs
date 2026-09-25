@@ -76,11 +76,13 @@ pub async fn query_timeseries(
         .and_then(|c| json_dump(&c).map_err(|e| format!("{e}")))
 }
 
-/// Lệnh giao dịch + cursor T+N trong một station (`signal = "order"` hoặc
-/// `labels.kind = "trading_step"`).
+/// State giao dịch trong một station: lệnh (`signal = "order"`) **và** cursor T+N
+/// (`labels.kind = "trading_step"`).
 ///
-/// Đây là state runtime — **không** nằm trong RAM của node mà trong station, nên
-/// restart không mất. `status` lọc theo `labels.status` (open/closed) phía server.
+/// Cursor cố ý **không** lọc theo `signal` được: nó là `signal = "summary"`, nên
+/// lọc `signal = "order"` sẽ âm thầm rơi mất cursor — tức mất đúng thứ agent
+/// cần để biết "T+N đã chạy tới nến nào". Vì vậy lấy cả hai loại rồi lọc ở đây.
+/// `status` chỉ áp cho lệnh (cursor không có status).
 pub async fn orders(
     client: &OpsenseClient,
     node: &str,
@@ -88,33 +90,34 @@ pub async fn orders(
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Result<String, String> {
-    query_timeseries(
-        client,
-        node,
-        from_ts,
-        to_ts,
-        Some(1000),
-        Some("order"),
-        None,
-    )
-    .await
-    .map(|dump| match status {
-        None => dump,
-        Some(want) => match serde_json::from_str::<serde_json::Value>(&dump) {
-            Ok(mut v) => {
-                if let Some(obs) = v.get_mut("observations").and_then(|o| o.as_array_mut()) {
-                    obs.retain(|o| {
-                        o.get("labels")
-                            .and_then(|l| l.get("status"))
-                            .and_then(|s| s.as_str())
-                            == Some(want)
-                    });
-                }
-                serde_json::to_string_pretty(&v).unwrap_or(dump)
+    let raw = query_timeseries(client, node, from_ts, to_ts, Some(2000), None, None).await?;
+    let mut v: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("query result: {e}"))?;
+    if let Some(obs) = v
+        .get_mut("observations")
+        .and_then(|o| o.as_array_mut())
+    {
+        obs.retain(|o| {
+            let kind = o.get("labels").and_then(|l| l.get("kind")).and_then(|k| k.as_str());
+            let signal = o.get("signal").and_then(|s| s.as_str());
+            if kind == Some("trading_step") {
+                return true; // cursor T+N — không có `status`
             }
-            Err(_) => dump,
-        },
-    })
+            if signal != Some("order") {
+                return false;
+            }
+            match status {
+                None => true,
+                // Chỉ lệnh mới mang `labels.status`.
+                Some(want) => o
+                    .get("labels")
+                    .and_then(|l| l.get("status"))
+                    .and_then(|s| s.as_str())
+                    == Some(want),
+            }
+        });
+    }
+    json_dump(&v).map_err(|e| format!("{e}"))
 }
 
 /// Sửa **một** thành phần của một node (vd `params.sl_pct` → `0.02`).

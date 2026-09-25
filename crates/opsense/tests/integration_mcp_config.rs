@@ -114,6 +114,18 @@ async fn query_station_rejects_unbounded_window() {
         .expect_err("limit vượt trần phải bị từ chối")
         .to_string();
     assert!(err.contains("limit"), "{err}");
+
+    // `from=i64::MIN, to=i64::MAX` làm phép trừ tràn: debug panic, release wrap
+    // thành số âm khiến guard im lặng BỎ QUA — đúng truy vấn vô hạn cần chặn.
+    let err = c
+        .query_station("binance-tsdb", Some(i64::MIN), Some(i64::MAX), None, None, None)
+        .await
+        .expect_err("cửa sổ tràn số phải bị từ chối")
+        .to_string();
+    assert!(
+        err.contains("quá rộng để tính") || err.contains("vượt trần"),
+        "cửa sổ tràn số phải bị chặn: {err}"
+    );
 }
 
 #[tokio::test]

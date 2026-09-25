@@ -427,14 +427,30 @@ async fn full_pipeline_trading_emits_orders() {
         .filter(|o| o.signal == Signal::Order)
         .collect();
     assert!(!orders.is_empty(), "trading mode phải sinh order: {obs:?}");
+    let mut opened = 0usize;
     for order in &orders {
         assert_eq!(order.metric_id, SYMBOL);
-        assert_eq!(order.labels.get("status").map(String::as_str), Some("open"));
+        // Lệnh có thể **đã đóng**: máy nhanh (CI) thì tới lúc test đọc station,
+        // các nến sau đã chạm SL/TP và sinh observation `status = "closed"`.
+        // Đó là vòng đời bình thường, không phải hỏng — chỉ cần trạng thái hợp lệ
+        // và đủ label cho từng nhánh.
+        let status = order.labels.get("status").map(String::as_str);
+        assert!(
+            matches!(status, Some("open") | Some("closed")),
+            "status phải open|closed: {order:?}"
+        );
+        if status == Some("open") {
+            opened += 1;
+        }
         assert!(order.value > 0.0, "entry price dương: {order:?}");
         for key in ["order_id", "dtype", "grid", "level", "size", "sl", "tp"] {
             assert!(order.labels.contains_key(key), "thiếu label `{key}`: {order:?}");
         }
     }
+    assert!(
+        opened > 0,
+        "phải có ít nhất 1 lệnh đang mở (mọi lệnh đều đóng thì nghi ngờ đọc sai)"
+    );
 
     // Cursor đánh dấu nến đã chạy trading step (T+N + idempotent sau restart).
     // Append-only: mỗi nến live đóng trong lúc test chờ sinh một cursor, nên

@@ -58,7 +58,7 @@ MCP là **client mỏng** của `opsense serve`: mỗi tool = 1 GraphQL round-tr
 | `opsense_set_attribute({name, value})` | `Mutation.setAttribute` | Set attribute (cảnh báo nếu `OPSENSE_ATTR_<NAME>` đang ghi đè). |
 | `opsense_remove_attribute({name})` | `Mutation.removeAttribute` | Xoá attribute, trả `true` nếu key tồn tại. |
 | `opsense_query_timeseries({node, from_ts?, to_ts?, limit?, signal?, label_kind?})` | `Query.queryTimeseries` | Đọc observation của một station. **Có guard**: `limit` mặc định 1000 (trần 10000), cửa sổ trần 30 ngày — vượt thì từ chối kèm gợi ý. Lọc `signal`/`label_kind` chạy server-side; kết quả có `truncated`. |
-| `opsense_orders({node, status?, from_ts?, to_ts?})` | `Query.queryTimeseries` | Lệnh giao dịch trong station (`signal = "order"`, `labels.status = open\|closed`). |
+| `opsense_orders({node, status?, from_ts?, to_ts?})` | `Query.queryTimeseries` | State giao dịch trong station: lệnh (`signal = "order"`, `labels.status = open\|closed`) **và** cursor T+N (`labels.kind = "trading_step"`). `status` chỉ lọc lệnh, cursor luôn được giữ. |
 | `opsense_set_param({id, path, value})` | `Mutation.patchComponent` | Sửa **một** trường của node (JSON pointer `params.sl_pct` + JSON literal). Server đọc cấu hình hiện tại, patch, validate toàn bộ rồi mới reload. **Đường sửa mặc định.** |
 | `opsense_reload({components_json})` | `Mutation.reload` | **Thay toàn bộ** danh sách node. Thô — thiếu một node là mất node đó. |
 
