@@ -30,5 +30,7 @@ typetag = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+# `tests/grid_live_binance.rs` (#[ignore]) gọi Binance public API.
+reqwest = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }

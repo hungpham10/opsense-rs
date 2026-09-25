@@ -251,11 +251,13 @@ fn trading_cfg() {
 // thắng thực tế.
 
 fn rebuild(candles, prev, params) {
-    let levels = params.grid_levels.to_int();
-    let max_bit = params.max_bit.to_int();
-    let min_trades = params.min_trades.to_int();
-    let amp = params.level_edge_amp.to_float();
-    let sharpness = params.weight_sharpness.to_float();
+    // Knob thiếu → dùng default (script phải chạy được khi config không set hết,
+    // ví dụ node chỉ truyền 3 knob trong test live).
+    let levels = knob(params, "grid_levels", 5.0).to_int();
+    let max_bit = knob(params, "max_bit", 20.0).to_int();
+    let min_trades = knob(params, "min_trades", 3.0).to_int();
+    let amp = knob(params, "level_edge_amp", 0.10).to_float();
+    let sharpness = knob(params, "weight_sharpness", 4.0).to_float();
 
     // Khoảng giá quan sát + interval trung vị (transition cần step thời gian).
     let lo = candles[0].l;
@@ -322,6 +324,13 @@ fn rebuild(candles, prev, params) {
                      short_win: short_win }];
     }
     plans
+}
+
+/// Đọc knob từ `params`, thiếu thì trả `default` — để `fn rebuild` chạy được
+/// với config tối giểu (thiếu `level_edge_amp` chẳng hạn phải ra 0.10 chứ không
+/// phải `()` làm hỏng cả lần rebuild).
+fn knob(params, name, fallback) {
+    if type_of(params[name]) == "()" { fallback } else { params[name] }
 }
 
 /// Median gap (giây) giữa các nến — dùng làm interval cho transition.
