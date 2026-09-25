@@ -17,9 +17,10 @@ Có **một** chỗ script được dùng trong pipeline:
 |---|---|---|
 | `rhai_transform` | `fn process(observations)` → array observation-map mới | array observation-map từ cửa sổ cursor |
 
-> `http_source`/`ingest_source` không dùng script Rhai: response API map thành
+> `http_source`/`csv_source` không dùng script Rhai: response API map thành
 > observations bằng bộ khai báo `items` + `fields` + `constants` (jq, xem
-> `docs/GUIDE.md` §5). Rhai chỉ còn vai trò `rhai_transform` giữa các node.
+> `docs/GUIDE.md` §5). Rhai giữ vai trò `rhai_transform` giữa các node, và
+> `fn rebuild` cho chiến lược trading (§9).
 
 Script mẫu kèm repo: [`scripts/`](../scripts/README.md) — đặc biệt
 [`disk_spike_check.rhai`](../scripts/disk_spike_check.rhai) (so hiện tại với
@@ -46,25 +47,33 @@ baseline). Mọi function dưới đây có ví dụ dùng thật trong script �
 (output ghi vào stage cấu hình). Ví dụ script đầy đủ:
 [`scripts/disk_spike_check.rhai`](../scripts/disk_spike_check.rhai).
 
-## 2. Query dữ liệu từ trạm (`ts_query` / `ts_mean`)
+## 2. Query dữ liệu từ trạm (`station_query` / `station_candles`)
 
-Mọi node sinh dữ liệu (`http_source`, `ingest_source`, `rhai_transform`,
-`timeseries_station_transform`, …) tự đăng ký một **trạm** vào registry toàn
-cục theo node id (first-wins — sửa tham số trạm cần restart session). Script
-gọi được mọi trạm — ví dụ node có `id = "disk-usage"` (bật `station = true`):
+Mọi node sinh dữ liệu (`http_source`, `rhai_transform`,
+`timeseries_station_transform`, …) tự đăng ký một **trạm** theo node id
+(first-wins). Script đọc được mọi trạm qua hai hàm:
 
 ```rhai
-// Trả array observation-map; () nếu không có trạm id đó.
-let points = ts_query("tsdb", "processed", "disk_usage_ratio", now_secs() - 3600, now_secs());
+// station_query(station, from_ts, to_ts) -> array observation-map
+let obs = station_query("tsdb", now_secs() - 3600, now_secs());
 
-// Sugar: trung bình value trong cửa sổ; () nếu rỗng/không có trạm.
-let base = ts_mean("tsdb", "processed", "disk_usage_ratio", now_secs() - 3600, now_secs());
+// station_candles(station, from_ts, to_ts, resolution) -> array candle map
+// map dạng #{ t, o, h, l, c, v }; resolution lọc theo label
+let candles = station_candles("grid", from, to, "60");
 ```
 
-- Tham số: `(station_id, stage /* raw|processed */, metric_id, from_ts, to_ts)`.
-- Kiểm tra `!= ()` trước khi dùng — trạm chưa đăng ký hoặc cửa sổ trống trả `()`.
+- Cả hai trả `()` nếu **không có** trạm id đó → kiểm tra `!= ()` trước khi dùng.
+- `station_query` dùng `query_recent`: trả mọi observation **thực sự có** trong
+  cửa sổ, kể cả khi coverage hổng (khác `query_range` vốn trả rỗng nếu bất kỳ
+  block nào chưa cover trọn — vô dụng cho script muốn "cho tôi dữ liệu gần now").
+- `station_candles` đọc qua `DataLoader` của qlib — **cùng đường đọc với kernel
+  trading**, và window âm được clamp về 0 (không tràn thành cửa sổ khổng lồ).
 - Muốn query được thì node sinh dữ liệu phải publish trạm: bật `station = true`,
   hoặc thêm `timeseries_station_transform` đứng sau node.
+
+> Hàm `ts_query`/`ts_mean(station, stage, metric, from, to)` của bản tài liệu cũ
+> **đã bị gỡ** khi bỏ tầng store chung. Thay bằng `station_query` + lọc `metric_id`
+> trong script nếu cần.
 
 ## 3. Toán tử time-series (`ts_*`)
 
@@ -187,8 +196,10 @@ script dùng `pattern_*`/`catalog_*` thì cũng là một block duy nhất — �
 
 ## 7. Sandbox
 
-- Không filesystem/network/host function; chỉ toán tử Rhai + hàm `ts_*`/`grid_*`
-  /`transition_*`/`now_secs`.
+- Không filesystem/network/host function; chỉ toán tử Rhai + các hàm đăng ký:
+  `ts_*`, `grid_*`, `transition_*`, `pattern_*`, `catalog_*`, `station_query`,
+  `station_candles`, `attr`/`attrs`, `trigger`, `now_secs`, và (chỉ ở
+  `rhai_transform` của node trading) `portfolio_feed`.
 - Giới hạn: 1_000_000 operations, array/map 100_000, string 1_000_000.
 - Timeout riêng: env `OPSENSE_RHAI_TIMEOUT_SECS`.
 - Lỗi script **không giết pipeline**: log warn, cursor giữ nguyên, cửa sổ được
@@ -207,6 +218,50 @@ Quy trình chuẩn — **run → chờ → đọc dữ liệu → timeout:**
    không, log warn lỗi script (script bị retry tự heal), station đã đăng ký
    chưa; sau đó chạy lại ở batch kế. **Không panic ngầm** — timeout là hành vi
    kỳ vọng khi pipeline chưa đủ dữ liệu.
+
+---
+
+## 9. Chiến lược trading: `fn rebuild`
+
+Ngoài `fn process`, script của node `rhai_transform` có thể khai thêm
+`fn rebuild(candles, prev, params)` để làm **chiến lược** (genome khai báo được,
+không phải class Rust phải sửa rồi compile):
+
+```rhai
+fn rebuild(candles, prev, params) {
+    // candles = [#{ t, o, h, l, c, v }, …]  — nến kernel fetch trong lookback
+    // prev    = [#{ long_win, long_lost, short_win, short_lost }, …]
+    //            thống kê lệnh đã đóng của plan cũ (kernel giữ, không mất khi
+    //            script dựng lại plan)
+    // params  = map knob từ [pipeline.components.params]
+    // trả: một plan cho MỖI ô lưới (kernel ghép mỗi plan thành một lưới lệnh
+    //      riêng trong khoảng giá của ô đó)
+}
+```
+
+- Kernel (`Strategy::rebuild`) gọi hàm này mỗi `review_interval_secs`.
+- Hợp đồng dữ liệu của plan: `opsense_qlib::plan::GridPlan` / `CellStats` (serde).
+  Script **không dựng được** `TradingGrid` (field Rust private) nên trả JSON; kernel
+  dựng lại grid và chép bộ đếm win/lost từ `prev` — bộ đếm là trí nhớ kernel.
+- Script chịu thiếu knob bằng helper tự viết (tên `fallback`, vì `default` là
+  keyword Rhai):
+
+  ```rhai
+  fn knob(params, name, fallback) {
+      if params.contains(name) { params[name] } else { fallback }
+  }
+  ```
+
+- Script nguồn là **chính script của node** (đọc qua `runtime::current_script()`) →
+  không khai đường dẫn chiến lược ở `params`, không thể lệch hai bản.
+- `portfolio_feed(candles, obs, candle, cfg, symbol)` là hàm duy nhất được phép
+  gọi kernel: nó chạy trên **engine Rhai thứ hai** (engine chính đang
+  `with_borrow_mut` nên không reentrant được), chỉ đăng ký binding read-only.
+
+Script mẫu đầy đủ: [`strategies/binance/grid.rhai`](../strategies/binance/grid.rhai)
+— sieve tìm số ô (`grid_fit`) → xác suất chuyển trạng thái
+(`transition_analysis`) → win-prob theo ô → nếu đủ lệnh đã đóng thì tin tỉ lệ
+thắng thực tế.
 
 > **Hợp đồng lỗi:** nếu script đúng (đã khớp bảng §2–§6) mà một hàm báo "hàm
 > không tồn tại" → đó là bug binding (macro sinh thiếu/trùng) — báo ngay. Ví
