@@ -49,6 +49,14 @@ pub struct SetAttributeResult {
     pub env_override_active: bool,
 }
 
+/// Kết quả query có guard: luôn biết có bị cắt không.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct QueryResult {
+    pub observations: Vec<Observation>,
+    pub truncated: bool,
+    pub scanned: usize,
+}
+
 /// Cấu hình đang chạy của một component (`Query.components`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ComponentConfig {
@@ -215,16 +223,29 @@ impl OpsenseClient {
         self.gql(QUERY, Vars { id }).await
     }
 
-    pub async fn query_timeseries(
+    /// Truy vấn observation của một `timeseries` station, có guard + filter.
+    ///
+    /// Server từ chối `limit`/cửa sổ vượt trần và lọc server-side theo `signal`
+    /// (`"order"`, `"summary"`…) + `label_kind` (`"trading_step"`, `"snapshot"`…).
+    /// `truncated = true` nghĩa là còn dữ liệu ngoài `limit`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn query_station(
         &self,
         node: &str,
         from_ts: Option<i64>,
         to_ts: Option<i64>,
-    ) -> anyhow::Result<Vec<Observation>> {
+        limit: Option<i64>,
+        signal: Option<&str>,
+        label_kind: Option<&str>,
+    ) -> anyhow::Result<QueryResult> {
         const QUERY: &str = r#"
-            query($node: String!, $fromTs: Int, $toTs: Int) {
-                queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) {
-                    ts metric value labels
+            query($node: String!, $fromTs: Int, $toTs: Int, $limit: Int,
+                  $signal: String, $labelKind: String) {
+                queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs,
+                                limit: $limit, signal: $signal, labelKind: $labelKind) {
+                    observations { ts metric value labels }
+                    truncated
+                    scanned
                 }
             }
         "#;
@@ -233,6 +254,9 @@ impl OpsenseClient {
             node: &'a str,
             from_ts: Option<i64>,
             to_ts: Option<i64>,
+            limit: Option<i64>,
+            signal: Option<&'a str>,
+            label_kind: Option<&'a str>,
         }
         self.gql(
             QUERY,
@@ -240,6 +264,9 @@ impl OpsenseClient {
                 node,
                 from_ts,
                 to_ts,
+                limit,
+                signal,
+                label_kind,
             },
         )
         .await

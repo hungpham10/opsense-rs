@@ -97,6 +97,52 @@ pub async fn set_param(
     print_json(&r)
 }
 
+/// `opsense query <node>` — đọc observation của station (có guard + filter).
+#[allow(clippy::too_many_arguments)]
+pub async fn query(
+    endpoint: Option<String>,
+    node: &str,
+    from: Option<i64>,
+    to: Option<i64>,
+    limit: Option<i64>,
+    signal: Option<String>,
+    label_kind: Option<String>,
+) -> Result<()> {
+    let out = client(endpoint)?
+        .query_station(
+            node,
+            from,
+            to,
+            limit,
+            signal.as_deref(),
+            label_kind.as_deref(),
+        )
+        .await
+        .context("Query.queryTimeseries")?;
+    if out.truncated {
+        eprintln!(
+            "warning: truncated ({} rows scanned) — tăng --limit hoặc chia nhỏ --from/--to",
+            out.scanned
+        );
+    }
+    print_json(&out)
+}
+
+/// `opsense orders <node>` — lệnh giao dịch trong station (`signal = "order"`).
+pub async fn orders(
+    endpoint: Option<String>,
+    node: &str,
+    status: Option<String>,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Result<()> {
+    let dump = crate::mcp::tools::orders(&client(endpoint)?, node, status.as_deref(), from, to)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let v: serde_json::Value = serde_json::from_str(&dump).map_err(|e| anyhow::anyhow!("{e}"))?;
+    print_json(&v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

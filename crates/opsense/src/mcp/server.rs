@@ -47,6 +47,28 @@ pub struct RemoveAttributeParams {
 pub struct QueryTimeseriesParams {
     #[schemars(description = "Station/node id")]
     pub node: String,
+    #[schemars(description = "From ts (unix seconds, inclusive). Omit → bounded default window")]
+    pub from_ts: Option<i64>,
+    #[schemars(description = "To ts (unix seconds, inclusive). Omit → now")]
+    pub to_ts: Option<i64>,
+    /// Server từ chối vượt trần (10k) và báo `truncated` khi cắt.
+    #[schemars(description = "Max rows (default 1000, hard cap 10000)")]
+    pub limit: Option<i64>,
+    /// Lọc server-side, vd `"order"`, `"summary"`, `"raw"`.
+    #[schemars(description = "Filter by signal: order|summary|raw|utilization…")]
+    pub signal: Option<String>,
+    /// Lọc server-side theo `labels.kind`, vd `"trading_step"`, `"snapshot"`.
+    #[schemars(description = "Filter by labels.kind, e.g. trading_step")]
+    pub label_kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct OrdersParams {
+    #[schemars(description = "Station id holding trading state, e.g. \"grid\"")]
+    pub node: String,
+    /// `open` | `closed`; bỏ trống → cả hai.
+    #[schemars(description = "Filter by labels.status: open|closed")]
+    pub status: Option<String>,
     #[schemars(description = "From ts (unix seconds, inclusive)")]
     pub from_ts: Option<i64>,
     #[schemars(description = "To ts (unix seconds, inclusive)")]
@@ -138,12 +160,43 @@ impl OpsenseMcpServer {
         tools::remove_attribute(&self.client, &p.name).await
     }
 
-    #[tool(description = "Query observations from a TimeseriesStation in a time window.")]
+    #[tool(
+        description = "Query observations from a TimeseriesStation. Bounded server-side (limit cap 10000, window cap 30 days) and reports `truncated`. Filter server-side with `signal` / `label_kind` instead of pulling everything and filtering yourself."
+    )]
     async fn opsense_query_timeseries(
         &self,
         Parameters(p): Parameters<QueryTimeseriesParams>,
     ) -> Result<String, String> {
-        tools::query_timeseries(&self.client, &p.node, p.from_ts, p.to_ts).await
+        tools::query_timeseries(
+            &self.client,
+            &p.node,
+            p.from_ts,
+            p.to_ts,
+            p.limit,
+            p.signal.as_deref(),
+            p.label_kind.as_deref(),
+        )
+        .await
+    }
+
+    /// State giao dịch nằm trong **station** (không mất khi restart): lệnh
+    /// `signal = "order"` (`labels.status = open|closed`) và cursor T+N
+    /// (`labels.kind = "trading_step"`).
+    #[tool(
+        description = "Trading state in a station: orders (labels.status open/closed) with optional status filter. One call instead of pulling the station and filtering by hand."
+    )]
+    async fn opsense_orders(
+        &self,
+        Parameters(p): Parameters<OrdersParams>,
+    ) -> Result<String, String> {
+        tools::orders(
+            &self.client,
+            &p.node,
+            p.status.as_deref(),
+            p.from_ts,
+            p.to_ts,
+        )
+        .await
     }
 
     #[tool(

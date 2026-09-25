@@ -72,6 +72,47 @@ enum Commands {
         endpoint: Option<String>,
     },
 
+    /// Query observations of a `timeseries` station (bounded server-side).
+    ///
+    /// `opsense query grid --signal order`
+    Query {
+        /// Station id.
+        node: String,
+        /// From ts (unix seconds, inclusive). Mặc định = cửa sổ tối đa cho phép.
+        #[arg(long)]
+        from: Option<i64>,
+        /// To ts (unix seconds, inclusive). Mặc định = now.
+        #[arg(long)]
+        to: Option<i64>,
+        /// Số dòng tối đa (mặc định 1000, trần cứng 10000).
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Lọc theo signal: `order`, `summary`, `raw`, …
+        #[arg(long)]
+        signal: Option<String>,
+        /// Lọc theo `labels.kind`: `trading_step`, `snapshot`, …
+        #[arg(long)]
+        label_kind: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
+    /// Trading state stored in a station: orders (`open`/`closed`) — sống qua
+    /// restart vì nằm trong station, không phải RAM của node.
+    Orders {
+        /// Station id, vd `grid`.
+        node: String,
+        /// `open` | `closed`; bỏ trống → cả hai.
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        from: Option<i64>,
+        #[arg(long)]
+        to: Option<i64>,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
     /// Read ONE field of a node's live config (JSON pointer).
     ///
     /// `opsense get-param grid /params/sl_pct`
@@ -186,6 +227,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(Commands::Components { id, endpoint }) => {
                     if let Err(e) = opsense::cli::components(endpoint, id).await {
                         eprintln!("components error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Query {
+                    node,
+                    from,
+                    to,
+                    limit,
+                    signal,
+                    label_kind,
+                    endpoint,
+                }) => {
+                    if let Err(e) = opsense::cli::query(endpoint, &node, from, to, limit, signal, label_kind).await {
+                        eprintln!("query error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Orders {
+                    node,
+                    status,
+                    from,
+                    to,
+                    endpoint,
+                }) => {
+                    if let Err(e) = opsense::cli::orders(endpoint, &node, status, from, to).await {
+                        eprintln!("orders error: {e}");
                         std::process::exit(1);
                     }
                 }

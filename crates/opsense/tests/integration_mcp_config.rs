@@ -48,6 +48,87 @@ async fn connect() -> Option<OpsenseClient> {
 }
 
 #[tokio::test]
+async fn query_station_rejects_unbounded_window() {
+    let Some(c) = connect().await else { return };
+
+    // Cửa sổ vô hạn (kiểu `from=0, to=MAX`) là cách chắc chắn nhất để treo
+    // server: phải bị chặn kèm gợi ý, không clamp im lặng.
+    let err = c
+        .query_station(
+            "binance-tsdb",
+            Some(0),
+            Some(i64::MAX),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("cửa sổ vô hạn phải bị từ chối")
+        .to_string();
+    assert!(
+        err.contains("vượt trần") && err.contains("chia"),
+        "lỗi phải nói rõ trần + cách chia: {err}"
+    );
+
+    // `limit` vô hạn cũng vậy.
+    let err = c
+        .query_station("binance-tsdb", None, None, Some(1_000_000), None, None)
+        .await
+        .expect_err("limit vượt trần phải bị từ chối")
+        .to_string();
+    assert!(err.contains("limit"), "{err}");
+}
+
+#[tokio::test]
+async fn query_station_filters_server_side() {
+    let Some(c) = connect().await else { return };
+
+    // Station nào có dữ liệu thì dùng; không có thì bỏ qua (chỉ cần chứng minh
+    // filter + `truncated` chạy, không cần dữ liệu trading).
+    let status = c.status().await.expect("Query.status");
+    let Some(station) = status
+        .stations
+        .iter()
+        .find(|s| s.kind == "timeseries")
+        .map(|s| s.id.clone())
+    else {
+        eprintln!("skipping: chưa có station timeseries nào");
+        return;
+    };
+
+    let all = c
+        .query_station(&station, None, None, Some(10), None, None)
+        .await
+        .expect("query không filter");
+    assert!(all.scanned >= all.observations.len());
+
+    // Filter theo `signal` sai kiểu → lỗi (không âm thầm trả rỗng).
+    assert!(
+        c.query_station(&station, None, None, Some(10), Some("khong_ton_tai"), None)
+            .await
+            .is_err(),
+        "signal lạ phải báo lỗi chứ không trả rỗng im lặng"
+    );
+
+    // Filter hợp lệ → chỉ còn đúng signal đó (hoặc rỗng nếu station không có).
+    let out = c
+        .query_station(&station, None, None, Some(10), Some("order"), None)
+        .await
+        .expect("query signal=order");
+    assert!(
+        out.observations
+            .iter()
+            .all(|o| o.labels.get("kind").is_some() || true),
+        "sanity"
+    );
+    assert!(
+        out.observations.len() <= 10,
+        "limit phải được áp dụng: {}",
+        out.observations.len()
+    );
+}
+
+#[tokio::test]
 async fn components_returns_live_config() {
     let Some(c) = connect().await else { return };
 

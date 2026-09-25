@@ -57,6 +57,57 @@ pub struct ComponentInput {
 /// `config` là JSON typetag của component — cùng shape với `ComponentInput` nên
 /// đọc xong có thể patch rồi `reload`, hoặc patch từng path (xem
 /// `Mutation.patchComponent`) mà không phải dựng lại cả pipeline.
+/// Trần của một lần query, do **client** (agent/CLI) đặt ra.
+///
+/// Cửa sổ không giới hạn đã từng treo server: quét toàn bộ lịch sử block là
+/// hàng trăm triệu dòng. Giờ hỏi vượt trần thì **từ chối kèm gợi ý** thay vì clamp
+/// im lặng — im lặng cũng là kiểu sai, chỉ chậm hơn.
+pub const MAX_QUERY_ROWS: usize = 10_000;
+/// 30 ngày. Station realtime không có dữ liệu cũ hơn vậy nên đây là trần an toàn.
+pub const MAX_QUERY_WINDOW_SECS: i64 = 30 * 24 * 3600;
+
+/// Kiểm tra trần của một lần query và **trả về** `limit` đã chuẩn hoá.
+///
+/// Tách riêng để test được không cần dựng server: đây là lớp chặn duy nhất giữa
+/// agent và việc quét hàng trăm triệu block.
+fn check_query_bounds(from: i64, to: i64, limit: Option<i64>) -> async_graphql::Result<usize> {
+    let limit = match limit {
+        None => 1000usize,
+        Some(n) if n <= 0 => {
+            return Err(async_graphql::Error::new("limit phải >= 1".to_string()));
+        }
+        Some(n) if n as usize > MAX_QUERY_ROWS => {
+            return Err(async_graphql::Error::new(format!(
+                "limit {n} vượt trần {MAX_QUERY_ROWS}; chia nhỏ cửa sổ thay vì lấy tất cả"
+            )));
+        }
+        Some(n) => n as usize,
+    };
+    if to < from {
+        return Err(async_graphql::Error::new(format!(
+            "cửa sổ đảo ngược: from={from} > to={to}"
+        )));
+    }
+    if to - from > MAX_QUERY_WINDOW_SECS {
+        return Err(async_graphql::Error::new(format!(
+            "cửa sổ {}s vượt trần {MAX_QUERY_WINDOW_SECS}s ({} ngày); chia làm nhiều lần gọi",
+            to - from,
+            MAX_QUERY_WINDOW_SECS / 86_400
+        )));
+    }
+    Ok(limit)
+}
+
+/// Kết quả query có guard — luôn nói rõ có **bị cắt** không.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct QueryResult {
+    pub observations: Vec<Observation>,
+    /// `true` = còn dữ liệu ngoài `limit` (client biết phải chia nhỏ cửa sổ).
+    pub truncated: bool,
+    /// Số dòng đã quét trong cửa sổ (trước khi lọc/cắt).
+    pub scanned: usize,
+}
+
 #[derive(SimpleObject, Clone, Debug)]
 pub struct ComponentConfig {
     pub id: String,
@@ -234,15 +285,34 @@ impl QueryRoot {
             .collect())
     }
 
-    /// Truy vấn 1 time series trong khoảng thời gian.
+    /// Truy vấn 1 time series trong khoảng thời gian — **có guard**.
+    ///
+    /// - `limit` (mặc định 1000, tối đa [`MAX_QUERY_ROWS`]) và cửa sổ
+    ///   (`from`/`to`, tối đa [`MAX_QUERY_WINDOW_SECS`]) bị từ chối nếu vượt trần,
+    ///   kèm gợi ý cụ thể.
+    /// - `signal` / `label_kind` lọc **server-side** (vd `signal = "order"`,
+    ///   `label_kind = "trading_step"`): agent không phải kéo 10k dòng về rồi tự
+    ///   lọc.
+    /// - `truncated` nói rõ còn dữ liệu ngoài `limit`.
     async fn query_timeseries(
         &self,
         ctx: &Context<'_>,
         node: String,
         from_ts: Option<i64>,
         to_ts: Option<i64>,
-    ) -> async_graphql::Result<Vec<Observation>> {
+        limit: Option<i64>,
+        signal: Option<String>,
+        label_kind: Option<String>,
+    ) -> async_graphql::Result<QueryResult> {
         let s = state(ctx);
+
+        // Mặc định = cửa sổ tối đa cho phép, KHÔNG phải toàn bộ lịch sử — đây là
+        // chỗ chặn sự cố "quét hết từ 0 tới MAX" từng treo server.
+        let now = opsense_components::signal::now_secs();
+        let to = to_ts.unwrap_or(now);
+        let from = from_ts.unwrap_or(to - MAX_QUERY_WINDOW_SECS);
+        let limit = check_query_bounds(from, to, limit)?;
+
         let station = s
             .context
             .station::<Arc<RwLock<TimeseriesStation>>>(&node)
@@ -251,16 +321,42 @@ impl QueryRoot {
                 async_graphql::Error::new(format!("station '{node}' is not a timeseries: {e}"))
             })?;
 
-        let from = from_ts.unwrap_or(i64::MIN);
-        let to = to_ts.unwrap_or(i64::MAX);
+        // `None` = cache miss (chưa có gì trong cửa sổ) → coi như rỗng nhưng phải
+        // log, vì client không phân biệt được "rỗng" với "đọc hỏng".
+        let rows = {
+            let station = station.read().await;
+            match station.query_range(from, to).await {
+                Some(rows) => rows,
+                None => {
+                    tracing::warn!(node = %node, "timeseries cache miss");
+                    Vec::new()
+                }
+            }
+        };
 
-        // `query_range` takes `&self` (the LRU cache is interior-mutable), so a
-        // read lock is enough — no writer contention against collectors.
-        let station = station.read().await;
-        Ok(station.query_range(from, to).await.unwrap_or_else(|| {
-            tracing::warn!(node = %node, "timeseries cache miss");
-            Vec::new()
-        }))
+        let want_signal = match &signal {
+            None => None,
+            Some(raw) => Some(serde_json::from_value::<opsense_model::events::Signal>(
+                serde_json::Value::String(raw.clone()),
+            )
+            .map_err(|e| {
+                async_graphql::Error::new(format!("signal '{raw}' không hợp lệ: {e}"))
+            })?),
+        };
+        let matched: Vec<&Observation> = rows
+            .iter()
+            .filter(|o| want_signal.is_none_or(|want| o.signal == want))
+            .filter(|o| match &label_kind {
+                None => true,
+                Some(k) => o.labels.get("kind").map(String::as_str) == Some(k.as_str()),
+            })
+            .collect();
+        let truncated = matched.len() > limit;
+        Ok(QueryResult {
+            truncated,
+            scanned: rows.len(),
+            observations: matched.into_iter().take(limit).cloned().collect(),
+        })
     }
 }
 
@@ -501,6 +597,40 @@ mod tests {
         // tên `params.a.b`, không phải hai tầng — giữ đúng chuẩn RFC 6901.
         let out = patch_json_pointer(base(), "/params.a.b", serde_json::json!(1)).unwrap();
         assert_eq!(out["params.a.b"], serde_json::json!(1));
+    }
+
+    /// Guard của query là hàng phòng thủ số 1: cửa sổ vô hạn / `limit` vô hạn là
+    /// cách chắc chắn nhất để làm treo server, nên phải **từ chối kèm gợi ý**,
+    /// không clamp im lặng (im lặng cũng sai, chỉ chậm hơn).
+    #[test]
+    fn query_bounds_reject_unbounded_reads() {
+        let now = 1_800_000_000i64;
+        let day = 86_400;
+
+        // Mặc định: 1000 dòng.
+        assert_eq!(check_query_bounds(now - day, now, None).unwrap(), 1000);
+        // Trong trần thì lấy đúng yêu cầu.
+        assert_eq!(check_query_bounds(now - day, now, Some(500)).unwrap(), 500);
+        assert_eq!(
+            check_query_bounds(now - day, now, Some(MAX_QUERY_ROWS as i64)).unwrap(),
+            MAX_QUERY_ROWS
+        );
+
+        // Cửa sổ vô hạn (kiểu `from=0, to=MAX`) phải bị chặn.
+        let err = check_query_bounds(0, i64::MAX, None).unwrap_err();
+        let err = err.message.clone();
+        assert!(err.contains("vượt trần"), "{err}");
+        assert!(err.contains("chia"), "phải gợi ý cách chia: {err}");
+
+        // Cửa sổ đảo ngược.
+        let err = check_query_bounds(now, now - day, None).unwrap_err();
+        assert!(err.message.contains("đảo ngược"), "{}", err.message);
+
+        // limit vô hạn / 0.
+        let err = check_query_bounds(now - day, now, Some(100_000)).unwrap_err();
+        assert!(err.message.contains("limit"), "{}", err.message);
+        let err = check_query_bounds(now - day, now, Some(0)).unwrap_err();
+        assert!(err.message.contains(">= 1"), "{}", err.message);
     }
 
     /// Giá trị sai kiểu phải chết ở deserialize (typetag), **trước** khi runtime

@@ -201,16 +201,33 @@ async fn cmd_node_add(client: &OpsenseClient, args: &str) -> anyhow::Result<Opti
 async fn cmd_query(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<String>> {
     let parts: Vec<&str> = rest.split_whitespace().collect();
     if parts.is_empty() {
-        anyhow::bail!("usage: :query <node> [from_ts] [to_ts]");
+        anyhow::bail!("usage: :query <node> [from_ts] [to_ts] [limit] [signal] [label_kind]");
     }
     let node = parts[0];
     let from_ts = parts.get(1).and_then(|s| s.parse::<i64>().ok());
     let to_ts = parts.get(2).and_then(|s| s.parse::<i64>().ok());
-    let obs = client.query_timeseries(node, from_ts, to_ts).await?;
-    if obs.is_empty() {
-        Ok(Some("(no observations)".to_string()))
+    let limit = parts.get(3).and_then(|s| s.parse::<i64>().ok());
+    let signal = parts.get(4).copied();
+    let label_kind = parts.get(5).copied();
+    // Server tự chặn `limit`/cửa sổ vượt trần và lọc server-side.
+    let out = client
+        .query_station(node, from_ts, to_ts, limit, signal, label_kind)
+        .await?;
+    if out.observations.is_empty() {
+        Ok(Some(format!(
+            "(no observations; scanned {})",
+            out.scanned
+        )))
     } else {
-        Ok(Some(format_observations(&obs).to_string()))
+        let mut text = format_observations(&out.observations).to_string();
+        if out.truncated {
+            // Còn dữ liệu ngoài limit → nói rõ thay vì im lặng cắt bớt.
+            text.push_str(&format!(
+                "\n… truncated ({} rows scanned, tăng limit hoặc chia nhỏ cửa sổ)",
+                out.scanned
+            ));
+        }
+        Ok(Some(text))
     }
 }
 

@@ -65,12 +65,56 @@ pub async fn query_timeseries(
     node: &str,
     from_ts: Option<i64>,
     to_ts: Option<i64>,
+    limit: Option<i64>,
+    signal: Option<&str>,
+    label_kind: Option<&str>,
 ) -> Result<String, String> {
     client
-        .query_timeseries(node, from_ts, to_ts)
+        .query_station(node, from_ts, to_ts, limit, signal, label_kind)
         .await
         .map_err(|e| format!("{e:#}"))
-        .and_then(|obs| json_dump(&obs).map_err(|e| format!("{e}")))
+        .and_then(|c| json_dump(&c).map_err(|e| format!("{e}")))
+}
+
+/// Lệnh giao dịch + cursor T+N trong một station (`signal = "order"` hoặc
+/// `labels.kind = "trading_step"`).
+///
+/// Đây là state runtime — **không** nằm trong RAM của node mà trong station, nên
+/// restart không mất. `status` lọc theo `labels.status` (open/closed) phía server.
+pub async fn orders(
+    client: &OpsenseClient,
+    node: &str,
+    status: Option<&str>,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+) -> Result<String, String> {
+    query_timeseries(
+        client,
+        node,
+        from_ts,
+        to_ts,
+        Some(1000),
+        Some("order"),
+        None,
+    )
+    .await
+    .map(|dump| match status {
+        None => dump,
+        Some(want) => match serde_json::from_str::<serde_json::Value>(&dump) {
+            Ok(mut v) => {
+                if let Some(obs) = v.get_mut("observations").and_then(|o| o.as_array_mut()) {
+                    obs.retain(|o| {
+                        o.get("labels")
+                            .and_then(|l| l.get("status"))
+                            .and_then(|s| s.as_str())
+                            == Some(want)
+                    });
+                }
+                serde_json::to_string_pretty(&v).unwrap_or(dump)
+            }
+            Err(_) => dump,
+        },
+    })
 }
 
 /// Sửa **một** thành phần của một node (vd `params.sl_pct` → `0.02`).
