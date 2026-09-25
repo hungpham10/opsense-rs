@@ -253,4 +253,21 @@ impl AppState {
     pub async fn attributes(&self) -> BTreeMap<String, String> {
         self.context.get_attributes().await
     }
+
+    /// Cấu hình **đang chạy** của từng component, dạng JSON qua typetag.
+    ///
+    /// Nhờ đây client (REPL/CLI/MCP) đọc được `params` hiện tại của một node rồi
+    /// sửa đúng một chỗ (xem `Mutation.patchComponent`) thay vì phải dựng lại cả
+    /// danh sách component — đọc trước, sửa sau, không đoán.
+    pub async fn components(&self, id: Option<&str>) -> Vec<serde_json::Value> {
+        let runtime = self.runtime.read().await;
+        let all = runtime.components();
+        match id {
+            None => all,
+            Some(id) => all
+                .into_iter()
+                .filter(|c| c.get("id").and_then(serde_json::Value::as_str) == Some(id))
+                .collect(),
+        }
+    }
 }

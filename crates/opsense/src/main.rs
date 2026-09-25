@@ -53,6 +53,25 @@ enum Commands {
     /// `OPSENSE_GRAPHQL_URL` (default `http://127.0.0.1:8080/graphql`).
     Mcp {},
 
+    /// Print pipeline topology + registered stations (1 GraphQL round-trip).
+    Status {
+        /// GraphQL endpoint (default `$OPSENSE_GRAPHQL_URL` hoặc
+        /// `http://127.0.0.1:8080/graphql`).
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
+    /// Print the **live** config of pipeline components (JSON).
+    ///
+    /// Reads before you edit: `params` của script Rhai, `script_path`, inputs…
+    /// Cùng dữ liệu với MCP tool `opsense_get_config`.
+    Components {
+        /// Chỉ 1 node (vd `grid`); bỏ trống → toàn bộ pipeline.
+        id: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
     /// Run the opsense REPL client.
     ///
     /// Without `--runner` this talks to a running gateway over GraphQL
@@ -129,8 +148,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     }
                 }
-                Some(Commands::Repl { endpoint, runner }) => {
-                    if let Err(e) = opsense::repl::run(endpoint, runner).await {
+                Some(Commands::Status { endpoint }) => {
+                    if let Err(e) = opsense::cli::status(endpoint).await {
+                        eprintln!("status error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Components { id, endpoint }) => {
+                    if let Err(e) = opsense::cli::components(endpoint, id).await {
+                        eprintln!("components error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Repl { endpoint, runner }) => {                    if let Err(e) = opsense::repl::run(endpoint, runner).await {
                         eprintln!("repl error: {e}");
                         std::process::exit(1);
                     }

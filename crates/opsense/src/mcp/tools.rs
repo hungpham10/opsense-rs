@@ -28,6 +28,18 @@ pub async fn attributes(client: &OpsenseClient) -> Result<String, String> {
         .and_then(|m| json_dump(&m).map_err(|e| format!("{e}")))
 }
 
+/// Cấu hình **đang chạy** (`params`, `script_path`, …). Bỏ `id` → tất cả node.
+///
+/// Đọc trước khi sửa: `opsense_reload` nhận danh sách node đầy đủ, nên không
+/// đọc thì sửa một param cũng phải dựng lại cả pipeline.
+pub async fn get_config(client: &OpsenseClient, id: Option<&str>) -> Result<String, String> {
+    client
+        .components(id)
+        .await
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|c| json_dump(&c).map_err(|e| format!("{e}")))
+}
+
 pub async fn set_attribute(
     client: &OpsenseClient,
     name: &str,

@@ -54,6 +54,13 @@ pub struct QueryTimeseriesParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetConfigParams {
+    /// Node id (vd "grid"). Bỏ trống → toàn bộ pipeline.
+    #[schemars(description = "Node id; omit for all components")]
+    pub id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReloadParams {
     /// JSON array of component objects, each: `{"type": "...", "id": "...", "config": {...}, "inputs": [...]}`.
     #[schemars(description = "JSON array of component objects")]
@@ -87,6 +94,19 @@ impl OpsenseMcpServer {
     #[tool(description = "List all in-memory attributes (template variables).")]
     async fn opsense_attributes(&self) -> Result<String, String> {
         tools::attributes(&self.client).await
+    }
+
+    /// Đọc cấu hình đang chạy (kể cả `params` của script Rhai). Đây là bước
+    /// **đọc trước khi sửa** — không có nó thì mọi lần sửa đều phải gửi lại danh
+    /// sách node đầy đủ qua `opsense_reload`.
+    #[tool(
+        description = "Read live component config (type, inputs, full config incl. params). Call this BEFORE editing anything."
+    )]
+    async fn opsense_get_config(
+        &self,
+        Parameters(p): Parameters<GetConfigParams>,
+    ) -> Result<String, String> {
+        tools::get_config(&self.client, p.id.as_deref()).await
     }
 
     #[tool(description = "Set an attribute. Warns when OPSENSE_ATTR_<NAME> env is also set.")]

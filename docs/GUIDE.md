@@ -22,13 +22,14 @@ opsense init
 $EDITOR .opsense/config.toml
 
 # 3a) REPL tương tác (analysis session + Python sub-REPL)
-opsense serve --repl
-# hoặc alias: opsense repl
+opsense repl
 
 # 3b) MCP stdio cho client tích hợp (Claude Desktop, IDE…)
-opsense serve --mcp
-# hoặc alias: opsense mcp
-# MCP Streamable HTTP: opsense serve --mcp --http --port 8123
+opsense mcp
+
+# 3c) CLI dạng script — mỗi lệnh = 1 GraphQL round-trip (JSON ra stdout)
+opsense status                 # topology node + station
+opsense components [grid]      # cấu hình ĐANG CHẠY (kể cả params của script)
 ```
 
 `opsense init [path] [--force]`:
@@ -40,25 +41,28 @@ opsense serve --mcp
 
 ### Các MCP tool
 
-| Tool | Ý nghĩa |
-|---|---|
-| `opsense_init({config?})` | Mở session: load config, dựng runtime (mặc định `.opsense/config.toml`). |
-| `opsense_status()` | Topology từng node + watermark/cursor + danh sách trạm. |
-| `opsense_edit({nodes})` | Sửa pipeline realtime — truyền **danh sách đầy đủ** các node mong muốn. |
-| `opsense_run({node, ts?})` | Trigger thủ công: bơm tín hiệu `tick(ts)` vào một node. |
-| `opsense_query({source, stage?, metric?, from_ts?, to_ts?})` | Đọc observation từ **station** (id của node). Tầng persistence chung đã bị gỡ. |
-| `opsense_backfill({node, from_ts, to_ts})` | Ép `http_source` re-fetch đúng cửa sổ `(F, T]`. Watermark KHÔNG lùi. |
-| `opsense_list_stations()` | Liệt kê id mọi trạm đã đăng ký (process-global). |
-| `opsense_describe({id?})` | Không truyền id → liệt kê id; truyền id → JSON mô tả station (backend, schema, params, metrics, dependencies). |
-| `pattern_add({node, text})` / `pattern_get({node, text})` / `pattern_stats({node})` | Thao tác Aho-Corasick automaton của `pattern_station_transform`. |
-| `catalog_search({node, pattern})` | Substring search trên `category_station_transform` (radix + KMP). |
-| `opsense_kernel_run({code, path?})` | chạy code trong analysis kernel; `result` capture. |
-| `opsense_kernel_health()` | health của backend hiện tại (`local` / runner). |
-| `opsense_deinit()` | Đóng session, dừng pipeline. |
+MCP là **client mỏng** của `opsense serve`: mỗi tool = 1 GraphQL round-trip qua
+`/api/repl/graphql`, không có state/caching cục bộ. Bảng dưới là **đúng** những gì
+đang tồn tại trong code (`crates/opsense/src/mcp/server.rs`).
 
-> Lưu ý giới hạn hiện tại: `opsense_run` (inject) **chỉ nhận node lá** (node
-> không có node nào phía sau). Vì thế khi muốn trigger tay, hãy để node lá là
-> điểm bơm — hoặc dùng `clock_source` như các mẫu dưới đây.
+| Tool | API | Ý nghĩa |
+|---|---|---|
+| `opsense_status()` | `Query.status` | Topology từng node + danh sách station. |
+| `opsense_get_config({id?})` | `Query.components` | Cấu hình **đang chạy** của node (kể cả `params` của script Rhai). Bỏ `id` → toàn bộ pipeline. **Đọc trước khi sửa.** |
+| `opsense_attributes()` | `Query.attributes` | Attribute trong memory (biến template). |
+| `opsense_set_attribute({name, value})` | `Mutation.setAttribute` | Set attribute (cảnh báo nếu `OPSENSE_ATTR_<NAME>` đang ghi đè). |
+| `opsense_remove_attribute({name})` | `Mutation.removeAttribute` | Xoá attribute, trả `true` nếu key tồn tại. |
+| `opsense_query_timeseries({node, from_ts?, to_ts?})` | `Query.queryTimeseries` | Đọc observation của một `timeseries` station trong cửa sổ. |
+| `opsense_reload({components_json})` | `Mutation.reload` | **Thay toàn bộ** danh sách node. Thô — thiếu một node là mất node đó. |
+
+> Station là nguồn sự thật cho **state runtime**: lệnh giao dịch (`signal = "order"`,
+> `labels.status = open|closed`), cursor T+N (`labels.kind = "trading_step"`, mang
+> `candle_seq`) và snapshot grid đều là observation trong station, nên đọc lại được
+> qua `opsense_query_timeseries` (lọc theo `signal`/`labels.kind` ở client).
+
+> Sửa cấu hình: `opsense_get_config` → sửa JSON → `opsense_reload`. Hiện chưa có
+> `patch` một param (đang lên kế hoạch), nên **đọc trước** là bắt buộc — không đọc
+> thì phải đoán cấu hình cũ.
 
 ### Lưu trữ & con trỏ qua restart
 

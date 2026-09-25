@@ -173,6 +173,7 @@ jobs:
             --test trading_pipeline \
             --test rhai_api_surface \
             --test test_binance_grid_strategy \
+            --test integration_mcp_config \
             -- --test-threads=1 --nocapture
 
       # Cùng `fn rebuild` nhưng trên **dữ liệu Binance thật** (public API, không

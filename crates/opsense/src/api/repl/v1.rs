@@ -1,12 +1,14 @@
 //! GraphQL endpoint `/graphql` — Tầng 1 (pipeline/stations).
 //!
-//! Surface 2 nhóm tính năng:
-//! 1. Xem pipeline   — `Query.status`
+//! Surface 3 nhóm tính năng:
+//! 1. Xem pipeline   — `Query.status`, `Query.components`
 //! 2. Attribute edit — `Query.attributes`, `Mutation.{set,remove}Attribute`
 //! 3. Truy vấn timeseries — `Query.queryTimeseries`
 //!
-//! Mọi thay đổi pipeline đi qua `Mutation.reload(components)` — REPL client
-//! tính full component list locally rồi push lên.
+//! Mọi thay đổi pipeline đi qua `Mutation.reload(components)`. Nhưng reload nhận
+//! **danh sách đầy đủ**, nên client phải đọc cấu hình hiện tại trước
+//! (`Query.components`) — đọc rồi sửa thì không đoán. `Mutation.patchComponent`
+//! là cách sửa một phần (thêm ở G2).
 
 use std::sync::Arc;
 
@@ -48,6 +50,51 @@ pub struct ComponentInput {
     pub id: String,
     pub config: Option<serde_json::Value>,
     pub inputs: Option<Vec<String>>,
+}
+
+/// Cấu hình **đang chạy** của một component (`Query.components`).
+///
+/// `config` là JSON typetag của component — cùng shape với `ComponentInput` nên
+/// đọc xong có thể patch rồi `reload`, hoặc patch từng path (xem
+/// `Mutation.patchComponent`) mà không phải dựng lại cả pipeline.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct ComponentConfig {
+    pub id: String,
+
+    #[graphql(name = "type")]
+    pub kind: String,
+
+    pub inputs: Vec<String>,
+
+    /// Toàn bộ field của component dạng JSON (`script_path`, `params`, …).
+    pub config: serde_json::Value,
+}
+
+/// Bọc JSON thô của `Runtime::components()` thành `ComponentConfig`.
+fn component_config(value: serde_json::Value) -> Option<ComponentConfig> {
+    let obj = value.as_object()?;
+    let id = obj.get("id")?.as_str()?.to_string();
+    // `type` do typetag sinh khi serialize; `id` do runtime nhét thêm.
+    let kind = obj
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let inputs = obj
+        .get("inputs")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ComponentConfig {
+        id,
+        kind,
+        inputs,
+        config: value,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,6 +154,25 @@ impl QueryRoot {
     /// Toàn bộ attributes trong memory.
     async fn attributes(&self, ctx: &Context<'_>) -> std::collections::BTreeMap<String, String> {
         state(ctx).attributes().await
+    }
+
+    /// Cấu hình đang chạy của component. Bỏ `id` → tất cả.
+    ///
+    /// Đường đọc chuẩn trước khi sửa: không có nó thì client buộc phải nhớ cấu
+    /// hình cũ rồi gửi lại cả danh sách qua `Mutation.reload` — một node sót là
+    /// mất node.
+    async fn components(
+        &self,
+        ctx: &Context<'_>,
+        id: Option<String>,
+    ) -> async_graphql::Result<Vec<ComponentConfig>> {
+        let s = state(ctx);
+        Ok(s
+            .components(id.as_deref())
+            .await
+            .into_iter()
+            .filter_map(component_config)
+            .collect())
     }
 
     /// Truy vấn 1 time series trong khoảng thời gian.
@@ -220,13 +286,14 @@ mod tests {
         Schema::build(QueryRoot, MutationRoot, EmptySubscription).finish()
     }
 
-    /// Tầng 1 GraphQL surface: pipeline status, attributes and timeseries
-    /// queries must be present in the SDL.
+    /// Tầng 1 GraphQL surface: pipeline status, **component config**, attributes
+    /// and timeseries queries must be present in the SDL.
     #[tokio::test]
     async fn tier1_schema_surface() {
         let sdl = schema().sdl();
         for op in [
             "status",
+            "components",
             "attributes",
             "queryTimeseries",
             "reload",
@@ -238,5 +305,36 @@ mod tests {
                 "schema missing `{op}`\n--- SDL ---\n{sdl}"
             );
         }
+    }
+
+    /// `Runtime::components()` trả JSON typetag + `id` nhét thêm; map sang
+    /// `ComponentConfig` phải giữ nguyên `config` (đó là thứ client patch).
+    #[test]
+    fn component_config_maps_typed_json() {
+        let raw = serde_json::json!({
+            "type": "rhai_transform",
+            "id": "grid",
+            "inputs": ["clock", "history"],
+            "script_path": "strategies/binance/grid.rhai",
+            "params": { "strategy": "rhai", "mode": "analysis" },
+        });
+        let cfg = component_config(raw.clone()).expect("map được");
+        assert_eq!(cfg.id, "grid");
+        assert_eq!(cfg.kind, "rhai_transform");
+        assert_eq!(cfg.inputs, vec!["clock", "history"]);
+        assert_eq!(cfg.config, raw, "config phải giữ nguyên JSON gốc");
+        // `params` là thứ MCP/CLI đọc để sửa tiếp.
+        assert_eq!(cfg.config["params"]["strategy"], "rhai");
+    }
+
+    /// JSON thiếu `id` (component lỗi) → bỏ qua chứ không làm hỏng cả query.
+    #[test]
+    fn component_config_skips_malformed_entries() {
+        assert!(component_config(serde_json::json!({})).is_none());
+        assert!(component_config(serde_json::json!({ "id": 7 })).is_none());
+        // Không có `inputs` → rỗng, không panic.
+        let cfg = component_config(serde_json::json!({ "id": "x", "type": "clock" }))
+            .expect("map được");
+        assert!(cfg.inputs.is_empty());
     }
 }

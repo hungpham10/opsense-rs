@@ -12,7 +12,7 @@ pub mod grpc;
 
 pub use auth::{poll_token, request_device_code, save_token_to_disk};
 pub use graphql::{
-    ComponentInput, EditResult, NodeSummary, Observation, OpsenseClient, SetAttributeResult,
-    StationSummary, Status,
+    ComponentConfig, ComponentInput, EditResult, NodeSummary, Observation, OpsenseClient,
+    SetAttributeResult, StationSummary, Status,
 };
 pub use grpc::{ExecOutcome, RunnerClient};

@@ -49,6 +49,17 @@ pub struct SetAttributeResult {
     pub env_override_active: bool,
 }
 
+/// Cấu hình đang chạy của một component (`Query.components`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ComponentConfig {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub inputs: Vec<String>,
+    /// JSON của typetag: `script_path`, `params`, … (cùng shape `ComponentInput`).
+    pub config: serde_json::Value,
+}
+
 #[derive(Debug, Deserialize)]
 struct GraphQLError {
     pub message: String,
@@ -185,6 +196,23 @@ impl OpsenseClient {
     pub async fn attributes(&self) -> anyhow::Result<BTreeMap<String, String>> {
         const QUERY: &str = r#"query { attributes }"#;
         self.gql(QUERY, ()).await
+    }
+
+    /// Cấu hình đang chạy. Bỏ `id` → tất cả component.
+    ///
+    /// Đọc trước khi sửa: `reload` nhận danh sách đầy đủ nên phải biết cấu hình
+    /// hiện tại, không thì sửa một param cũng phải gửi lại cả pipeline.
+    pub async fn components(&self, id: Option<&str>) -> anyhow::Result<Vec<ComponentConfig>> {
+        const QUERY: &str = r#"
+            query($id: String) {
+                components(id: $id) { id type inputs config }
+            }
+        "#;
+        #[derive(Serialize)]
+        struct Vars<'a> {
+            id: Option<&'a str>,
+        }
+        self.gql(QUERY, Vars { id }).await
     }
 
     pub async fn query_timeseries(
