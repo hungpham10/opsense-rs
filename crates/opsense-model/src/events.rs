@@ -35,6 +35,12 @@ pub enum Signal {
     /// max per metric) — không phải sample gốc; giữ riêng để consumer phân biệt
     /// telemetry tính toán với dữ liệu nguồn.
     Summary,
+    /// Một quyết định giao dịch: `value` = giá vào lệnh (lúc mở) hoặc PnL %
+    /// (lúc đóng), phân biệt mở/đóng bằng `labels.status`.
+    ///
+    /// Vẫn là telemetry, không phải log: station/SQL/Parquet xử lý như metric,
+    /// còn consumer lọc `signal = "order"` để không lẫn với dữ liệu nguồn.
+    Order,
 }
 
 /// Severity for `Log` observations (used to derive error-rate).

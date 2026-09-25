@@ -1,5 +1,6 @@
 use super::ops;
 use crate::graph::{Graph, In, Node, Op};
+use crate::Strategy;
 
 fn default_ops() -> Vec<Box<dyn Op>> {
     vec![
@@ -56,6 +57,101 @@ fn default_nodes() -> Vec<Node> {
             inputs: vec![In::FromOperator(6)],
         },
     ]
+}
+
+/// `init()` phải trả params giao dịch **không phải 0**: `Portfolio` đọc
+/// `params[0]=kelly`, `params[1]=base_capital`; bằng 0 thì mọi lệnh có size 0
+/// (không đặt được gì) mà test inference vẫn xanh — lỗi này rất dễ lọt.
+#[test]
+fn init_gives_trading_params_not_zeros() {
+    let g = Graph::new(
+        200,
+        default_ops(),
+        default_nodes(),
+        vec![],
+        vec![0.0; 16],
+        vec![0.0; 8],
+        8,
+        200,
+        60,
+    );
+    let params = Strategy::init(&g);
+    assert!(
+        params[crate::graph::P_KELLY] > 0.0,
+        "kelly phải > 0: {params:?}"
+    );
+    assert!(
+        params[crate::graph::P_CAPITAL] > 0.0,
+        "base_capital phải > 0: {params:?}"
+    );
+    assert!(params[crate::graph::P_GRID_LEVELS] >= 2.0, "grid_levels ≥ 2");
+    assert!(params[crate::graph::P_SL_PCT] > 0.0, "sl_pct phải > 0");
+    assert!(params[crate::graph::P_LOOKBACK] > 0.0, "lookback phải > 0");
+    // Phần trọng số vẫn phải đúng vị trí (params tối ưu được).
+    let n_feat = g.num_features().expect("num_features");
+    assert_eq!(params.len(), 6 + n_feat * 8 + 8);
+}
+
+/// Artifact = genome (nguồn sự thật) + file `.onnx` (bytes đã build).
+///
+/// Luồng Python: build DAG → xuất `.onnx` + genome JSON → Rust nạp lại và chạy
+/// tiếp mà **không** emit ONNX lần nữa, cho kết quả y hệt bản gốc.
+#[test]
+fn onnx_artifact_roundtrips_through_files() {
+    use std::path::PathBuf;
+
+    fn sample() -> Graph {
+        Graph::new(
+            200,
+            default_ops(),
+            default_nodes(),
+            vec![],
+            vec![0.1; 16],
+            vec![0.2; 8],
+            8,
+            200,
+            60,
+        )
+    }
+
+    // Thư mục riêng cho test (không thêm tempfile làm dep).
+    let dir: PathBuf = std::env::temp_dir().join(format!("opsense-qlib-graph-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let genome_path = dir.join("model.genome.json");
+    let onnx_path = dir.join("model.onnx");
+
+    let original = sample();
+    let mut inputs = vec![vec![0.5; 200]; 4];
+    inputs.push(vec![0.0; 16]);
+    inputs.push(vec![0.0; 8]);
+    let expected = original.predict(&inputs).expect("predict gốc");
+
+    original.write_onnx(&onnx_path).expect("ghi .onnx");
+    std::fs::write(&genome_path, serde_json::to_string(&original).expect("genome json")).expect("ghi genome");
+    assert!(onnx_path.exists(), "file .onnx phải tồn tại (Python đọc được)");
+
+    // Nạp lại: ONNX bytes phải được dùng, không emit lại.
+    let loaded = Graph::load_artifact(&genome_path, &onnx_path).expect("load artifact");
+    let got = loaded.predict(&inputs).expect("predict từ artifact");
+    assert_eq!(got.len(), expected.len());
+    for (a, b) in got.iter().flatten().zip(expected.iter().flatten()) {
+        assert!((a - b).abs() < 1e-6, "artifact phải cho kết quả y hệt: {a} vs {b}");
+    }
+
+    // Bytes nạp sẵn phải thuộc về genome: file rỗng / thiếu phải lộ lỗi, không
+    // âm thầm chạy kết quả cũ.
+    let empty = dir.join("empty.onnx");
+    std::fs::write(&empty, b"").expect("ghi file rỗng");
+    assert!(
+        Graph::load_artifact(&genome_path, &empty).is_err(),
+        "ONNX rỗng phải lỗi"
+    );
+    assert!(
+        Graph::load_artifact(&genome_path, dir.join("khong-ton-tai.onnx")).is_err(),
+        "thiếu file .onnx phải lỗi"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

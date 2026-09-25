@@ -279,6 +279,35 @@ impl TradingGrid {
         }
     }
 
+    /// Nạp thống kê lệnh đã đóng cho từng level (long/short win/lost).
+    ///
+    /// Cần cho plan do **script** dựng lại: script chỉ quyết định cấu trúc
+    /// (levels, sl, weights, win-prob), còn bộ đếm win/lost là trí nhớ của kernel
+    /// — nếu script trả plan mới mà quên chép bộ đếm thì win-prob "học" từ lịch
+    /// sử giao dịch sẽ bị reset mỗi lần rebuild. Vì vậy [`crate::plan::GridPlan`]
+    /// copy lại đúng bộ đếm của plan cũ theo vị trí (cell, level).
+    pub fn with_outcome_counts(
+        mut self,
+        long_win: Vec<usize>,
+        long_lost: Vec<usize>,
+        short_win: Vec<usize>,
+        short_lost: Vec<usize>,
+    ) -> Self {
+        let n = self.levels.len();
+        let take = |v: Vec<usize>| -> Vec<usize> {
+            if v.len() == n {
+                v
+            } else {
+                vec![0; n]
+            }
+        };
+        self.order_long_win_cnt = take(long_win);
+        self.order_long_lost_cnt = take(long_lost);
+        self.order_short_win_cnt = take(short_win);
+        self.order_short_lost_cnt = take(short_lost);
+        self
+    }
+
     pub fn stoploss_pct(&self) -> f64 {
         self.sl_pct
     }

@@ -117,6 +117,78 @@ jobs:
           NEXTEST_EXPERIMENTAL_LIBTEST_HARNESS: "1"
         run: cargo nextest run --workspace --locked --cargo-profile release --jobs $(nproc)
 
+  # Chiến lược script (Rhai) + trading realtime — **không** cần compose/network.
+  #
+  # Tách khỏi Unit Tests để log RUST_LOG đầy đủ khi fail: đây là tầng hỏng
+  # nhiều nhất (hợp đồng `fn rebuild` giữa script .rhai và kernel qlib, cursor
+  # T+N trong station, idempotency sau restart). Job Unit Tests chỉ cần exit
+  # code, nên khi script hỏng ta khó đọc vì sao.
+  strategy-e2e:
+    name: Strategy E2E (Rhai grid trading)
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang
+
+      - name: Setup mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+
+      - name: Restore Cargo build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-binaries
+
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-binaries-${{ env.TARGET }}
+          path: dist-bin/
+
+      # Ba tầng của `strategies/binance`: contract config (strategy = "rhai" +
+      # knob của `fn rebuild`), pipeline mock (klines HTTP + aggTrade WS), và
+      # nhánh trading (`portfolio_feed` → plan từ script → lệnh + cursor T+N).
+      # `--test-threads=1`: các test này dùng station/clock thật, chạy song song
+      # dễ đẩy nhau qua các mốc phút (đã từng fail phụ thuộc pha phút).
+      - name: Run binance strategy e2e (offline mocks)
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          RUST_LOG: warn,opsense_components=info,opsense_rhai=debug,opsense_mlib=info
+        run: |
+          cargo test --workspace --locked --release \
+            --test e2e_binance_config \
+            --test trading_pipeline \
+            --test rhai_api_surface \
+            --test test_binance_grid_strategy \
+            --test integration_mcp_config \
+            -- --test-threads=1 --nocapture
+
+      # Cùng `fn rebuild` nhưng trên **dữ liệu Binance thật** (public API, không
+      # cần key): 500 nến BTCUSDT/1m → plan → kernel đặt lệnh.
+      #
+      # `continue-on-error`: API bên ngoài không thuộc quyền kiểm soát của repo
+      # (rate-limit, geo-block, sự cố). Fail ở đây không có nghĩa code sai, nên
+      # đỏ PR vì nó là thông tin sai lệch — nhưng bỏ hẳn thì mất đúng thứ cần
+      # xem khi sửa script: log vẫn in ra plan (số ô, levels, win-prob).
+      - name: Run `fn rebuild` against live Binance API (advisory)
+        continue-on-error: true
+        run: |
+          cargo test -p opsense-rhai --locked --release \
+            --test grid_live_binance -- --ignored --nocapture
+
   # Prepare steps for integration tests — duplicate binaries, setup earthly, build images, save as artifact
   prepare:
     name: Prepare Integration Environment
@@ -341,7 +413,7 @@ jobs:
       # s3_flush_interval_secs=15 của config, rồi khẳng định parquet local +
       # mirror S3 tại opsense-lake/test-case-prom/**.
       # Endpoint dùng 127.0.0.1:9000 (compose publish 9000, host-reachable) —
-      # config gốc ghi `minio:9000` là hostname trong compose network, không
+      # config gốc ghi `rustfs:9000` là hostname trong compose network, không
       # resolve được từ runner.
       - name: Run e2e Prometheus strategy config test
         if: matrix.strategy == 'prometheus'

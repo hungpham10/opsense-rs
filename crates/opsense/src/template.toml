@@ -72,7 +72,7 @@ prom_url = "http://127.0.0.1:9090"    # TODO: URL Prometheus/VictoriaMetrics c�
 #     lake xuất ra s3://<bucket>/<prefix>/<id>/ts/blk=*/*.parquet (+ state/),
 #     tự flush/snapshot định kỳ theo s3_flush_interval_secs / s3_snapshot_interval_secs.
 #   - Cách 2: data_dir = "s3://bucket/prefix" → lấy credentials từ env
-#     AWS_* / OPSENSE_S3_* (OPSENSE_S3_ENDPOINT cho MinIO).
+#     AWS_* / OPSENSE_S3_* (OPSENSE_S3_ENDPOINT cho object store self-hosted).
 # (Tên cũ "duckdb"/"lakehouse"/"s3" không còn được khuyến nghị dùng — code
 # chỉ nhận chúng làm alias deprecated cho "parquet".)
 # block_secs: độ rộng mỗi block parquet (giây) = partition blk=; mặc định 3600.
@@ -88,7 +88,7 @@ data_dir = ".opsense/parquet"        # local cache root (data vẫn nằm trong
 # [storage.s3]                        # (tùy chọn) mirror parquet lên S3 → nơi
 # bucket = "opsense-lake"            # Spark/DuckDB/Polars query trực tiếp qua
 # prefix = "prod"                    # s3://opsense-lake/prod/<id>/ts/**/*.parquet
-# endpoint = "http://minio:9000"     # bỏ trống = AWS public; /region, /access_key_id,
+# endpoint = "http://rustfs:9000"     # bỏ trống = AWS public; /region, /access_key_id,
 # url_style = "path"                 # /secret_access_key nhận env OPSENSE_S3_*.
 # s3_flush_interval_secs = 60        # flush timeseries ra S3 theo lịch
 # s3_snapshot_interval_secs = 600    # checkpoint + mirror state lên S3 theo lịch

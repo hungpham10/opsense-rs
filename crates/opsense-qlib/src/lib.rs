@@ -4,7 +4,8 @@ mod extractors;
 mod fee;
 mod grid;
 mod portfolio;
-mod strategies;
+mod score;
+mod session;
 mod tick;
 
 pub use calendar::{CryptoCalendar, ForexCalendar, StockCalendar};
@@ -19,28 +20,20 @@ pub use fee::{
 };
 pub use grid::TradingGrid;
 
-#[cfg(feature = "json")]
-mod loader;
-
-#[cfg(feature = "json")]
-mod ohcl;
-
-#[cfg(feature = "json")]
-mod streaming;
+/// Plan dạng dữ liệu cho strategy viết bằng script (Rhai) — xem [`plan`].
+///
+/// Bật bằng feature `rhai` (đường script) hoặc `json` (đường DAG/typetag).
+#[cfg(any(feature = "json", feature = "rhai"))]
+pub mod plan;
 
 #[cfg(feature = "graph")]
 mod graph;
 
-#[cfg(feature = "json")]
-pub use loader::{FromCsv, FromQueryCandleSticks};
-
-#[cfg(feature = "json")]
-pub use ohcl::QueryCandleSticks;
-
-pub use portfolio::{DEFAULT_SETTLEMENT_CANDLES, Order, OrderType, Portfolio, Report};
-
-#[cfg(feature = "json")]
-pub use strategies::{GridStrategy, VolatilityAdaptiveGridStrategy};
+pub use portfolio::{
+    DEFAULT_SETTLEMENT_CANDLES, Order, OrderType, Portfolio, PortfolioConfig, Report,
+};
+pub use score::{NetPnlScore, SharpeScore};
+pub use session::Session;
 
 #[cfg(feature = "graph")]
 pub use graph::{Graph, In, Node, ops::*};
@@ -50,9 +43,6 @@ pub use opsense_mlib::grid::{AnalysisGrid, SieveConfig};
 
 #[cfg(feature = "json")]
 pub use opsense_mlib::transition::TransitionAnalysis;
-
-#[cfg(feature = "json")]
-pub use streaming::StreamingPortfolio;
 
 /// Re-export runtime dưới `crate::vector::runtime` để macro `#[source]`/`#[sink]`/`#[transform]`
 /// của opsense-macros mở rộng dùng URL như trong opsense-components.
@@ -70,14 +60,21 @@ use async_trait::async_trait;
 #[cfg(feature = "json")]
 use serde::{Deserialize, Serialize};
 
-pub type FetchFn<'a> = &'a mut (
-            dyn FnMut(
+/// Fetch candles cho một range bất kỳ, bất kỳ lúc nào kernel cần (rebuild,
+/// vòng lặp trade, bước realtime…).
+///
+/// Future trả về là `'static`, nên cùng một `FetchFn` **reborrow** được cho
+/// lifetime ngắn hơn — nhờ vậy truyền vào hàm lồng nhau
+/// (`evaluate` → `rebuild_strategy` → `Strategy::rebuild`) không đụng nhau.
+/// Đổi lại closure phải tự sở hữu dữ liệu nó capture (clone `Arc`, `String`)
+/// thay vì mượn từ scope bên ngoài.
+pub type FetchFn<'a> = &'a mut (dyn FnMut(
     u64,
     u64,
-) -> Pin<Box<dyn Future<Output = Result<Vec<CandleStick>, Error>> + Send + 'a>>
+) -> Pin<Box<dyn Future<Output = Result<Vec<CandleStick>, Error>> + Send + 'static>>
                 + Send
                 + Sync
-        );
+        + 'a);
 
 /// Mọi biến cố lệnh trong vòng forward — bắn qua `NotifyFn`, consumer tự lọc
 /// loại mình quan tâm (vd TelegramSink chỉ xử lý `Closed`).
@@ -106,15 +103,17 @@ pub enum OrderEvent {
     },
 }
 
+/// Báo biến cố ra ngoài trong lúc kernel chạy. Future `'static` (như
+/// [`FetchFn`]) nên cùng một `NotifyFn` reborrow được cho lifetime ngắn hơn —
+/// kernel gọi nó ở nhiều chỗ, kể cả bên trong vòng lặp và trong hàm lồng nhau.
 pub type NotifyFn<'a> = &'a mut (
-            dyn FnMut(OrderEvent) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>>
+            dyn FnMut(OrderEvent) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>
                 + Send
                 + Sync
-        );
+        + 'a);
 
 pub type ParamFn<'a> = &'a (dyn Fn(usize) -> f64 + Send + Sync);
 
-#[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
 #[async_trait]
 pub trait DataLoader: Sync + Send {
     async fn range(&self, from: u64, to: u64, resolution: &str) -> Result<Vec<CandleStick>, Error>;

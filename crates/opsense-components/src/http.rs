@@ -15,6 +15,10 @@
 //!
 //! Response body is expected to be JSON either an array of observation
 //! objects, or a single observation object (wrapped into a 1-element vec).
+//! When `candles` is configured the body is instead a sequence of candle rows
+//! (e.g. Binance `klines`); the six jq `mapping` paths select
+//! [open time, open, high, low, close, volume] from every row and each row is
+//! expanded into five OHLCV observations.
 //! Mapping/extraction (`items`/`fields`/`constants`) is intentionally out of
 //! scope for this pass — a separate extractor node can reshape data when
 //! needed.
@@ -24,6 +28,7 @@ use std::io::Error;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
@@ -78,6 +83,54 @@ pub struct HttpSource {
     /// through the registry (REPL/MCP/HTTP).
     #[serde(default = "default_station")]
     pub station: bool,
+
+    /// Optional candle (OHLCV) parse mode. When present the response body is
+    /// interpreted as a sequence of candle rows (e.g. Binance `klines`) and
+    /// each row is expanded into five observations (`labels.field` ∈
+    /// o/h/l/c/v) following the shared OHLCV station convention.
+    #[serde(default)]
+    pub candles: Option<CandleParse>,
+}
+
+/// Numeric parse mode: the response is a sequence of candle rows; the six
+/// `mapping` jq paths select [open time, open, high, low, close, volume] from
+/// every row. Rows are zipped into observations at the station level.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandleParse {
+    /// Six jq paths selecting [open time, open, high, low, close, volume]
+    /// from each row, e.g. `["[].0", "[].1", "[].2", "[].3", "[].4", "[].5"]`.
+    #[serde(default = "default_candle_mapping")]
+    pub mapping: [String; 6],
+
+    /// Milliseconds represented by one open-time unit. `1` for millisecond
+    /// timestamps (Binance klines), `1000` for second-based timestamps.
+    /// Seconds = `open_time * unit_ms / 1000`.
+    #[serde(default = "default_unit_ms")]
+    pub unit_ms: u64,
+
+    /// Symbol written as `metric_id` on each observation (e.g. `"BTCUSDT"`).
+    pub symbol: String,
+
+    /// Resolution stored under `labels.resolution` (e.g. `"1m"`).
+    pub resolution: String,
+}
+
+const fn default_unit_ms() -> u64 {
+    1
+}
+
+/// Default candle mapping — Binance `klines` layout
+/// (`[openTime, open, high, low, close, volume, …]`).
+fn default_candle_mapping() -> [String; 6] {
+    [
+        "[].0".to_string(),
+        "[].1".to_string(),
+        "[].2".to_string(),
+        "[].3".to_string(),
+        "[].4".to_string(),
+        "[].5".to_string(),
+    ]
 }
 
 fn default_method() -> String {
@@ -110,6 +163,7 @@ impl HttpSource {
             interval_secs: default_interval(),
             timeout_secs: default_timeout(),
             station: default_station(),
+            candles: None,
         }
     }
 }
@@ -150,7 +204,7 @@ fn value_to_string(v: &Value) -> String {
 /// 1. `bound[name]` from the just-evaluated bindings.
 /// 2. Field `name` in the incoming message payload (coerced to string).
 /// 3. `Context::variable::<String>(name)` — attributes then secret.
-async fn build_vars(
+pub(crate) async fn build_vars(
     ctx: &Context,
     bound: BTreeMap<String, String>,
     payload: &Value,
@@ -203,6 +257,57 @@ fn parse_observations(body: &str) -> Result<Vec<Observation>, String> {
         }
     }
     Ok(out)
+}
+
+/// Parse a candle (OHLCV) response body into observations.
+///
+/// Each of the six `mapping` paths selects one column across the whole body;
+/// row `i` is the zip of the six columns at index `i`. Cells may be JSON
+/// numbers or numeric strings. Malformed rows (missing a column) are skipped.
+fn parse_candles(body: &str, cfg: &CandleParse) -> Result<Vec<Observation>, String> {
+    let value: Value = serde_json::from_str(body).map_err(|e| format!("body: {e}"))?;
+    let mut columns: Vec<Vec<Value>> = Vec::with_capacity(cfg.mapping.len());
+    for (i, path) in cfg.mapping.iter().enumerate() {
+        let q = JsonQuery::parse(path).map_err(|e| format!("mapping[{i}] `{path}`: {e}"))?;
+        columns.push(q.execute(&value));
+    }
+
+    let rows = columns.first().map(Vec::len).unwrap_or(0);
+    let mut out = Vec::with_capacity(rows * 5);
+    for i in 0..rows {
+        // Cells: [open time, open, high, low, close, volume].
+        let mut cells = [0.0f64; 6];
+        let mut complete = true;
+        for (col, column) in columns.iter().enumerate() {
+            match column.get(i).and_then(cell_f64) {
+                Some(v) => cells[col] = v,
+                None => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if !complete {
+            continue;
+        }
+        let ts = crate::ohlcv::open_time_to_secs(cells[0], cfg.unit_ms);
+        out.extend(crate::ohlcv::row_to_observations(
+            ts,
+            &cells,
+            &cfg.symbol,
+            &cfg.resolution,
+        ));
+    }
+    Ok(out)
+}
+
+/// Coerce a JSON cell to `f64`: numbers directly, strings parsed numerically.
+fn cell_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 impl_http_source!(
@@ -341,12 +446,21 @@ impl_http_source!(
                     continue;
                 }
             };
-            let batch = match parse_observations(&body_text) {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::warn!("http {} parse: {e}", self.id);
-                    continue;
-                }
+            let batch = match &self.candles {
+                Some(cfg) => match parse_candles(&body_text, cfg) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!("http {} candle parse: {e}", self.id);
+                        continue;
+                    }
+                },
+                None => match parse_observations(&body_text) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!("http {} parse: {e}", self.id);
+                        continue;
+                    }
+                },
             };
 
             // 5. write to station.
@@ -375,3 +489,101 @@ impl_http_source!(
         Ok(())
     }
 );
+
+#[cfg(test)]
+mod tests {
+    use super::{CandleParse, parse_candles};
+    use opsense_core::{Signal, TelemetryKind};
+
+    fn binance_cfg() -> CandleParse {
+        CandleParse {
+            mapping: super::default_candle_mapping(),
+            unit_ms: 1,
+            symbol: "BTCUSDT".to_string(),
+            resolution: "1m".to_string(),
+        }
+    }
+
+    #[test]
+    fn parses_binance_klines_into_ohlcv_observations() {
+        // openTime in ms; price cells are numeric strings.
+        let body = r#"[
+            [1700000000000, "100",   "101",  "99",  "100.5", "10"],
+            [1700000060000, "100.5", "102",  "100", "101",   "20"]
+        ]"#;
+        let obs = parse_candles(body, &binance_cfg()).unwrap();
+
+        // 2 candles × 5 fields.
+        assert_eq!(obs.len(), 10);
+
+        // ms → seconds normalization.
+        let (t1, t2) = (1_700_000_000, 1_700_000_060);
+        let first: Vec<_> = obs.iter().filter(|o| o.ts == t1).collect();
+        let second: Vec<_> = obs.iter().filter(|o| o.ts == t2).collect();
+        assert_eq!(first.len(), 5);
+        assert_eq!(second.len(), 5);
+
+        for row in [&first, &second] {
+            for o in row {
+                assert_eq!(o.metric_id, "BTCUSDT");
+                assert_eq!(o.kind, TelemetryKind::Metric);
+                assert_eq!(o.signal, Signal::Raw);
+                assert_eq!(o.labels.get("resolution").unwrap(), "1m");
+            }
+        }
+
+        let field = |row: &[&opsense_core::Observation], f: &str| -> f64 {
+            row.iter()
+                .find(|o| o.labels.get("field").map(String::as_str) == Some(f))
+                .unwrap()
+                .value
+        };
+        assert_eq!(field(&first, "o"), 100.0);
+        assert_eq!(field(&first, "h"), 101.0);
+        assert_eq!(field(&first, "l"), 99.0);
+        assert_eq!(field(&first, "c"), 100.5);
+        assert_eq!(field(&first, "v"), 10.0);
+        assert_eq!(field(&second, "c"), 101.0);
+        assert_eq!(field(&second, "v"), 20.0);
+    }
+
+    #[test]
+    fn honors_custom_mapping_and_unit_ms() {
+        let mut cfg = binance_cfg();
+        cfg.mapping = [
+            ".rows[].0".into(),
+            ".rows[].1".into(),
+            ".rows[].2".into(),
+            ".rows[].3".into(),
+            ".rows[].4".into(),
+            ".rows[].5".into(),
+        ];
+        cfg.unit_ms = 1000; // open time already in seconds.
+        cfg.symbol = "ETHUSDT".into();
+        cfg.resolution = "1h".into();
+
+        let body = r#"{"rows": [[1700000000, 1.1, 1.2, 1.0, 1.15, 33], [1700003600, 1.15, 1.3, 1.1, 1.25, 41]]}"#;
+        let obs = parse_candles(body, &cfg).unwrap();
+        assert_eq!(obs.len(), 10);
+        assert_eq!(obs[0].ts, 1_700_000_000);
+        assert_eq!(obs[5].ts, 1_700_003_600);
+        assert_eq!(obs[0].metric_id, "ETHUSDT");
+        assert_eq!(obs[0].labels.get("resolution").unwrap(), "1h");
+    }
+
+    #[test]
+    fn skips_rows_with_missing_columns() {
+        let body = r#"[
+            [1700000000000, "100", "101", "99", "100.5", "10"],
+            [1700000060000, "100.5"]
+        ]"#;
+        let obs = parse_candles(body, &binance_cfg()).unwrap();
+        assert_eq!(obs.len(), 5); // only the complete row survived
+        assert!(obs.iter().all(|o| o.ts == 1_700_000_000));
+    }
+
+    #[test]
+    fn rejects_invalid_body() {
+        assert!(parse_candles("not json", &binance_cfg()).is_err());
+    }
+}

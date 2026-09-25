@@ -21,6 +21,14 @@ use opsense_components as _;
 #[allow(unused_imports)]
 use opsense_rhai as _;
 
+// Same force-link for `opsense-mlib`'s declarative converter transforms
+// (`websocket_2_json`, `json_2_json` — see strategies/binance/config.toml).
+// They are typetag-registered inside the `converters` module, which nothing
+// else in the binary constructs directly; without this `opsense serve` would
+// reject configs using them (`unknown variant 'websocket_2_json'`).
+#[allow(unused_imports)]
+use opsense_mlib as _;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "opsense",
@@ -33,6 +41,18 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Scaffold a ready-to-edit config file.
+    ///
+    /// Default `.opsense/config.toml` — the file `opsense serve` picks up.
+    /// Refuses to overwrite an existing file unless `--force`.
+    Init {
+        /// Target path (default `.opsense/config.toml`).
+        path: Option<PathBuf>,
+        /// Overwrite if the file already exists.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Run the Opsense service: pipeline runtime + REST/GraphQL API.
     ///
     /// Listener mode via `GATEWAY_LISTENER` (`http`=TCP, default `unix`),
@@ -44,6 +64,95 @@ enum Commands {
     /// Thin client that speaks to a running `opsense serve` over GraphQL at
     /// `OPSENSE_GRAPHQL_URL` (default `http://127.0.0.1:8080/graphql`).
     Mcp {},
+
+    /// Print pipeline topology + registered stations (1 GraphQL round-trip).
+    Status {
+        /// GraphQL endpoint (default `$OPSENSE_GRAPHQL_URL` hoặc
+        /// `http://127.0.0.1:8080/graphql`).
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
+    /// Print the **live** config of pipeline components (JSON).
+    ///
+    /// Reads before you edit: `params` của script Rhai, `script_path`, inputs…
+    /// Cùng dữ liệu với MCP tool `opsense_get_config`.
+    Components {
+        /// Chỉ 1 node (vd `grid`); bỏ trống → toàn bộ pipeline.
+        id: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
+    /// Query observations of a `timeseries` station (bounded server-side).
+    ///
+    /// `opsense query grid --signal order`
+    Query {
+        /// Station id.
+        node: String,
+        /// From ts (unix seconds, inclusive). Mặc định = cửa sổ tối đa cho phép.
+        #[arg(long)]
+        from: Option<i64>,
+        /// To ts (unix seconds, inclusive). Mặc định = now.
+        #[arg(long)]
+        to: Option<i64>,
+        /// Số dòng tối đa (mặc định 1000, trần cứng 10000).
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Lọc theo signal: `order`, `summary`, `raw`, …
+        #[arg(long)]
+        signal: Option<String>,
+        /// Lọc theo `labels.kind`: `trading_step`, `snapshot`, …
+        #[arg(long)]
+        label_kind: Option<String>,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
+    /// Trading state stored in a station: orders (`open`/`closed`) — sống qua
+    /// restart vì nằm trong station, không phải RAM của node.
+    Orders {
+        /// Station id, vd `grid`.
+        node: String,
+        /// `open` | `closed`; bỏ trống → cả hai.
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        from: Option<i64>,
+        #[arg(long)]
+        to: Option<i64>,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
+    /// Read ONE field of a node's live config (JSON pointer).
+    ///
+    /// `opsense get-param grid /params/sl_pct`
+    GetParam {
+        /// Node id, vd `grid`.
+        id: String,
+        /// JSON pointer, vd `/params/sl_pct`.
+        path: String,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+
+    /// Patch ONE field of a node's live config (JSON pointer + JSON literal).
+    ///
+    /// `opsense set-param grid /params/sl_pct 0.02`
+    ///
+    /// Ưu tiên hơn `reload`: không gửi lại cả danh sách node. Server validate
+    /// trước khi reload, nên patch hỏng thì runtime giữ nguyên.
+    SetParam {
+        /// Node id, vd `grid`.
+        id: String,
+        /// JSON pointer, vd `/params/sl_pct`.
+        path: String,
+        /// JSON literal: `0.02`, `"trading"`, `true`, `[1,2]`.
+        value: String,
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
 
     /// Run the opsense REPL client.
     ///
@@ -98,8 +207,29 @@ enum Commands {
     },
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lệnh CLI phải parse được mà không cần server. Nếu đổi tên/cờ mà quên đổi
+    /// script/CI thì chết ở đây chứ không phải lúc chạy.
+    #[test]
+    fn cli_subcommands_parse() {
+        for args in [
+            vec!["opsense", "status"],
+            vec!["opsense", "components"],
+            vec!["opsense", "components", "grid"],
+            vec!["opsense", "get-param", "grid", "/params/sl_pct"],
+            vec!["opsense", "set-param", "grid", "/params/sl_pct", "0.02"],
+            vec!["opsense", "query", "grid", "--signal", "order", "--limit", "10"],
+            vec!["opsense", "orders", "grid", "--status", "open"],
+        ] {
+            Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} không parse: {e}"));
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {    dotenvy::dotenv().ok();
     // Register sqlx `any` drivers (mysql/postgres/sqlite) before the Resolver
     // builds its connection pools.
     sqlx::any::install_default_drivers();
@@ -109,6 +239,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?
         .block_on(async {
             match Cli::parse().command {
+                Some(Commands::Init { path, force }) => {
+                    let p = path.as_deref();
+                    if let Err(e) = opsense::init::run(p, force) {
+                        eprintln!("init error: {e}");
+                        std::process::exit(1);
+                    }
+                }
                 Some(Commands::Serve {}) => {
                     if let Err(e) = serve::run().await {
                         eprintln!("server error: {e}");
@@ -121,8 +258,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     }
                 }
-                Some(Commands::Repl { endpoint, runner }) => {
-                    if let Err(e) = opsense::repl::run(endpoint, runner).await {
+                Some(Commands::Status { endpoint }) => {
+                    if let Err(e) = opsense::cli::status(endpoint).await {
+                        eprintln!("status error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Components { id, endpoint }) => {
+                    if let Err(e) = opsense::cli::components(endpoint, id).await {
+                        eprintln!("components error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Query {
+                    node,
+                    from,
+                    to,
+                    limit,
+                    signal,
+                    label_kind,
+                    endpoint,
+                }) => {
+                    if let Err(e) = opsense::cli::query(endpoint, &node, from, to, limit, signal, label_kind).await {
+                        eprintln!("query error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Orders {
+                    node,
+                    status,
+                    from,
+                    to,
+                    endpoint,
+                }) => {
+                    if let Err(e) = opsense::cli::orders(endpoint, &node, status, from, to).await {
+                        eprintln!("orders error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::GetParam { id, path, endpoint }) => {
+                    if let Err(e) = opsense::cli::get_param(endpoint, &id, &path).await {
+                        eprintln!("get-param error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::SetParam {
+                    id,
+                    path,
+                    value,
+                    endpoint,
+                }) => {
+                    if let Err(e) = opsense::cli::set_param(endpoint, &id, &path, &value).await {
+                        eprintln!("set-param error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+                Some(Commands::Repl { endpoint, runner }) => {                    if let Err(e) = opsense::repl::run(endpoint, runner).await {
                         eprintln!("repl error: {e}");
                         std::process::exit(1);
                     }

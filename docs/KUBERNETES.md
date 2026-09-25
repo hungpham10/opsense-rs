@@ -209,7 +209,9 @@ cache_max_blocks = 288
 # Mirror lên S3: khai [storage.s3] → lake xuất ra
 #   s3://<bucket>/<prefix>/<id>/ts/**/*.parquet (timeseries) + state/
 #   (checkpoint). Hoặc data_dir "s3://bucket/prefix" (backend vẫn "parquet",
-#   creds/region qua env OPSENSE_S3_* / AWS_*, OPSENSE_S3_ENDPOINT cho MinIO).
+#   endpoint lấy TỪ TOML `[storage.s3].endpoint`; env chỉ phủ creds/region:
+#   OPSENSE_S3_ACCESS_KEY_ID / _SECRET_ACCESS_KEY / _REGION, rồi AWS_*).
+#   (`OPSENSE_S3_ENDPOINT` chỉ là biến của test harness, không phải của runtime.)
 [storage]
 backend = "parquet"                    # Parquet storage (canonical)
 data_dir = "/app/.opsense/parquet"     # mount PVC tại /app/.opsense; local cache
@@ -221,9 +223,9 @@ retention_secs = 0                     # 0 = giữ mãi; đặt giây để tự
 # [storage.s3]
 # bucket = "opsense-lake"              # bắt buộc khi có [storage.s3]
 # prefix = "prod"                      # s3://opsense-lake/prod/<id>/ts/**/*.parquet
-# endpoint = "http://minio:9000"       # bỏ trống = AWS public
+# endpoint = "http://rustfs:9000"       # bỏ trống = AWS public
 # region = "us-east-1"                 # /access_key_id /secret_access_key nhận env
-# url_style = "path"                   # MinIO-style; bỏ trống = virtual-host
+# url_style = "path"                   # self-hosted S3; bỏ trống = virtual-host
 # s3_flush_interval_secs = 60          # tự flush timeseries ra S3 theo lịch
 # s3_snapshot_interval_secs = 600      # checkpoint + mirror state theo lịch
 
@@ -642,9 +644,9 @@ spec:
     metadata:
       labels: { app: opsense-serve }
       annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
-        prometheus.io/path: /metrics
+        # KHÔNG bật scrape: app chưa expose route /metrics (xem §11 Observability).
+        # Bật sau khi thêm route, nếu không Prometheus sẽ scrape 404 liên tục.
+        prometheus.io/scrape: "false"
     spec:
       imagePullSecrets: [{ name: ghcr-pull }]
       nodeSelector:                      # chỉ cần nếu cluster hỗn hợp arch + tag chưa được rebuild multi-arch
@@ -669,6 +671,10 @@ spec:
             - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: opsense-db, key: POSTGRES_PASSWORD } } }
             - { name: POSTGRES_DATABASE, valueFrom: { secretKeyRef: { name: opsense-db, key: POSTGRES_DATABASE } } }
             # Runner + cache
+            # LƯU Ý: `OPSENSE_RUNNER_GRPC` KHÔNG được đọc bởi đoạn Rust nào
+            # (grep toàn repo chỉ thấy trong compose + supervisor). Giữ lại cho quy
+            # ước đã có, nhưng đừng kỳ vọng serve tự nối runner theo biến này —
+            # `opsense repl --runner <ep>` mới là đường nói chuyện runner.
             - { name: OPSENSE_RUNNER_GRPC, value: opsense-runner:50051 }
             - { name: REDIS_HOST, valueFrom: { secretKeyRef: { name: opsense-redis, key: REDIS_HOST } } }
             - { name: REDIS_PORT, valueFrom: { secretKeyRef: { name: opsense-redis, key: REDIS_PORT } } }
@@ -735,7 +741,7 @@ spec:
     - host: <<DOMAIN>>
       http:
         paths:
-          - path: /mcp
+          # KHÔNG có path /mcp: MCP chỉ qua stdio (`opsense mcp`)
             pathType: Prefix
             backend: { service: { name: opsense-serve, port: { number: 8080 } } }
           - path: /api
@@ -809,9 +815,12 @@ curl -fsS https://<<DOMAIN>>/health
 # Station registry trong pod đang chạy (metrics của app qua nginx)
 curl -fsS http://127.0.0.1:8080/health   # trong pod
 
-# MCP loop (opsense mcp qua stdio trong pod hoặc /mcp HTTP)
-curl -X POST https://<<DOMAIN>>/mcp -H 'Content-Type: application/json' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"opsense_init","params":{}}'
+# MCP: KHÔNG có endpoint HTTP. `opsense mcp` là stdio server và là client mỏng của
+# GraphQL — nên trong pod kiểm bằng GraphQL trực tiếp:
+kubectl -n opsense exec deploy/opsense-serve -- \
+  curl -sS -XPOST localhost:8080/api/repl/graphql \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"{ status { nodes { id } } }"}'
 
 # Parquet có dữ liệu (sau ≥1 tick pipeline + persist)
 kubectl -n opsense exec deploy/opsense-serve -- ls -R /app/.opsense/parquet | head
@@ -822,11 +831,29 @@ kubectl -n opsense get pods -l app=opsense-runner -o wide
 
 ---
 
+## 10b. Biến môi trường: lớp nào thật sự đọc
+
+Dễ hiểu sai nhất khi đọc manifest: **không phải biến nào cũng do Rust đọc**. Ba lớp
+đọc độc lập:
+
+| Lớp | Đọc ở đâu | Biến tiêu biểu |
+|---|---|---|
+| Binary `opsense` | `crates/**/src/**.rs` | `OPSENSE_CONFIG`, `GATEWAY_LISTENER`, `GATEWAY_ADDR`, `DB_DSN`, `MASTER_KEY`, `REDIS_HOST`, `REDIS_PORT`, `RUST_LOG`, `ENVIRONMENT`, `USE_ALLOY`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OPSENSE_S3_ACCESS_KEY_ID`, `OPSENSE_S3_SECRET_ACCESS_KEY`, `OPSENSE_S3_REGION`, `OPSENSE_RHAI_TIMEOUT_SECS`, `OPSENSE_GRAPHQL_URL` |
+| Entrypoint của image | `scripts/release.sh`, `scripts/nginx.sh`, `conf/supervisor/opsense.conf` | `APP_ENV`, `DISABLE_AUTO_INIT_DATABASE`, `ENCRYPTED_FILE`, `HTTP_SERVER`, `NGINX_DIR`, `NGINX_LOG`, `USE_TOR`, `POSTGRES_*` |
+| Nginx Lua (OIDC/JWT) | `conf/nginx/**` | `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_SESSION_SECRET`, `JWT_MODE`, `JWT_SECRET` |
+
+Hai biến **không được runtime đọc** (đừng thêm vào manifest):
+`OPSENSE_S3_ENDPOINT` (runtime lấy endpoint từ `[storage.s3].endpoint` trong TOML;
+biến này chỉ được **test harness** đọc để override endpoint khi chạy ngoài
+compose network) và `OPSENSE_MCP_PORT` (MCP chỉ qua stdio, không có cổng).
+
+---
+
 ## 11. Observability
 
 | Nguồn | Endpoint | Chú thích |
 |---|---|---|
-| App metrics | `GET /metrics` (axum PrometheusMetricLayer) | scrape qua Prometheus/ServiceMonitor, path `/metrics` |
+| App metrics | **không có route `/metrics`** | axum có `PrometheusMetricLayer` (metric nội bộ + trace span) nhưng chưa expose route; chỉ có `/api/oauth/metrics/oauth`. Muốn scrape phải thêm route trước — đừng đặt ServiceMonitor path `/metrics`. |
 | App health | `GET /health` | probe + uptime |
 | gRPC runner | health check riêng (exec) | preflight trước khi serve gọi |
 | Logs | stdout (`supervisord` → `/dev/stdout`) | `RUST_LOG=info`; nginx log mức `NGINX_LOG` |
@@ -883,7 +910,7 @@ forward-only; dự phòng bằng backup trước nâng.
 - [ ] `[storage].backend` dùng đúng tên: `parquet`/`sqlite`/`memory` — không dùng `lmdb` (đã bị gỡ); `duckdb`/`lakehouse`/`s3` chỉ là alias cũ quy về `parquet`.
 - [ ] ConfigMap `opsense-config` mount `/app/opsense.conf.toml` (OPSENSE_CONFIG); sửa config xong phải `rollout restart` — ConfigMap không hot-reload.
 - [ ] Secret/token nhét qua env `OPSENSE_ATTR_*` (secretKeyRef) cho template `{{name}}` — không để plaintext trong ConfigMap.
-- [ ] Ingress + cert-manager `Certificate` `Ready=true`; path `/dex`,`/mcp`,`/api`,`/health`,`/metrics` đúng.
+- [ ] Ingress + cert-manager `Certificate` `Ready=true`; path `/dex`,`/api`,`/health` đúng (không có `/mcp`, không có `/metrics`).
 - [ ] Smoke test (mục 10, "Smoke test go-live") pass trên môi trường UAT trước prod.
 - [ ] PDB + resource limits + HPA (tuỳ chọn) đã apply; liveness/readiness ok.
 - [ ] Backup DB + parquet + backup script cho migration.
@@ -912,13 +939,13 @@ forward-only; dự phòng bằng backup trước nâng.
    và fallback `cargo build` (Earthfile `+build-binaries`) đều đã truyền
    `--features opsense-core/parquet`, nên binary build lại sẽ biên dịch Parquet
    và `backend="parquet"` (hoặc alias `"duckdb"`/`"s3"`/`"lakehouse"`)
-   mở được station (xem §5.1.3 ✅). Còn lại: **chạy lại workflow `push-image`
-   cho tag `v1.0.10`** để image cũ base lên binary mới.
+   mở được station (xem §5.1.3 ✅). Còn lại: **build lại image release** vì
+   workflow hiện tại là cargo-dist (không còn job `push-image` của bản cũ).
 7. **`template.toml` của `opsense init` — ĐÃ SỬA** — đồng bộ với code hiện tại:
    `backend = "parquet"`/`data_dir = ".opsense/parquet"`, bỏ `items`/`fields`/
    `constants`/`params`/`initial_lookback_secs`/`bind`, `clock_source`/
    `ingest_source`/`persist_sink`, và các field cũ của sink (`block_secs`/
    `max_hot_blocks`/`max_hot_mb`/`data_dir`/`cold_retention_secs`) — dùng
    `clock`/`input` + `bindings` thay thế.
-6. **REPL/export CLI, join multi-series** (xem `docs/CHECKLIST.MD` Part B) —
+8. **REPL/export CLI, join multi-series** (xem `docs/CHECKLIST.MD` Part B) —
    ngoài phạm vi v1.0.10 go-live.

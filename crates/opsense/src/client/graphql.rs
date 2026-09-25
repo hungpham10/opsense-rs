@@ -49,6 +49,25 @@ pub struct SetAttributeResult {
     pub env_override_active: bool,
 }
 
+/// Kết quả query có guard: luôn biết có bị cắt không.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct QueryResult {
+    pub observations: Vec<Observation>,
+    pub truncated: bool,
+    pub scanned: usize,
+}
+
+/// Cấu hình đang chạy của một component (`Query.components`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ComponentConfig {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub inputs: Vec<String>,
+    /// JSON của typetag: `script_path`, `params`, … (cùng shape `ComponentInput`).
+    pub config: serde_json::Value,
+}
+
 #[derive(Debug, Deserialize)]
 struct GraphQLError {
     pub message: String,
@@ -187,16 +206,46 @@ impl OpsenseClient {
         self.gql(QUERY, ()).await
     }
 
-    pub async fn query_timeseries(
+    /// Cấu hình đang chạy. Bỏ `id` → tất cả component.
+    ///
+    /// Đọc trước khi sửa: `reload` nhận danh sách đầy đủ nên phải biết cấu hình
+    /// hiện tại, không thì sửa một param cũng phải gửi lại cả pipeline.
+    pub async fn components(&self, id: Option<&str>) -> anyhow::Result<Vec<ComponentConfig>> {
+        const QUERY: &str = r#"
+            query($id: String) {
+                components(id: $id) { id type inputs config }
+            }
+        "#;
+        #[derive(Serialize)]
+        struct Vars<'a> {
+            id: Option<&'a str>,
+        }
+        self.gql(QUERY, Vars { id }).await
+    }
+
+    /// Truy vấn observation của một `timeseries` station, có guard + filter.
+    ///
+    /// Server từ chối `limit`/cửa sổ vượt trần và lọc server-side theo `signal`
+    /// (`"order"`, `"summary"`…) + `label_kind` (`"trading_step"`, `"snapshot"`…).
+    /// `truncated = true` nghĩa là còn dữ liệu ngoài `limit`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn query_station(
         &self,
         node: &str,
         from_ts: Option<i64>,
         to_ts: Option<i64>,
-    ) -> anyhow::Result<Vec<Observation>> {
+        limit: Option<i64>,
+        signal: Option<&str>,
+        label_kind: Option<&str>,
+    ) -> anyhow::Result<QueryResult> {
         const QUERY: &str = r#"
-            query($node: String!, $fromTs: Int, $toTs: Int) {
-                queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) {
-                    ts metric value labels
+            query($node: String!, $fromTs: Int, $toTs: Int, $limit: Int,
+                  $signal: String, $labelKind: String) {
+                queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs,
+                                limit: $limit, signal: $signal, labelKind: $labelKind) {
+                    observations { ts metric signal value labels }
+                    truncated
+                    scanned
                 }
             }
         "#;
@@ -205,6 +254,9 @@ impl OpsenseClient {
             node: &'a str,
             from_ts: Option<i64>,
             to_ts: Option<i64>,
+            limit: Option<i64>,
+            signal: Option<&'a str>,
+            label_kind: Option<&'a str>,
         }
         self.gql(
             QUERY,
@@ -212,6 +264,9 @@ impl OpsenseClient {
                 node,
                 from_ts,
                 to_ts,
+                limit,
+                signal,
+                label_kind,
             },
         )
         .await
@@ -236,8 +291,32 @@ impl OpsenseClient {
         self.gql(MUTATION, Vars { components }).await
     }
 
-    pub async fn set_attribute(
+    /// Sửa **một** thành phần của một node (vd `/params/sl_pct` → `0.02`).
+    ///
+    /// `value` là JSON literal. Server đọc cấu hình hiện tại, patch, validate
+    /// toàn bộ danh sách qua typetag rồi mới reload — nên không cần gửi lại cả
+    /// pipeline, và patch hỏng thì runtime giữ nguyên.
+    pub async fn patch_component(
         &self,
+        id: &str,
+        path: &str,
+        value: &str,
+    ) -> anyhow::Result<EditResult> {
+        const MUTATION: &str = r#"
+            mutation($id: String!, $path: String!, $value: String!) {
+                patchComponent(id: $id, path: $path, value: $value) { reloaded nodes { id type inputs } }
+            }
+        "#;
+        #[derive(Serialize)]
+        struct Vars<'a> {
+            id: &'a str,
+            path: &'a str,
+            value: &'a str,
+        }
+        self.gql(MUTATION, Vars { id, path, value }).await
+    }
+
+    pub async fn set_attribute(        &self,
         name: &str,
         value: &str,
     ) -> anyhow::Result<SetAttributeResult> {

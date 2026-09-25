@@ -28,6 +28,31 @@ use tract_onnx::tract_core::model::typed::TypedRunnableModel;
 use crate::grid::TradingGrid;
 use crate::{Extractor, FetchFn, ParamFn, Strategy};
 
+// ── Params layout ──────────────────────────────────────────────────
+//
+// `params` là vector phẳng mà `Portfolio` truyền cho `Strategy::rebuild` (và
+// `SGD` tối ưu trên đó). Index 0..5 là **cùng layout** với strategy script
+// (`ScriptStrategy`) để `Portfolio` dùng chung, từ 6 trở đi là trọng số + bias
+// của DAG.
+
+/// `kelly_fraction` cho `Portfolio::evaluate`.
+pub const P_KELLY: usize = 0;
+/// `base_capital` cho `Portfolio::evaluate`.
+pub const P_CAPITAL: usize = 1;
+/// Số bậc lưới khi dựng plan.
+pub const P_GRID_LEVELS: usize = 2;
+/// Stop-loss mỗi lệnh (fraction).
+pub const P_SL_PCT: usize = 3;
+/// Cửa sổ nến (giây) cho lần rebuild.
+pub const P_LOOKBACK: usize = 4;
+/// Bắt đầu trọng số mô hình (`n_feat × num_of_grids`).
+pub const P_WEIGHTS: usize = 6;
+
+const DEFAULT_KELLY_FRACTION: f64 = 0.25;
+const DEFAULT_BASE_CAPITAL: f64 = 100_000.0;
+const DEFAULT_GRID_LEVELS: usize = 5;
+const DEFAULT_SL_PCT: f64 = 0.05;
+
 // ── Op trait ---------------------------------------------------------
 
 /// Trait đại diện cho một phép toán trong ONNX DAG.
@@ -79,6 +104,9 @@ pub struct Node {
 
 /// Genome/DAG cho ONNX trading model.
 /// `ops` là danh sách các Op trait objects, `nodes` là DAG referencing ops by index.
+///
+/// Không derive `Clone`: `Box<dyn Op>` không clone được, nên bản sao đi qua
+/// serde (typetag giữ đủ `ops`/`extractors` — xem `with_prebuilt_onnx`).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Graph {
     ops: Vec<Box<dyn Op>>,
@@ -93,6 +121,14 @@ pub struct Graph {
     num_of_grids: usize,
     lookback_time_to_rebuild: usize,
     interval_time_to_rebuild: usize,
+
+    /// ONNX bytes đã build sẵn (artifact nạp từ file) — `None` nghĩa là tự emit
+    /// từ `ops` + `nodes` như bình thường.
+    ///
+    /// Genome vẫn là nguồn sự thật: bytes chỉ là cache để khỏi emit lại, và
+    /// **không** serialize kèm genome (tránh hai bản có thể lệch nhau).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prebuilt: Option<Arc<Vec<u8>>>,
 }
 
 impl Graph {
@@ -117,7 +153,69 @@ impl Graph {
             num_of_grids,
             lookback_time_to_rebuild,
             interval_time_to_rebuild,
+            prebuilt: None,
         }
+    }
+
+    /// Gắn ONNX bytes đã build sẵn — `model()` bỏ qua `build_onnx` và compile
+    /// thẳng từ bytes này.
+    ///
+    /// Dùng khi ONNX được build ở Python (hoặc lâu hơn một lần trước) rồi lưu
+    /// ra file. **Genome vẫn là nguồn sự thật**: bytes phải khớp `ops`+`nodes`+
+    /// `window_size`+`num_of_grids`, nếu không `predict` sẽ lỗi shape — hãy
+    /// gọi lại [`Self::write_onnx`] sau mỗi lần sửa genome.
+    pub fn with_prebuilt_onnx(&self, onnx: Vec<u8>) -> Result<Self, Error> {
+        // `Box<dyn Op>` không `Clone` được nên bản sao đi qua serde — typetag
+        // bảo toàn `ops`/`extractors` (xem `graph_serializes_trait_objects_with_typetag`).
+        let mut next: Self = serde_json::from_str(
+            &serde_json::to_string(self)
+                .map_err(|e| Error::other(format!("serialize genome thất bại: {e}")))?,
+        )
+        .map_err(|e| Error::other(format!("clone genome qua JSON thất bại: {e}")))?;
+        next.prebuilt = Some(Arc::new(onnx));
+        Ok(next)
+    }
+
+    /// ONNX bytes ứng với genome này: bytes đã nạp sẵn nếu có, nếu không thì
+    /// emit từ `ops` + `nodes`. File `.onnx` chuẩn — Python (`onnx.load`) đọc
+    /// được, không cần qlib.
+    pub fn onnx_bytes(&self) -> Result<Vec<u8>, Error> {
+        match &self.prebuilt {
+            Some(bytes) => Ok(bytes.as_ref().clone()),
+            None => self.build_onnx().map(|(bytes, _)| bytes),
+        }
+    }
+
+    /// Ghi ONNX ra file (artifact để chia sẻ / inspect; không phải nguồn sự
+    /// thật — genome mới là).
+    pub fn write_onnx(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
+        let bytes = self.onnx_bytes()?;
+        std::fs::write(path, bytes)
+            .map_err(|e| Error::other(format!("ghi ONNX thất bại: {e}")))
+    }
+
+    /// Nạp cặp **genome + ONNX**: đọc genome JSON (nguồn sự thật) rồi gắn
+    /// bytes `.onnx` để khỏi emit lại.
+    ///
+    /// Sửa genome thì phải [`Self::write_onnx`] lại — bytes cũ sẽ lệch shape và
+    /// `predict` báo lỗi (đây là chủ ý: sai model phải lộ ra, không âm thầm
+    /// chạy kết quả cũ).
+    pub fn load_artifact(
+        genome_path: impl AsRef<std::path::Path>,
+        onnx_path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, Error> {
+        let genome_path = genome_path.as_ref();
+        let onnx_path = onnx_path.as_ref();
+        let genome = std::fs::read_to_string(genome_path)
+            .map_err(|e| Error::other(format!("đọc genome thất bại ({genome_path:?}): {e}")))?;
+        let graph: Self = serde_json::from_str(&genome)
+            .map_err(|e| Error::other(format!("genome không hợp lệ: {e}")))?;
+        let onnx = std::fs::read(onnx_path)
+            .map_err(|e| Error::other(format!("đọc ONNX thất bại ({onnx_path:?}): {e}")))?;
+        if onnx.is_empty() {
+            return Err(Error::other("file ONNX rỗng"));
+        }
+        graph.with_prebuilt_onnx(onnx)
     }
 }
 
@@ -346,23 +444,37 @@ impl Graph {
         Ok((bytes, n_feat))
     }
 
-    /// Compiled ONNX predictor từ DAG — cache theo fingerprint.
+    /// Compiled ONNX predictor — cache theo fingerprint.
+    ///
+    /// Ưu tiên bytes nạp sẵn (`with_prebuilt_onnx`): bỏ qua `build_onnx`. Sai
+    /// shape sẽ lộ ra ở `predict`/compile, kèm gợi ý build lại.
     fn model(&self) -> Result<(Arc<TypedRunnableModel>, usize), Error> {
         let key = self.fingerprint();
         if let Some(m) = predictor_cache().get(key) {
             return Ok((m, self.head_features()?));
         }
-        let (bytes, n_feat) = self.build_onnx()?;
+        let (bytes, n_feat) = match &self.prebuilt {
+            Some(prebuilt) => (prebuilt.as_ref().clone(), self.head_features()?),
+            None => self.build_onnx()?,
+        };
+        let prebuilt_hint = if self.prebuilt.is_some() {
+            " (ONNX nạp sẵn có thể không khớp genome — thử write_onnx lại)"
+        } else {
+            ""
+        };
         let model = tract_onnx::onnx()
             .model_for_read(&mut std::io::Cursor::new(&bytes))
             .and_then(|m| m.into_optimized())
             .and_then(|m| m.into_runnable())
-            .map_err(|e| Error::other(format!("ONNX compile failed: {e}")))?;
+            .map_err(|e| Error::other(format!("ONNX compile failed{prebuilt_hint}: {e}")))?;
         predictor_cache().put(key, model.clone());
         Ok((model, n_feat))
     }
 
-    /// Fingerprint cấu trúc DAG.
+    /// Fingerprint cấu trúc DAG **+ bytes nạp sẵn** (nếu có).
+    ///
+    /// Cần bytes trong key: hai artifact cùng cấu trúc nhưng khác bytes (ví dụ
+    /// build lại sau khi đổi op khác) không được dùng chung cache entry.
     fn fingerprint(&self) -> u64 {
         let mut h = DefaultHasher::new();
         if let Ok(bytes) =
@@ -372,6 +484,10 @@ impl Graph {
         } else {
             self.window_size.hash(&mut h);
             self.num_of_grids.hash(&mut h);
+        }
+        if let Some(prebuilt) = &self.prebuilt {
+            prebuilt.len().hash(&mut h);
+            prebuilt.hash(&mut h);
         }
         h.finish()
     }
@@ -385,9 +501,9 @@ impl Graph {
         Err(Error::other("genome thiếu node Head"))
     }
 
-    /// Compile DAG → ONNX bytes (dùng cho test / lưu genotype).
+    /// Compile DAG → ONNX bytes (alias của [`Self::onnx_bytes`] cho code cũ).
     pub fn compile(&self) -> Result<Vec<u8>, Error> {
-        Ok(self.build_onnx()?.0)
+        self.onnx_bytes()
     }
 
     pub fn num_features(&self) -> Result<usize, Error> {
@@ -430,7 +546,17 @@ impl Graph {
     }
 
     /// Decode ONNX outputs → TradingGrid.
-    fn setup(last_close: f64, outputs: &[Vec<f32>], grids: &[TradingGrid]) -> Vec<TradingGrid> {
+    ///
+    /// `grid_levels` / `sl_pct` đến từ `params` (`P_GRID_LEVELS`, `P_SL_PCT`) để
+    /// cùng một DAG vẫn cấu hình được như strategy script (SGD tối ưu chung
+    /// không gian params).
+    fn setup(
+        last_close: f64,
+        outputs: &[Vec<f32>],
+        grids: &[TradingGrid],
+        grid_levels: usize,
+        sl_pct: f64,
+    ) -> Vec<TradingGrid> {
         let gp = outputs.first().map(|v| v.as_slice()).unwrap_or(&[]);
         let atr = Self::finite_or(
             outputs
@@ -456,16 +582,18 @@ impl Graph {
         let atr_mult = 2.0;
         let half_width = atr_mult * atr / 2.0;
         let (grid_min, grid_max) = (last_close - half_width, last_close + half_width);
-        let grid_levels = 5.0_f64.round().clamp(2.0, 64.0) as usize;
+        // `TradingGrid::new` cần ≥ 2 bậc; params có thể vô lý (SGD) → clamp.
+        let grid_levels = grid_levels.clamp(2, 64);
 
         let Some(mut tg) = TradingGrid::new(grid_levels, grid_min, grid_max) else {
             return Vec::new();
         };
 
         tg = if direction == 0.0 {
-            tg.with_weights_normal(4.0)
+            tg.with_weights_normal(4.0).with_sl_pct(sl_pct)
         } else {
             tg.with_weights_trend(direction, strength)
+                .with_sl_pct(sl_pct)
         };
 
         let prob_base = Self::finite_or(gp.get(1).copied().unwrap_or(0.5) as f64, 0.5);
@@ -567,18 +695,39 @@ impl Graph {
 #[typetag::serde(name = "dag")]
 #[async_trait]
 impl Strategy for Graph {
+    /// Layout `params` (khớp `Portfolio` đọc qua `ParamFn`):
+    ///
+    /// | idx | ý nghĩa                                              |
+    /// |-----|-------------------------------------------------------|
+    /// | 0   | `kelly_fraction` (Portfolio::evaluate)                |
+    /// | 1   | `base_capital` (Portfolio::evaluate)                  |
+    /// | 2   | `grid_levels` — số bậc lưới khi dựng plan             |
+    /// | 3   | `sl_pct` — stop-loss mỗi lệnh                          |
+    /// | 4   | `lookback_secs` — cửa sổ nến cho rebuild              |
+    /// | 5   | reserved (chưa dùng)                                   |
+    /// | 6.. | trọng số mô hình (`n_feat × num_of_grids`)            |
+    /// | +w  | bias (`num_of_grids`)                                  |
+    ///
+    /// 0..5 **phải có giá trị thật**: `base_capital = 0` khiến
+    /// `calculate_order_size` trả 0 → mọi lệnh đặt ra không có size. Xem
+    /// `graph::tests::init_gives_trading_params_not_zeros`.
     fn init(&self) -> Vec<f64> {
         let n_feat = self.head_features().unwrap_or(0);
         let w_len = n_feat * self.num_of_grids;
         let mut params = vec![0.0; 6 + w_len + self.num_of_grids];
+        params[P_KELLY] = DEFAULT_KELLY_FRACTION;
+        params[P_CAPITAL] = DEFAULT_BASE_CAPITAL;
+        params[P_GRID_LEVELS] = DEFAULT_GRID_LEVELS as f64;
+        params[P_SL_PCT] = DEFAULT_SL_PCT;
+        params[P_LOOKBACK] = self.lookback_time_to_rebuild as f64;
         for (i, w) in self.inited_weights.iter().enumerate() {
             if i < w_len {
-                params[6 + i] = *w as f64;
+                params[P_WEIGHTS + i] = *w as f64;
             }
         }
         for (i, b) in self.inited_bias.iter().enumerate() {
             if i < self.num_of_grids {
-                params[6 + w_len + i] = *b as f64;
+                params[P_WEIGHTS + w_len + i] = *b as f64;
             }
         }
         params
@@ -611,7 +760,7 @@ impl Strategy for Graph {
             (0..w_len)
                 .map(|i| {
                     Self::finite_or(
-                        param(6 + i),
+                        param(P_WEIGHTS + i),
                         self.inited_weights.get(i).copied().unwrap_or(0.0) as f64,
                     )
                 })
@@ -621,7 +770,7 @@ impl Strategy for Graph {
             (0..self.num_of_grids)
                 .map(|i| {
                     Self::finite_or(
-                        param(6 + w_len + i),
+                        param(P_WEIGHTS + w_len + i),
                         default_b.get(i).copied().unwrap_or(0.0) as f64,
                     )
                 })
@@ -639,6 +788,8 @@ impl Strategy for Graph {
                     .as_slice(),
             )?,
             grids,
+            param(P_GRID_LEVELS) as usize,
+            Self::finite_or(param(P_SL_PCT), DEFAULT_SL_PCT),
         ))
     }
 }

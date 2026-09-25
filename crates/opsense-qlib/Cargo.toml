@@ -9,11 +9,23 @@ repository.workspace = true
 [features]
 default = []
 json = ["dep:serde_json", "dep:serde", "dep:typetag", "opsense-mlib/json", "serde/rc"]
-graph = ["dep:tract-onnx", "dep:prost"]
+# `rhai` = chiến lược viết bằng **script**: hợp đồng plan dạng dữ liệu
+# (`plan::GridPlan` / `plan::CellStats`) cho `opsense-rhai::ScriptStrategy`, tức
+# script `.rhai` định nghĩa `fn rebuild(candles, prev, params)`.
+#
+# Tách khỏi `json` vì đường này không cần typetag/JSON pipeline: chỉ cần serde để
+# script trả plan mà kernel deserialize được. `opsense-rhai` là crate bật feature
+# này (nó implement `Strategy` cho script, không phải qlib tự gọi Rhai — nhờ vậy
+# qlib không phụ thuộc `rhai` và không tạo vòng phụ thuộc với opsense-rhai).
+rhai = ["dep:serde", "serde/rc"]
+# `graph` = DAG genome → ONNX: ops/nodes tự emit protobuf rồi chạy bằng tract.
+# Cầu nối cho DAG model build riêng (Python) — nên nó **cần** `json` để có
+# serde + typetag: `Graph` là `Strategy` typetag `"dag"`, DAG spec phải đi
+# được qua pipeline config / JSON.
+graph = ["json", "dep:tract-onnx", "dep:prost"]
 
 [dependencies]
 opsense-mlib = { path = "../opsense-mlib" }
-itertools = "0.14"
 tracing = { workspace = true }
 reqwest = { workspace = true }
 
@@ -29,6 +41,11 @@ rand = { workspace = true }
 csv = "1.3"
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Chỉ cho test `plan`: serde_json có sẵn ở dependency tuỳ chọn (feature `json`),
+# nhưng feature `rhai` không kéo theo nên test vẫn cần nó.
+serde_json = { workspace = true }
 
 [lints.rust]
 warnings = "deny"

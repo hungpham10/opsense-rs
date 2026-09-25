@@ -1,11 +1,18 @@
 # NOTE — tích hợp grid/transition Rhai vào `opsense-components`
 
-> Ngày: 2026-09-23. Trạng thái: **bản ghi chú chính thức** — viết trước khi
-> code, theo quyết định pivot: **KHÔNG hồi sinh `opsense-rhai` orphan, tích
-> hợp thẳng vào `opsense-components`** (crate đã nối sẵn serve qua
-> `use opsense_components as _;`). Bản này là **note đồng hành**: audit, quyết
-> định, kế hoạch, checklist, thiết kế macro — để bất kỳ ai đọc lại đều biết vì
-> sao repo có hình dạng này.
+> Ngày: 2026-09-23. Đây là **ghi chú thiết kế có mốc**, viết trước khi code.
+>
+> **Cập nhật 2026-09-25 — kết quả thực tế khác một chỗ so với dự kiến trong
+> note:** crate `opsense-rhai` **không** bị bỏ; nó vẫn là nơi sống của
+> `RhaiTransform`, các binding runtime (`tools.rs`) và `ScriptStrategy`, và được
+> link vào serve qua feature. Phần đã giao cho `opsense-components` là
+> `RhaiBindings` (macro `#[rhai_class]`/`#[rhai_func]`/`#[rhai_register]` trong
+> `opsense-macros`).
+>
+> Bề mặt script thay đổi sau đó: `ts_query`/`ts_mean` đã bị gỡ, đọc trạm giờ qua
+> `station_query(station, from, to)` và `station_candles(station, from, to, res)`
+> (xem [`RHAI.md`](./RHAI.md) §2). Chi tiết đang chạy:
+> [`architecture.md`](./architecture.md) + [`GUIDE.md`](./GUIDE.md).
 
 ---
 

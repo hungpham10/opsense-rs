@@ -17,17 +17,17 @@
 //!        - live-feed station nhận observations raw (history + live),
 //!        - predict station có prediction + check true (1.0) + check false (0.0),
 //!        - parquet local dưới `<data_dir>/tsdb-timeseries/ts/blk=*`,
-//!        - mirror S3 (khi MinIO reachable): `opsense-lake/test-case-predict/tsdb/ts/**`.
+//!        - mirror S3 (khi RustFS reachable): `opsense-lake/test-case-predict/tsdb/ts/**`.
 //!
 //! `data_dir` / `s3.endpoint` của strategy config là đường dẫn docker — test
 //! override sang temp dir / env `OPSENSE_S3_ENDPOINT` (mặc định
 //! `http://127.0.0.1:9000`).
 //!
 //! S3 follow repo convention (skip graceful):
-//!   docker compose up -d minio minio-bucket
+//!   docker compose up -d rustfs rustfs-bucket
 //!   cargo test -p opsense --test e2e_predict_config -- --nocapture
 //!
-//! Trong CI (`OPSENSE_INTEGRATION=true`), MinIO thiếu = panic để không green oan.
+//! Trong CI (`OPSENSE_INTEGRATION=true`), RustFS thiếu = panic để không green oan.
 
 mod common;
 
@@ -152,11 +152,11 @@ async fn spawn_mock(body: String) -> (std::net::SocketAddr, Arc<std::sync::Mutex
     (addr, requests)
 }
 
-async fn wait_minio(endpoint: &str) -> bool {
+async fn wait_rustfs(endpoint: &str) -> bool {
     let client = reqwest::Client::new();
     for _ in 0..30 {
         if client
-            .get(format!("{endpoint}/minio/health/live"))
+            .get(format!("{endpoint}/health"))
             .send()
             .await
             .is_ok()
@@ -168,7 +168,7 @@ async fn wait_minio(endpoint: &str) -> bool {
     false
 }
 
-/// Same logic với parquet.rs — path-style cho MinIO.
+/// Same logic với parquet.rs — path-style cho RustFS.
 fn s3_store(endpoint: &str) -> Arc<dyn ObjectStore> {
     let mut b = AmazonS3Builder::new().with_bucket_name("opsense-lake");
     b = b.with_access_key_id(s3_user());
@@ -432,14 +432,14 @@ fn config_file_contract() {
 #[tokio::test]
 async fn full_pipeline_checks_parquet_s3() {
     let endpoint = s3_endpoint();
-    if !wait_minio(&endpoint).await {
+    if !wait_rustfs(&endpoint).await {
         if common::integration_mode() {
             panic!(
-                "MinIO không reachable tại {endpoint} — CI yêu cầu `docker compose up -d minio minio-bucket`"
+                "RustFS không reachable tại {endpoint} — CI yêu cầu `docker compose up -d rustfs rustfs-bucket`"
             );
         }
         eprintln!(
-            "skipping: MinIO không reachable tại {endpoint} — `docker compose up -d minio minio-bucket`"
+            "skipping: RustFS không reachable tại {endpoint} — `docker compose up -d rustfs rustfs-bucket`"
         );
         return;
     }

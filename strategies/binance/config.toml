@@ -1,0 +1,163 @@
+# Binance grid — realtime ticks (aggTrade qua websocket) + kline history (HTTP)
+# → snapshot grid-transition (AnalysisGrid + TransitionAnalysis).
+#
+# Pipeline graph:
+#   clock ─────────┐
+#                  ├──→ grid (rhai_transform, inputs = ["clock", "history", "tick-map"])
+#   history ───────┘   (http_source, station=true, candles mode — Binance klines)
+#   tick-feed ───────────────────────────────────┐
+#                                              (websocket_2_json → json_2_json:
+#                                               map `E`→ts (ms), `s`→metric_id,
+#                                               `p`→value cast f64 + constants
+#                                               trigger/kind/signal/labels)
+#   tick-map ───────┐
+#                   ├──→ grid
+#   binance-tsdb ←──┘   (timeseries_station_sink — terminal, memory-only)
+#
+# `grid` branch theo `trigger()` (ưu tiên `payload.trigger`, fallback
+# `payload.src` — xem crates/opsense-rhai/src/transform.rs):
+#   - trigger == "tick"   → gộp trade price vào candle hiện tại (bucket theo
+#     resolution) trong station của chính node → OHLCV obs ra own station.
+#   - trigger khác (clock ping ""/`history`) → merge history candles + candle
+#     live → `grid_fit` + `transition_analysis` → summary obs
+#     (`labels.kind = "snapshot"`).
+#
+# Storage memory-only — v1 runtime-only, chưa persist (tsdb sink là node
+# terminal giữ graph hợp lệ, dữ liệu nằm trong RAM).
+#
+# Note: http interval không điều khiển tần suất fetch — nhịp do clock; và
+# `history` source có `station = true` nên terminal (không cần consumer).
+
+[engine]
+poll_interval_seconds = 10
+cache_block_seconds = 5
+cache_max_blocks = 12
+
+[storage]
+backend = "memory"
+
+[capacity]
+btcusdt = 100000.0
+
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 10
+
+[[pipeline.components]]
+type = "http_source"
+id = "history"
+inputs = ["clock"]
+url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=500"
+interval_secs = 10
+timeout_secs = 5
+station = true
+
+   [pipeline.components.candles]
+   symbol = "BTCUSDT"
+   resolution = "1m"
+   unit_ms = 1
+   # mapping mặc định = Binance klines layout: [].0..[].5
+
+[[pipeline.components]]
+type = "websocket_2_json"
+id = "tick-feed"
+uri = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+
+[[pipeline.components]]
+type = "json_2_json"
+id = "tick-map"
+inputs = ["tick-feed"]
+
+   [pipeline.components.constants]
+   kind = "metric"
+   signal = "raw"
+   trigger = "tick"
+
+   [pipeline.components.constants.labels]
+   resolution = "1m"
+
+   [pipeline.components.transforms.ts]
+   query = "E"
+
+   [pipeline.components.transforms.metric_id]
+   query = "s"
+
+   [pipeline.components.transforms.value]
+   query = "p"
+   cast_to = "f64"
+
+[[pipeline.components]]
+type = "rhai_transform"
+id = "grid"
+inputs = ["clock", "history", "tick-map"]
+script_path = "strategies/binance/grid.rhai"
+
+   [pipeline.components.params]
+   history_source = "history"
+   own_station = "grid"
+   symbol = "BTCUSDT"
+   resolution = "1m"
+   history_secs = 3600
+   live_window_secs = 300
+
+   # mode = "analysis" (mặc định) — chỉ dựng grid + transition, phát snapshot.
+   # mode = "trading" — thêm bước đặt lệnh: candle đã đóng chạy qua kernel
+   # `portfolio_feed` (cùng kernel backtest dùng), lệnh ghi thành observation
+   # `signal = "order"` trong station `grid` (open/close theo `labels.status`).
+   # Các tham số dưới là tham số engine cho nhánh đó — đổi ở đây, không sửa script.
+   mode = "analysis"
+   calendar = "crypto"
+   # `strategy = "rhai"` (mặc định): plan lưới lệnh do chính script này dựng ở
+   # `fn rebuild(candles, prev, params)` — đổi chiến lược = sửa file .rhai, không
+   # phải viết class Rust rồi recompile (xem `opsense-rhai::ScriptStrategy`).
+   strategy = "rhai"
+   grid_levels = 5
+   sl_pct = 0.008
+   # Knob cho `fn rebuild`: số lệnh đóng tối thiểu trước khi tin tỉ lệ thắng
+   # thực tế, độ nhọn phân bổ vốn, sieve max_bit.
+   grid_min_trades = 3
+   grid_weight_sharpness = 4.0
+   grid_max_bit = 20
+   lookback_secs = 172800
+   review_interval_secs = 900
+   trading_candle_secs = 60
+   fee_rate = 0.0005
+   kelly_fraction = 0.25
+   base_capital = 100000.0
+   # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.
+   settlement_candles = 0
+
+   # `strategy = "dag"` thay "rhai": dùng DAG model build riêng (Python) làm
+   # predictor — `Graph` tự emit ONNX từ `ops` + `nodes` rồi chạy bằng tract,
+   # đầu ra map thành win-prob cho TradingGrid. Đây là **cầu nối** giữa model
+   # ngoài và kernel, nên không cần loader .onnx riêng (file .onnx chỉ là chỗ
+   # lưu model nếu cần).
+   #
+   # Genome tối giản: Last(1 feature) → Head(1 feature, 8 output). Output 0 =
+   # [market_bias, prob_base, bias_scale, level_trend, prob_max, prob_min,
+   # prob_short_max, prob_short_min]; output 1 = ATR.
+   # Bỏ comment để dùng:
+   # [pipeline.components.params.dag]
+   # ops = [
+   #   { type = "last" },
+   #   { type = "head", n_feat = 1, n_out = 8 },
+   # ]
+   # nodes = [
+   #   { op = 0, inputs = [{ FromExtractor = 0 }] },
+   #   { op = 1, inputs = [{ FromOperator = 0 }] },
+   # ]
+   # extractors = []
+   # inited_bias = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+   # inited_weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+   # window_size = 200
+   # num_of_grids = 8
+   # lookback_time_to_rebuild = 200
+   # interval_time_to_rebuild = 60
+
+# Terminal node (bắt buộc: transform non-sink phải có consumer). Chỉ giữ
+# snapshots + candles trong memory — không persist / không object store (v1).
+[[pipeline.components]]
+type = "timeseries_station_sink"
+id = "binance-tsdb"
+inputs = ["grid"]

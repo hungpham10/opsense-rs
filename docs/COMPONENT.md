@@ -22,9 +22,18 @@ còn lại**:
 | 3. Sinh `impl Identify` | `component_type()` + `clone_arc()` | — |
 | 4. Đăng ký typetag | `#[typetag::serde(name=…)]` + registry toàn cục | —
 
-Nếu component muốn script Rhai gọi được hàm của nó → thêm macro **`#[rhai]`**
-(cùng crate `opsense-macros`, xem §4) — macro sinh **một block** `register_type`
-+ `register_fn` (constructor bắt buộc + đủ accessor), **không có duplicate-panic**.
+Nếu component muốn script Rhai gọi được hàm của nó → thêm macro
+**`#[rhai_class]`** (cùng crate `opsense-macros`, xem §3) — macro sinh **một
+block** `register_type` + `register_fn` (constructor bắt buộc + đủ accessor),
+**không có duplicate-panic**.
+
+Ba macro Rhai trong `opsense-macros`:
+
+| Macro | Gắn lên | Sinh ra |
+|---|---|---|
+| `#[rhai_class(constructor = "...", accessors("a","b"))]` | struct analysis | `register_type` + `register_fn` cho constructor và mọi accessor |
+| `#[rhai_func]` (hoặc `#[rhai_func("tên_script")]`) | `fn` tự do | hàm script-callable |
+| `#[rhai_register]` | module | `fn register(&mut engine)` gom tất cả `#[rhai_func]` bên trong |
 
 ## 2. Cấu trúc tối thiểu (bắt chước `processor.rs`)
 
@@ -73,14 +82,19 @@ config = { threshold = 0.5 }
 
 ## 3. Nếu component cần script-chạy-được (đính Rhai bindings)
 
-Thay vì `register_fn!` rải rác gây duplicate, gắn **`#[rhai]`** lên struct
-analysis (cùng crate `opsense-macros`). Macro đọc constructor + method, sinh:
+Thay vì `register_fn` rải rác gây duplicate-panic, gắn **`#[rhai_class]`** lên
+struct analysis (cùng crate `opsense-macros`):
 
+```rust
+#[rhai_class(
+    constructor = "my_analysis",
+    accessors("num_buckets", "total_from", "has_transitions_from")
+)]
+pub struct MyAnalysis { /* … */ }
 ```
-register_type::<MyAnalysis>();
-register_fn!("my_analysis", MyAnalysis::new /* constructor bắt buộc */);
-register_fn!("num_buckets" | "total_from" | "has_transitions_from" | … , accessor);
-```
+
+Macro validate ở compile-time: thiếu constructor/accessor là lỗi build, nên
+script luôn tạo được instance và luôn đọc được accessor.
 
 Tất cả trong **một block** → hết panic trùng, hết "dead binding" (thiếu
 constructor/accessor → compile error ngay). Script gọi:
@@ -106,16 +120,19 @@ Quy trình chuẩn — **run → chờ → đọc dữ liệu → timeout:**
    tự heal). **Không panic ngầm** — timeout là hành vi kỳ vọng, log cảnh báo
    rồi xử lý ở batch kế.
 
-Pattern test tham khảo: `crates/opsense-components/tests/*_pipeline.rs` +
+Pattern test tham khảo: `crates/opsense-components/tests/http_pipeline.rs` và
 `crates/opsense/tests/common/mod.rs` (`ensure_serve`/`ensure_pipeline` — chế độ
-integration panic, local skip).
+integration panic, local skip). Test nhanh hơn, không cần serve: dựng runtime +
+context trực tiếp như `crates/opsense-rhai/tests/pipeline.rs`.
 
 ## 5. Checklist khi thêm component mới
 
 - [ ] Struct có `#[transform]`/`#[sink]`/`#[source]` + `#[serde(deny_unknown_fields)]`.
 - [ ] Có `impl new(...)` cho mọi type cần script tạo (constructor bắt buộc).
-- [ ] Nếu cần script gọi → gắn `#[rhai]` (một block duy nhất, không đăng ký
-      tay ở nơi khác).
+- [ ] Nếu cần script gọi → gắn `#[rhai_class]` (một block duy nhất, không đăng
+      ký tay ở nơi khác).
+- [ ] Nếu component gắn type mới, xác nhận nó xuất hiện trong danh sách mà
+      `opsense validate` liệt kê khi parse sai (18 type).
 - [ ] Khai node trong `config.toml` → chạy `opsense validate` → pass.
 - [ ] Test run → chờ → đọc GraphQL → timeout+handle — xem §4.
 - [ ] Cập nhật `docs/RHAI.md` (nếu thêm hàm script mới) hoặc `docs/GUIDE.md`

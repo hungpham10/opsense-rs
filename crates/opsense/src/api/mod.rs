@@ -1,9 +1,10 @@
-//! HTTP API: health, config reload, and the source-health surface.
+//! HTTP API của gateway.
 //!
-//! `GET /sources` returns source health; `/health`, `/reload` and `/metrics`
-//! are carried over from the original skeleton. Observation data is queried
-//! through the stores instead — MCP `opsense_query` or a station_sink's
-//! `/observations` endpoint.
+//! Route thật (xem `serve::routes`): `GET /health`, `POST /api/repl/graphql`,
+//! `/api/admin/*`, `/api/oauth/*`. Không có `/reload`, `/sources` hay `/metrics`.
+//! Đọc dữ liệu thì qua station: `Query.queryTimeseries` trong GraphQL, tức
+//! `opsense query` / MCP tool; đổi cấu hình qua `Mutation.patchComponent`
+//! hoặc `Mutation.reload`.
 
 pub mod admin;
 pub mod oauth;
@@ -21,13 +22,17 @@ use headers::Header;
 use http::{HeaderName, HeaderValue};
 use tokio::sync::RwLock;
 
-use opsense_core::{Config, Context, StationKind};
+use opsense_core::{Config, Context, Observation, StationKind};
 use opsense_mlib::vector::components::{clock, null};
 use opsense_mlib::vector::runtime::{Component, Event, Runtime};
 use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
 
 use crate::api::oauth::OAuthMetrics;
+
+/// Station chứa lịch sử thay đổi cấu hình (`labels.kind = "config_edit"`).
+/// Đọc lại bằng `opsense query opsense-audit --label-kind config_edit`.
+pub const AUDIT_STATION: &str = "opsense-audit";
 
 #[derive(Debug)]
 pub struct XTenantId(i64);
@@ -252,5 +257,76 @@ impl AppState {
     /// Snapshot of every in-memory attribute.
     pub async fn attributes(&self) -> BTreeMap<String, String> {
         self.context.get_attributes().await
+    }
+
+    /// Cấu hình **đang chạy** của từng component, dạng JSON qua typetag.
+    ///
+    /// Nhờ đây client (REPL/CLI/MCP) đọc được `params` hiện tại của một node rồi
+    /// sửa đúng một chỗ (xem `Mutation.patchComponent`) thay vì phải dựng lại cả
+    /// danh sách component — đọc trước, sửa sau, không đoán.
+    pub async fn components(&self, id: Option<&str>) -> Vec<serde_json::Value> {
+        let runtime = self.runtime.read().await;
+        let all = runtime.components();
+        match id {
+            None => all,
+            Some(id) => all
+                .into_iter()
+                .filter(|c| c.get("id").and_then(serde_json::Value::as_str) == Some(id))
+                .collect(),
+        }
+    }
+
+    /// Ghi 1 dòng audit vào station [`AUDIT_STATION`].
+    ///
+    /// Đổi cấu hình mà không để lại dấu vết thì không ai biết chuyện gì vừa xảy
+    /// ra. Audit cũng là **observation**, nên đọc lại được bằng đúng đường đọc
+    /// của mọi state khác:
+    /// `opsense query opsense-audit --label-kind config_edit`.
+    ///
+    /// Best-effort: audit hỏng không được làm hỏng thao tác đã thành công.
+    pub async fn audit(&self, obs: Observation) {
+        const ID: &str = AUDIT_STATION;
+        let station = match self
+            .context
+            .station::<Arc<RwLock<opsense_core::TimeseriesStation>>>(ID)
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => {
+                let made = match opsense_core::TimeseriesStation::from_storage(ID, self.context.storage()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "không tạo được station audit");
+                        return;
+                    }
+                };
+                let wrapped = Arc::new(RwLock::new(made));
+                if let Err(e) = self
+                    .context
+                    .registry(ID, opsense_core::Station::Timeseries(wrapped.clone()))
+                    .await
+                {
+                    // `AlreadyExists` = có người tạo trước → lấy lại từ context.
+                    if e.kind() != ErrorKind::AlreadyExists {
+                        tracing::warn!(error = %e, "không đăng ký được station audit");
+                        return;
+                    }
+                }
+                match self
+                    .context
+                    .station::<Arc<RwLock<opsense_core::TimeseriesStation>>>(ID)
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "không lấy được station audit");
+                        return;
+                    }
+                }
+            }
+        };
+        let ts = obs.ts;
+        let st = station.read().await;
+        st.update_range(std::slice::from_ref(&obs), ts, ts, ts);
     }
 }

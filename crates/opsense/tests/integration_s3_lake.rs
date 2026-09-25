@@ -1,11 +1,11 @@
 //! S3 lakehouse integration test.
 //!
 //! Verify rằng opsense-mlib ghi parquet time-partitioned (`ts/blk=<id>/batch-*.parquet`)
-//! vào MinIO rồi đọc lại đúng. Yêu cầu `docker compose up minio minio-bucket`.
-//! Skip graceful khi MinIO không reachable (dev local không cần stack đầy).
+//! vào RustFS rồi đọc lại đúng. Yêu cầu `docker compose up rustfs rustfs-bucket`.
+//! Skip graceful khi RustFS không reachable (dev local không cần stack đầy).
 //!
 //! Chạy:
-//!   docker compose up -d minio minio-bucket
+//!   docker compose up -d rustfs rustfs-bucket
 //!   cargo test --test integration_s3_lake -- --nocapture
 
 mod common;
@@ -21,7 +21,7 @@ use opsense_mlib::storage::TimeseriesStorage;
 const LAKE_KEY: &str = "integration-test-station";
 
 fn s3_endpoint() -> String {
-    std::env::var("OPSENSE_S3_ENDPOINT").unwrap_or_else(|_| "http://minio:9000".into())
+    std::env::var("OPSENSE_S3_ENDPOINT").unwrap_or_else(|_| "http://rustfs:9000".into())
 }
 fn s3_user() -> String {
     std::env::var("OPSENSE_S3_ACCESS_KEY_ID").unwrap_or_else(|_| "opsense".into())
@@ -30,11 +30,11 @@ fn s3_pass() -> String {
     std::env::var("OPSENSE_S3_SECRET_ACCESS_KEY").unwrap_or_else(|_| "opsense123".into())
 }
 
-/// Đợi MinIO sẵn sàng (tối đa 30s). Trả `true` nếu ready.
-async fn wait_minio() -> bool {
+/// Đợi RustFS sẵn sàng (tối đa 30s). Trả `true` nếu ready.
+async fn wait_rustfs() -> bool {
     let client = reqwest::Client::new();
     for _ in 0..30 {
-        if client.get(format!("{}/minio/health/live", s3_endpoint()))
+        if client.get(format!("{}/health", s3_endpoint()))
             .send()
             .await
             .is_ok()
@@ -49,14 +49,17 @@ async fn wait_minio() -> bool {
 fn s3_store() -> Arc<dyn ObjectStore> {
     let cfg = S3Config {
         bucket: "opsense-lake".into(),
-        prefix: LAKE_KEY.into(),
+        // `prefix` là namespace **chung** của cả lake; station nằm ở segment
+        // (`lake_key`) → key thật = `{prefix}/{lake_key}/ts/…`. Đặt prefix =
+        // lake_key sẽ lặp đôi (`x/x/ts/…`) và list theo `x/ts/` rỗng.
+        prefix: String::new(),
         access_key_id: Some(s3_user()),
         secret_access_key: Some(s3_pass()),
         region: None,
         endpoint: Some(s3_endpoint()),
         session_token: None,
     };
-    // Dùng cùng logic với parquet.rs (path-style cho MinIO).
+    // Dùng cùng logic với parquet.rs (path-style cho RustFS).
     let mut b = AmazonS3Builder::new().with_bucket_name(&cfg.bucket);
     if let Some(k) = &cfg.access_key_id { b = b.with_access_key_id(k); }
     if let Some(s) = &cfg.secret_access_key { b = b.with_secret_access_key(s); }
@@ -85,8 +88,8 @@ async fn list_keys(store: &Arc<dyn ObjectStore>, prefix: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn s3_lake_write_flush_snapshot_retain() {
-    if !wait_minio().await {
-        eprintln!("skipping: MinIO không reachable — `docker compose up minio minio-bucket`");
+    if !wait_rustfs().await {
+        eprintln!("skipping: RustFS không reachable — `docker compose up rustfs rustfs-bucket`");
         return;
     }
 
@@ -95,9 +98,10 @@ async fn s3_lake_write_flush_snapshot_retain() {
     let store = s3_store();
 
     // Mở lake với S3 mirror. flush_threshold=0 → chỉ flush khi gọi tường minh.
+    // Layout: `s3://opsense-lake/{lake_key}/ts/blk=<id>/batch-*.parquet`.
     let s3 = S3Config {
         bucket: "opsense-lake".into(),
-        prefix: LAKE_KEY.into(),
+        prefix: String::new(),
         access_key_id: Some(s3_user()),
         secret_access_key: Some(s3_pass()),
         region: None,

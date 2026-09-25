@@ -1,4 +1,4 @@
-# Parquet + S3 (MinIO) — prediction system: clock + 1 HTTP source (live-feed)
+# Parquet + S3 (RustFS) — prediction system: clock + 1 HTTP source (live-feed)
 # → rhai predict (predict.rhai) → tsdb.
 #
 # Pipeline graph:
@@ -55,7 +55,7 @@ s3_snapshot_interval_secs = 60
 [storage.s3]
 bucket = "opsense-lake"
 prefix = "test-case-predict"
-endpoint = "http://minio:9000"
+endpoint = "http://rustfs:9000"
 url_style = "path"
 # Creds/region KHÔNG khai ở đây — fallback theo env `OPSENSE_S3_*` rồi `AWS_*`
 # (xem opsense-core station.rs open_backend).

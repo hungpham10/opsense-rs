@@ -16,10 +16,11 @@ opsense-core = { path = "../opsense-core" }
 opsense-mlib = { path = "../opsense-mlib", features = ["json"] }
 opsense-macros = { path = "../opsense-macros" }
 # `json` links qlib's typetag-registered pipeline components
-# (Calendar, grid strategies, StreamingPortfolio, …) into the inventory that
+# (Calendar, Fee, Score, grid strategies, …) into the inventory that
 # opsense-components deserializes from pipeline TOML / registers with typetag.
 opsense-qlib = { path = "../opsense-qlib", features = ["json"] }
 opsense-model = { path = "../opsense-model" }
+csv = "1"
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

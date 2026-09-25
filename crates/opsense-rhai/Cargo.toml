@@ -16,6 +16,11 @@ opsense-components = { path = "../opsense-components" }
 opsense-mlib = { path = "../opsense-mlib", features = ["json", "rhai"] }
 opsense-macros = { path = "../opsense-macros" }
 opsense-model = { path = "../opsense-model" }
+# `graph` = DAG genome → ONNX (ops/nodes tự emit protobuf, chạy bằng tract):
+# cầu nối cho DAG model build riêng ở Python, dùng làm `strategy = "dag"` cho
+# `portfolio_feed`. Ẩn dụng nó cũng bật `json` (typetag/serde cho `Graph`).
+# `rhai` = hợp đồng plan cho `ScriptStrategy` (`fn rebuild` trong .rhai).
+opsense-qlib = { path = "../opsense-qlib", features = ["json", "graph", "rhai"] }
 rhai = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,6 +30,7 @@ typetag = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
+# `tests/grid_live_binance.rs` (#[ignore]) gọi Binance public API.
+reqwest = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
-toml = "0.8"

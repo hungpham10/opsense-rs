@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 
 use serde::{Deserialize, Serialize};
+use serde::de::Error as DeError;
 use serde_json::{Map, Value};
 use tokio::sync::mpsc;
 
@@ -12,8 +13,28 @@ use opsense_macros::transform;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransformConfig {
-    query: Vec<Operator>,
-    cast_to: Option<CastType>,
+    /// Jq path per output field, written either as a path string (`"E"`,
+    /// `"data[].x"` — same convention as the HTTP node's mapping) or as the
+    /// full serde-tagged operator array (`[{ "Match": "E" }]`). Parsed strings
+    /// make TOML declarative configs readable; see [`deserialize_query`].
+    #[serde(default, deserialize_with = "deserialize_query")]
+    pub query: Vec<Operator>,
+    #[serde(default)]
+    pub cast_to: Option<CastType>,
+}
+
+/// Deserialize `query` as a jq path string or an operator array.
+fn deserialize_query<'de, D>(de: D) -> Result<Vec<Operator>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(de)?;
+    match value {
+        Value::String(path) => JsonQuery::parse(&path)
+            .map(|q| q.operators().to_vec())
+            .map_err(|e| D::Error::custom(format!("invalid jq query `{path}`: {e}"))),
+        other => Vec::<Operator>::deserialize(other).map_err(DeError::custom),
+    }
 }
 
 #[transform]

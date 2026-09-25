@@ -1,10 +1,26 @@
 # PLAN — Opsense capacity planning
 
-> Tài liệu này mô tả **kế hoạch thực thi** cho `opsense-rs`. Trạng thái thực
-> tế: xem [`architecture.md`](./architecture.md) (kiến trúc) và
-> [`CHECKLIST.MD`](./CHECKLIST.MD) (audit). Cập nhật gần nhất: **2026-09-04**
-> (Phase 5 build infra đã xong, CI unit test workflow đã chạy ổn trên GH
-> Action, compose giữ 5 services).
+> **Đây là tài liệu kế hoạch lịch sử**, giữ lại để hiểu vì sao code có hình dạng
+> hiện tại. Nơi mô tả **đang chạy** là [`architecture.md`](./architecture.md) +
+> [`GUIDE.md`](./GUIDE.md) — hai file đó được đối chiếu với code, còn file này thì
+> không.
+>
+> ### Cập nhật 2026-09-25 — những mục dưới đây đã lỗi thời
+>
+> | Mục trong file này nói | Thực tế |
+> |---|---|
+> | compose giữ 5–6 service | **9 service**: `postgres`, `valkey`, `opsense-dex`, `opsense-runner{,-python,-julia}`, `opsense-serve`, `rustfs`, `rustfs-bucket` (MinIO đã bị thay bằng RustFS) |
+> | CI chạy `cargo test --workspace --all-targets` | `Unit Tests` chạy `cargo nextest run --workspace`; thêm job `Strategy E2E (Rhai grid trading)` và job `Integration Tests` matrix 7 strategy |
+> | release push image tag `v*` qua Earthly `build-push` tới `ghcr.io/lap02921/*` | workflow `Release` dùng **cargo-dist**, tag dạng `X.Y.Z`, `IMAGE_PREFIX: hungpham10/opsense` |
+> | `opsense serve --repl/--mcp/--runner-bind` | không tồn tại — dùng subcommand `opsense repl` / `opsense mcp` / `opsense runner` |
+> | service tên `opsense` | tên là `opsense-serve` |
+> | runner Python/Julia cùng host port 50051 | `50052` / `50053` (echo giữ `50051`) |
+> | Tầng 1/2 tách bạch, Tầng 2 = `SessionManager` | session module đã bỏ; kernel chạy qua **runner gRPC** (`opsense-runner` → framed IPC → `opsense-kernel-*`). Đồng thời đã thêm **tầng trading** (`opsense-qlib`) chưa có trong tài liệu này |
+> | strategy = class Rust trong `opsense-qlib/src/strategies/` | đã xoá; chiến lược là **script Rhai** (`fn rebuild`) hoặc **DAG genome** (`Graph`, ONNX) |
+> | GraphQL ở `POST /graphql` | `POST /api/repl/graphql`; thêm `components` + `patchComponent` (đọc/sửa cấu hình không cần gửi lại cả pipeline) |
+> | chưa có trading realtime | đã có: lệnh + cursor T+N lưu trong station, `opsense orders`, `opsense query --label-kind trading_step` |
+> | 4 integration test files | **10 file** trong `crates/opsense/tests/` + 14 trong `crates/opsense-rhai/tests/` |
+> | crate `opsense_libs` / `opsense_store` / `opsense_session` / `opsense_mcp` / `opsense_repl` | đã gộp: `opsense-mlib`, `opsense-core`, (bỏ), `opsense` (mcp + repl là module), (bỏ) — xem bảng crate ở `architecture.md` §2 |
 
 ## Vấn đề
 

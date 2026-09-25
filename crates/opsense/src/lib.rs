@@ -1,15 +1,16 @@
 //! Opsense gateway binary — library crate.
 //!
-//! Exported slices: `serve` (HTTP / Unix-socket gateway), `api` (admin /
-//! oauth / repl GraphQL), `client` (GraphQL thin client + gRPC
-//! [`client::RunnerClient`]), `repl` (CLI REPL, kernel `--runner` mode) and
-//! `mcp` (MCP stdio server over the client). The kernel-runner (gRPC server),
-//! session and token modules are being rebuilt on top of the refactored
-//! `opsense-core` / `opsense-mlib` / `opsense-model` crates and are not
-//! exported yet.
+//! Exported slices: `serve` (HTTP gateway + GraphQL under `/api/repl`), `api`
+//! (repl GraphQL + admin + oauth), `client` (GraphQL thin client + gRPC
+//! [`client::RunnerClient`]), `cli` (script-friendly subcommands, mỗi lệnh = 1
+//! GraphQL round-trip), `init` (scaffold config), `repl` (interactive REPL),
+//! `runner` (kernel-runner gRPC server), `mcp` (MCP stdio server over the
+//! client) and `token`/`session` (auth helpers).
 
 pub mod api;
+pub mod cli;
 pub mod client;
+pub mod init;
 pub mod mcp;
 pub mod repl;
 pub mod runner;

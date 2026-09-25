@@ -359,7 +359,7 @@ impl TimeseriesStation {
         serde_json::from_slice(&bytes).ok()
     }
 
-    pub async fn query_range(&mut self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
+    pub async fn query_range(&self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
         let start_block = self.get_block_id(from_ts);
         let end_block = self.get_block_id(to_ts);
         let mut result = Vec::new();
@@ -420,7 +420,7 @@ impl TimeseriesStation {
     /// nếu BẤT KỲ block nào trong cửa sổ chưa cover trọn), method này trả
     /// *những gì thực sự có* — dùng cho script-facing `station_query`: script
     /// hỏi cửa sổ rộng mà không cần biết chính xác vùng dữ liệu được cover.
-    pub async fn query_recent(&mut self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
+    pub async fn query_recent(&self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
         let start_block = self.get_block_id(from_ts);
         let end_block = self.get_block_id(to_ts);
         let mut result = Vec::new();
@@ -456,7 +456,7 @@ impl TimeseriesStation {
     }
 
     pub fn update_range(
-        &mut self,
+        &self,
         records: &[Observation],
         query_from: i64,
         query_to: i64,
@@ -478,9 +478,13 @@ impl TimeseriesStation {
                 }
             }
 
-            // Sap xep va xoa trung lặp
+            // Sap xep va xoa trung lặp — chỉ xoá observation giống hệt nhau
+            // (ts + metric + kind + signal + value + labels). `dedup_by_key(ts)`
+            // trước đây đè 4/5 field OHLCV dùng chung một ts (cùng ts ≠ trùng
+            // dữ liệu); với các dòng cùng (ts, field) khác giá trị, stable-sort
+            // giữ thứ tự ghi (mới append sau cũ) nên đọc lại lấy bản mới nhất.
             block.items.sort_by_key(|x| x.ts);
-            block.items.dedup_by_key(|x| x.ts);
+            block.items.dedup_by(|a, b| a == b);
 
             // Cập nhật range bao phủ và timestamp sửa đổi
             let eff_from = query_from.max(block_start);
@@ -750,7 +754,7 @@ mod tests {
     /// trọn; `query_recent` trả vùng dữ liệu gần nhất dù cửa sổ hổng.
     #[tokio::test]
     async fn query_recent_returns_latest_suffix_over_holes() {
-        let mut st = TimeseriesStation::new(32, Some(300)); // block 300s
+        let st = TimeseriesStation::new(32, Some(300)); // block 300s
 
         // Block 0 chỉ cover [100, 110].
         let batch = vec![obs(100, 1.0), obs(105, 2.0), obs(110, 3.0)];
