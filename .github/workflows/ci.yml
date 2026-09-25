@@ -6,14 +6,6 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
-  # Chạy tay: `gh workflow run ci.yml -f live_binance=true` để verify
-  # `fn rebuild` trên dữ liệu Binance thật (job `live-binance`).
-  workflow_dispatch:
-    inputs:
-      live_binance:
-        description: "Run strategy e2e against live Binance API (needs network)"
-        type: boolean
-        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -183,33 +175,15 @@ jobs:
             --test test_binance_grid_strategy \
             -- --test-threads=1 --nocapture
 
-  # Chỉ chạy khi dispatch thủ công (`gh workflow run ci.yml -f live_binance=true`):
-  # `fn rebuild` trên dữ liệu Binance thật. PR CI không chạy vì phụ thuộc
-  # network bên ngoài — nhưng review thay đổi script thì nên bấm một lần.
-  live-binance:
-    name: Live Binance (manual, needs network)
-    if: github.event_name == 'workflow_dispatch' && inputs.live_binance == 'true'
-    needs: build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.94"
-
-      - name: Restore Cargo build cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-binaries
-
-      - name: Run `fn rebuild` against Binance public API
+      # Cùng `fn rebuild` nhưng trên **dữ liệu Binance thật** (public API, không
+      # cần key): 500 nến BTCUSDT/1m → plan → kernel đặt lệnh.
+      #
+      # `continue-on-error`: API bên ngoài không thuộc quyền kiểm soát của repo
+      # (rate-limit, geo-block, sự cố). Fail ở đây không có nghĩa code sai, nên
+      # đỏ PR vì nó là thông tin sai lệch — nhưng bỏ hẳn thì mất đúng thứ cần
+      # xem khi sửa script: log vẫn in ra plan (số ô, levels, win-prob).
+      - name: Run `fn rebuild` against live Binance API (advisory)
+        continue-on-error: true
         run: |
           cargo test -p opsense-rhai --locked --release \
             --test grid_live_binance -- --ignored --nocapture
