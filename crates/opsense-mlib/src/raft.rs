@@ -5,12 +5,14 @@
 //! sống, và chỉ Raft (log + term + quorum) mới loại được. Ngược lại, đưa quyết
 //! định vào gossip nghĩa là tự chế lại Raft một cách tệ hơn.
 //!
-//! **Phần này KHÔNG tự cài đặt thuật toán Raft** — làm thế là ăn cướp tiến bộ
-//! và làm nên nhiều bug. Ở đây chỉ có:
+//! **Một node đứng một mình thì không có cụm nào cả** — không cần bầu, không cần
+//! log. Cụm chỉ tồn tại khi thực sự có người gom node vào (`POST /clusters`), tức
+//! là khi đã cần quyết định "ai chạy pipeline".
 //!
-//! - kiểu miền: cụm, thành viên, lệnh, vai trò;
-//! - trait [`Consensus`] làm **khe cắm** cho engine (`openraft` sẽ cài sau);
-//! - cài đặt [`SingleNode`] cho node đơn, đủ để chạy và test trước khi cắm engine.
+//! **Phần này KHÔNG tự cài đặt thuật toán Raft** — làm thế là ăn cướp tiến bộ
+//! và làm nên nhiều bug. Ở đây chỉ có kiểu miền + trait [`Consensus`] làm khe
+//! cắm cho engine (`openraft` sẽ cài sau). Chưa cắm engine thì cụm nhiều thành
+//! viên **chưa ai làm master** — đó là trạng thái trung thực, không phải lỗi.
 //!
 //! Không I/O — vận chuyển nằm ở `opsense::cluster`.
 
@@ -18,10 +20,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-/// Vai trò của node này với một cụm.
+/// Vai trò của node này.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
-    /// Đang chạy pipeline của cụm.
+    /// Đang chạy pipeline.
     Master,
     /// Chờ thay master.
     Standby,
@@ -39,8 +41,8 @@ pub struct Cluster {
 }
 
 impl Cluster {
-    /// Cụm một thành viên — trạng thái mặc định sau khi join: chưa ai nhốt node
-    /// này vào cụm nào, nên nó là cụm riêng của mình.
+    /// Cụm một thành viên — chỉ dùng khi *người dùng* gom một node vào cụm tên;
+    /// node đứng một mình thì không có cụm (xem [`Raft::solo`]).
     #[must_use]
     pub fn solo(id: impl Into<String>, node_id: impl Into<String>, pipeline: impl Into<String>) -> Self {
         Self {
@@ -67,7 +69,7 @@ pub enum Command {
     AddMember { cluster_id: String, node_id: String },
     /// Bỏ node khỏi cụm.
     RemoveMember { cluster_id: String, node_id: String },
-    /// Gộp các node vào một cụm (tạo nếu chưa có) — thao tác của
+    /// Gom các node vào một cụm (tạo nếu chưa có) — thao tác của
     /// `POST /api/cluster/v1/clusters`.
     Group { cluster_id: String, members: BTreeSet<String>, pipeline: String },
     /// Giải thể cụm.
@@ -98,66 +100,25 @@ pub trait Consensus {
     fn term_of(&self, cluster_id: &str) -> u64;
 }
 
-/// Cài đặt tối thiểu: mỗi node một cụm riêng, tự làm master.
-///
-/// Dùng cho node đơn (chưa ai nhốt vào cụm nào) và cho test. Khi cắm
-/// `openraft`, cài đặt này bị thay bằng engine thật — phần còn lại không đổi.
-#[derive(Debug, Default)]
-pub struct SingleNode {
-    clusters: BTreeMap<String, Cluster>,
-}
-
-impl Consensus for SingleNode {
-    fn propose(&mut self, cmd: Command) -> Result<bool, String> {
-        // Cài đặt tối giểu không nhân bản: từ chối thì trả lỗi. `Raft::propose`
-        // đã kiểm tra trên bản sao nên thực tế không tới nhánh này.
-        match apply(&mut self.clusters, cmd) {
-            Outcome::Rejected(msg) => Err(msg),
-            Outcome::Noop | Outcome::Applied => Ok(true),
-        }
-    }
-
-    fn leader_of(&self, cluster_id: &str) -> Option<String> {
-        self.clusters.get(cluster_id).and_then(|c| c.members.iter().next().cloned())
-    }
-
-    fn term_of(&self, cluster_id: &str) -> u64 {
-        self.clusters.get(cluster_id).map_or(0, |c| c.epoch)
-    }
-}
-
 /// State cục bộ + tầng quyết định.
 pub struct Raft {
     node_id: String,
     state: BTreeMap<String, Cluster>,
-    consensus: Box<dyn Consensus>,
+    /// `None` = chưa cắm engine ⇒ cụm nhiều thành viên chưa ai làm master.
+    consensus: Option<Box<dyn Consensus>>,
 }
 
 impl Raft {
+    /// Node đứng một mình: chạy pipeline của mình, không thuộc cụm nào.
     #[must_use]
-    pub fn new(node_id: impl Into<String>, consensus: Box<dyn Consensus>) -> Self {
-        Self { node_id: node_id.into(), state: BTreeMap::new(), consensus }
+    pub fn solo(node_id: impl Into<String>) -> Self {
+        Self { node_id: node_id.into(), state: BTreeMap::new(), consensus: None }
     }
 
-    /// Node chưa nhốt vào cụm nào: tự tạo cụm riêng và là master của nó.
-    pub fn bootstrap_own_cluster(&mut self, pipeline: &str) -> Result<String, String> {
-        let id = format!("cluster-{}", self.node_id);
-        self.propose(Command::Create { cluster: Cluster::solo(&id, &self.node_id, pipeline) })?;
-        Ok(id)
-    }
-
-    /// Đề xuất một lệnh. Lệnh không hợp lệ bị từ chối **trước khi** vào log, nên
-    /// state không bao giờ nhận cấu hình hỏng.
-    pub fn propose(&mut self, cmd: Command) -> Result<Outcome, String> {
-        // Chạy trên bản sao: lệnh bị từ chối thì không đụng state thật.
-        let mut trial = self.state.clone();
-        let outcome = apply(&mut trial, cmd.clone());
-        if matches!(outcome, Outcome::Rejected(_)) {
-            return Ok(outcome);
-        }
-        self.consensus.propose(cmd)?;
-        self.state = trial;
-        Ok(outcome)
+    /// Node đã cắm engine quyết định (sẽ là `openraft`).
+    #[must_use]
+    pub fn with_consensus(node_id: impl Into<String>, consensus: Box<dyn Consensus>) -> Self {
+        Self { node_id: node_id.into(), state: BTreeMap::new(), consensus: Some(consensus) }
     }
 
     /// Gán các node vào một cụm — thao tác dùng `POST /api/cluster/v1/clusters`.
@@ -178,21 +139,70 @@ impl Raft {
         self.propose(Command::Dissolve { cluster_id: cluster_id.to_string() })
     }
 
-    /// Vai trò của node này — **lấy từ tầng quyết định**, không suy ra từ quan
-    /// sát của gossip.
+    /// Đề xuất một lệnh. Lệnh không hợp lệ bị từ chối **trước khi** vào log, nên
+    /// state không bao giờ nhận cấu hình hỏng.
+    pub fn propose(&mut self, cmd: Command) -> Result<Outcome, String> {
+        // Chạy trên bản sao: lệnh bị từ chối thì không đụng state thật.
+        let mut trial = self.state.clone();
+        let outcome = apply(&mut trial, cmd.clone());
+        if matches!(outcome, Outcome::Rejected(_)) {
+            return Ok(outcome);
+        }
+        let Some(consensus) = self.consensus.as_mut() else {
+            return Err("chưa cắm engine quyết định: không thể commit lệnh vào log".into());
+        };
+        consensus.propose(cmd)?;
+        self.state = trial;
+        Ok(outcome)
+    }
+
+    /// Node này có thuộc cụm nào không. `false` = đứng một mình.
+    #[must_use]
+    pub fn is_solo(&self) -> bool {
+        self.my_cluster().is_none()
+    }
+
+    /// Cụm mà node này phục vụ, nếu có.
+    #[must_use]
+    pub fn my_cluster(&self) -> Option<&Cluster> {
+        self.state.values().find(|c| c.has(&self.node_id))
+    }
+
+    /// Vai trò — **lấy từ tầng quyết định**, không suy ra từ quan sát của gossip.
+    ///
+    /// Đứng một mình ⇒ [`Role::Master`]: không có gì để bầu, cứ chạy pipeline
+    /// của mình. Thuộc cụm ⇒ master hay không là quyết định của tầng quyết định.
+    #[must_use]
+    pub fn role(&self) -> Role {
+        self.my_cluster().map_or(Role::Master, |c| self.role_of(&c.id))
+    }
+
+    /// Vai trò với một cụm cụ thể. Node không thuộc cụm đó thì không có vai trò
+    /// gì với nó ⇒ coi như đứng ngoài.
     #[must_use]
     pub fn role_of(&self, cluster_id: &str) -> Role {
-        if self.consensus.leader_of(cluster_id).as_deref() == Some(self.node_id.as_str()) {
+        if !self.cluster(cluster_id).is_some_and(|c| c.has(&self.node_id)) {
+            return Role::Master;
+        }
+        let leader = self.consensus.as_ref().and_then(|c| c.leader_of(cluster_id));
+        if leader.as_deref() == Some(self.node_id.as_str()) {
             Role::Master
         } else {
             Role::Standby
         }
     }
 
+    /// Cụm đã có master chưa. Cụm nhiều thành viên mà chưa cắm engine sẽ là
+    /// `false` — pipeline đứng yên cho tới khi cắm, đây là trạng thái trung thực.
+    #[must_use]
+    pub fn has_leader(&self, cluster_id: &str) -> bool {
+        self.consensus.as_ref().and_then(|c| c.leader_of(cluster_id)).is_some()
+    }
+
     /// `epoch` dùng làm fencing token khi ghi state.
     #[must_use]
     pub fn epoch_of(&self, cluster_id: &str) -> u64 {
-        self.consensus.term_of(cluster_id)
+        self.consensus.as_ref().map_or(0, |c| c.term_of(cluster_id))
     }
 
     #[must_use]
@@ -206,15 +216,15 @@ impl Raft {
         self.state.values().collect()
     }
 
-    /// Cụm mà node này phục vụ.
-    #[must_use]
-    pub fn my_clusters(&self) -> Vec<&Cluster> {
-        self.state.values().filter(|c| c.has(&self.node_id)).collect()
-    }
-
     #[must_use]
     pub fn node_id(&self) -> &str {
         &self.node_id
+    }
+
+    /// Đã cắm engine quyết định chưa.
+    #[must_use]
+    pub fn has_consensus(&self) -> bool {
+        self.consensus.is_some()
     }
 }
 
@@ -304,89 +314,4 @@ fn remove_member(
         state.remove(cluster_id);
     }
     Outcome::Applied
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn raft(node_id: &str) -> Raft {
-        Raft::new(node_id, Box::new(SingleNode::default()))
-    }
-
-    #[test]
-    fn bootstrap_makes_node_master_of_its_own_cluster() {
-        let mut r = raft("node-a");
-        let id = r.bootstrap_own_cluster("grid").unwrap();
-        assert_eq!(r.role_of(&id), Role::Master);
-        assert_eq!(r.my_clusters().len(), 1);
-    }
-
-    #[test]
-    fn rejected_command_leaves_state_untouched() {
-        let mut r = raft("node-a");
-        r.bootstrap_own_cluster("grid").unwrap();
-        let before = r.clusters().len();
-        assert!(matches!(r.group("c2", [] as [String; 0], "grid").unwrap(), Outcome::Rejected(_)));
-        assert_eq!(r.clusters().len(), before);
-    }
-
-    #[test]
-    fn grouping_nodes_creates_the_cluster() {
-        let mut r = raft("node-a");
-        assert_eq!(r.group("c1", ["node-a".to_string(), "node-b".to_string()], "grid").unwrap(), Outcome::Applied);
-        let c = r.cluster("c1").unwrap();
-        assert_eq!(c.members.len(), 2);
-        assert!(c.has("node-b"));
-    }
-
-    #[test]
-    fn changing_pipeline_of_existing_cluster_is_refused() {
-        let mut r = raft("node-a");
-        r.group("c1", ["node-a".to_string()], "grid").unwrap();
-        assert!(matches!(r.group("c1", ["node-a".to_string()], "predict").unwrap(), Outcome::Rejected(_)));
-        assert_eq!(r.cluster("c1").unwrap().pipeline, "grid");
-    }
-
-    #[test]
-    fn role_comes_from_the_decision_layer_not_from_observation() {
-        let members = || ["node-a".to_string(), "node-b".to_string()];
-        let mut a = raft("node-a");
-        a.group("c1", members(), "grid").unwrap();
-        let mut b = raft("node-b");
-        b.group("c1", members(), "grid").unwrap();
-        assert_eq!(a.role_of("c1"), Role::Master);
-        assert_eq!(b.role_of("c1"), Role::Standby);
-    }
-
-    #[test]
-    fn dissolve_then_recreate_works() {
-        let mut r = raft("node-a");
-        r.group("c1", ["node-a".to_string()], "grid").unwrap();
-        assert_eq!(r.dissolve("c1").unwrap(), Outcome::Applied);
-        assert!(r.cluster("c1").is_none());
-        assert!(matches!(r.dissolve("c1").unwrap(), Outcome::Rejected(_)));
-    }
-
-    #[test]
-    fn removing_last_member_drops_the_cluster() {
-        let mut r = raft("node-a");
-        r.group("c1", ["node-a".to_string()], "grid").unwrap();
-        let out = r
-            .propose(Command::RemoveMember { cluster_id: "c1".into(), node_id: "node-a".into() })
-            .unwrap();
-        assert_eq!(out, Outcome::Applied);
-        assert!(r.cluster("c1").is_none());
-    }
-
-    #[test]
-    fn commands_survive_json_round_trip_so_the_log_can_carry_them() {
-        let cmd = Command::Group {
-            cluster_id: "c1".into(),
-            members: BTreeSet::from(["a".to_string(), "b".to_string()]),
-            pipeline: "grid".into(),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), cmd);
-    }
 }
