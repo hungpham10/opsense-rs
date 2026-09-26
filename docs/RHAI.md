@@ -57,6 +57,10 @@ Mọi node sinh dữ liệu (`http_source`, `rhai_transform`,
 // station_query(station, from_ts, to_ts) -> array observation-map
 let obs = station_query("tsdb", now_secs() - 3600, now_secs());
 
+// Lọc server-side (3.3) — LUÔN lọc khi trạm chứa nhiều dữ liệu
+let orders = station_query("grid", from, now, "order");
+let cursor = station_query("grid", from, now, "summary", "trading_step");
+
 // station_candles(station, from_ts, to_ts, resolution) -> array candle map
 // map dạng #{ t, o, h, l, c, v }; resolution lọc theo label
 let candles = station_candles("grid", from, to, "60");
@@ -70,6 +74,56 @@ let candles = station_candles("grid", from, to, "60");
   trading**, và window âm được clamp về 0 (không tràn thành cửa sổ khổng lồ).
 - Muốn query được thì node sinh dữ liệu phải publish trạm: bật `station = true`,
   hoặc thêm `timeseries_station_transform` đứng sau node.
+
+### 2.1 Script được nạp lại từ đĩa mỗi lần eval
+
+`script_path` được đọc lại **mọi lần** script chạy, nên sửa file `.rhai` không
+cần restart — node nhận script mới ở message kế tiếp.
+
+Hệ quả phải biết: **đổi bề mặt API (số tham số của một hàm) sẽ làm hỏng pipeline
+đang chạy**, vì engine đã đăng ký binding cũ nhưng script mới gọi arity mới:
+
+```text
+WARN rhai grid skipped batch at ts …: script error:
+  Function not found: station_query (&str, i64, i64, &str) (line 107, position 14)
+```
+
+Script mới lỗi ⇒ cả batch bị bỏ (`transform.rs`) ⇒ node im bặt, nhưng tiến trình
+vẫn sống. Khi thấy lỗi này thì **restart `opsense serve`**, đừng chỉ sửa script.
+
+### 2.2 Lọc server-side là bắt buộc, không phải tuỳ chọn
+
+`max_map_size` của Rhai là trần **engine-wide** (100.000, xem `runtime.rs`), tính
+trên mọi map sống cùng lúc. Một observation là một map lồng `labels` map, nên đọc
+trạm chứa nhiều tick sẽ vượt trần và **cả batch script chết**:
+
+```text
+script error: Size of object map too large
+```
+
+Đo thật trên `strategies/binance`: 26.680 observation trong 1 giờ là đủ vỡ. Vì vậy
+khi chỉ cần một loại dữ liệu (lệnh, cursor, cảnh báo) thì **luôn truyền bộ lọc**,
+đừng lọc tay trong script — lọc tay thì cái map vẫn đã được dựng.
+
+### 2.3 Ghi: `station_write` + `params.write_stations`
+
+Mặc định script vẫn ghi **ngầm** vào trạm của chính nó (cái mà `fn process` trả
+về). Muốn tự quyết định gì gì đi đâu:
+
+```rhai
+station_write("order-history", obs);   // phải khai trước trong params
+out += obs;                            // forward xuống sink
+```
+
+```toml
+[pipeline.components.params]
+write_stations = ["order-history"]          # trạm được phép ghi (ngoài own)
+implicit_station_write = false              # tắt ghi ngầm (mặc định true)
+```
+
+Ghi vào trạm **không** khai trong `write_stations` sẽ **báo lỗi** chứ không im
+lặng bỏ qua — ghi nhầm chỗ là lỗi cấu hình, im lặng sẽ biến nó thành "dữ liệu mất
+không rõ ở đâu".
 
 > Hàm `ts_query`/`ts_mean(station, stage, metric, from, to)` của bản tài liệu cũ
 > **đã bị gỡ** khi bỏ tầng store chung. Thay bằng `station_query` + lọc `metric_id`

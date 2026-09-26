@@ -76,7 +76,12 @@ fn process(observations) {
 //
 // Station là state duy nhất: `portfolio_feed` tự tái dựng session từ các
 // observation `signal = "order"` + cursor `labels.kind = "trading_step"` trong
-// own station, nên script không giữ gì cả và restart không mất lệnh.
+// own station, nên script không giữ gì cả.
+//
+// **"Restart không mất lệnh" chỉ đúng khi backend có persist.** Config này
+// để `backend = "memory"` (v1 runtime-only) ⇒ state chỉ nằm trong RAM process,
+// restart là mất sạch lệnh. Muốn restart-safe thì đổi sang `parquet`/`sqlite`.
+// Đừng đọc comment cũ "restart không mất lệnh" là đúng với mọi backend.
 
 fn trade(hist_src, own, symbol, resolution, hw) {
     let now = now_secs();

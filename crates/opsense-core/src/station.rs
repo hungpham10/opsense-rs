@@ -17,6 +17,15 @@ use opsense_mlib::storage::LakehouseStorage;
 #[cfg(feature = "sqlite")]
 use opsense_mlib::storage::SqliteStorage;
 use opsense_mlib::storage::{CategoryStorage, PatternStorage, TimeseriesStorage};
+
+/// Trần số block một lần [`TimeseriesStation::query_recent`] duyệt.
+///
+/// `Query.queryTimeseries` mặc định lấy cửa sổ 30 ngày
+/// (`MAX_QUERY_WINDOW_SECS`); với `block_secs` nhỏ (5s) đó là ~518.400 block, mỗi
+/// block một lần tra cache + một lần đọc storage. 20.000 block ≈ 27 giờ ở block
+/// 5s, ~69 ngày ở block 300s — đủ cho mọi reader thực tế mà không để một query
+/// quét nửa triệu block.
+const MAX_BLOCKS_PER_QUERY: i64 = 20_000;
 use opsense_model::events::Observation;
 
 use crate::config::StorageConfig;
@@ -435,8 +444,33 @@ impl TimeseriesStation {
     /// script-facing `station_query` (`candles.rs`) và API `Query.queryTimeseries`
     /// mà `opsense query` / `opsense orders` / MCP `opsense_query_timeseries` dùng.
     pub async fn query_recent(&self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
-        let start_block = self.get_block_id(from_ts);
         let end_block = self.get_block_id(to_ts);
+        let mut start_block = self.get_block_id(from_ts);
+
+        // Chặn trần số block một query được duyệt. Không có trần này, cửa sổ
+        // mặc định của `Query.queryTimeseries` (30 ngày) với block nhỏ là một
+        // vòng lặp khổng lồ: `block_secs = 5` ⇒ ~518.400 block, mỗi block một
+        // lần `caches.get` (miss) + `load_cold_block` ⇒ tới storage. Đo trên
+        // `strategies/binance` với `cache_block_seconds = 5` đó là hàng trăm
+        // nghìn lượt đọc cho **một** lệnh query.
+        //
+        // Cắt cửa sổ về `MAX_BLOCKS_PER_QUERY` block gần nhất thay vì quét hết:
+        // dữ liệu "gần nhất" mới là thứ mọi reader thực sự hỏi, và việc bỏ
+        // phần cũ được **log** chứ không im lặng.
+        if end_block - start_block + 1 > MAX_BLOCKS_PER_QUERY {
+            let dropped = end_block - start_block + 1 - MAX_BLOCKS_PER_QUERY;
+            start_block = end_block - MAX_BLOCKS_PER_QUERY + 1;
+            tracing::warn!(
+                from_ts,
+                to_ts,
+                dropped_blocks = dropped,
+                block_duration = self.block_duration,
+                "query_recent: cửa sổ quá rộng so với số block — chỉ duyệt \
+                 {} block gần nhất, bỏ {dropped} block cũ",
+                MAX_BLOCKS_PER_QUERY
+            );
+        }
+
         let mut result = Vec::new();
 
         for block_id in start_block..=end_block {
@@ -765,6 +799,36 @@ mod tests {
 
     fn obs(ts: i64, value: f64) -> Observation {
         Observation::new(ts, "cpu".into(), TelemetryKind::Metric, Signal::Raw, value)
+    }
+
+    /// Cửa sổ rộng hơn `MAX_BLOCKS_PER_QUERY` phải bị cắt về các block gần
+    /// nhất — nếu không, cửa sổ mặc định 30 ngày với `block_secs = 5` là
+    /// ~518.400 lần `caches.get` + `load_cold_block` cho **một** lệnh query.
+    #[tokio::test]
+    async fn query_recent_caps_blocks_visited() {
+        let st = TimeseriesStation::new(32, Some(5)); // block 5s — nhỏ nhất thực tế
+        let batch = vec![obs(1_000_000, 1.0)];
+        st.update_range(&batch, 1_000_000, 1_000_000, 1_000_000);
+
+        // 30 ngày ở block 5s = 518.400 block, vượt trần.
+        let from = 1_000_000 - 30 * 24 * 3600;
+        let to = 1_000_000;
+        let span = (to - from) / 5;
+        assert!(
+            span > MAX_BLOCKS_PER_QUERY,
+            "test chỉ có nghĩa khi cửa sổ vượt trần (span={span})"
+        );
+
+        // Không panic, không treo, vẫn trả dữ liệu ở phần được giữ.
+        let got = st.query_recent(from, to).await.unwrap();
+        assert!(
+            got.iter().any(|o| o.ts == 1_000_000),
+            "phải giữ được block gần nhất: {got:?}"
+        );
+
+        // Cửa sổ vừa đủ thì không bị cắt.
+        let narrow = st.query_recent(1_000_000 - 600, 1_000_000).await.unwrap();
+        assert_eq!(narrow.len(), 1);
     }
 
     /// `query_range` trả None khi bất kỳ block nào trong cửa sổ chưa cover
