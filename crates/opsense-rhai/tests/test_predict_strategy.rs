@@ -99,7 +99,7 @@ fn find<'a>(items: &'a [Value], id: &str) -> &'a Value {
     items
         .iter()
         .find(|v| v["metric_id"] == id)
-        .expect(&format!("output phải có metric {id}"))
+        .unwrap_or_else(|| panic!("output phải có metric {id}"))
 }
 
 /// Clock ping (trigger ""/None) → chỉ có predictions, không có check.
@@ -111,6 +111,7 @@ async fn tick_recompute(ctx: &Arc<Context>) -> Vec<Value> {
         attrs(),
         None,
         Some(ctx.clone()),
+        std::sync::Arc::new(Vec::new()),
     )
     .await
     .expect("script chạy (recompute)")
@@ -125,6 +126,7 @@ async fn tick_check(ctx: &Arc<Context>, input: Value) -> Vec<Value> {
         attrs(),
         Some("live-feed".into()),
         Some(ctx.clone()),
+        std::sync::Arc::new(Vec::new()),
     )
     .await
     .expect("script chạy (check)")

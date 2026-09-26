@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use opsense_core::{
-    Context, Observation, Station, TimeseriesStation, candles_from_observations,
+    Context, Observation, Station, TimeseriesStation,
 };
 use opsense_model::events::{Signal, TelemetryKind};
 use opsense_model::secret::Secret;
@@ -61,13 +61,6 @@ fn candle_rows(ts: i64, o: f64, h: f64, l: f64, c: f64, v: f64) -> Vec<Observati
         .enumerate()
         .map(|(i, field)| candle_field_obs(ts, field, [o, h, l, c, v][i]))
         .collect()
-}
-
-fn field_value(rows: &[Observation], field: &str) -> f64 {
-    rows.iter()
-        .find(|o| o.labels.get("field").map(String::as_str) == Some(field))
-        .unwrap_or_else(|| panic!("output phải có field `{field}`"))
-        .value
 }
 
 fn to_observations(items: &[Value]) -> Vec<Observation> {
@@ -131,6 +124,7 @@ async fn run_with(
         attrs(),
         trigger,
         Some(ctx.clone()),
+        std::sync::Arc::new(Vec::new()),
     )
     .await
     .expect("script chạy")
@@ -155,80 +149,38 @@ fn trading_params() -> BTreeMap<String, Value> {
     m
 }
 
+// ── gom tick thành nến KHÔNG còn ở script ──────────────────────────────────
+//
+// `tick_accumulates_candle_across_ticks` và `tick_skips_observation_without_ts`
+// đã xoá: việc gom nến chuyển sang node `tick_2_candle`
+// (`opsense-components/.../converters/tick2candle.rs`), nên script trả `[]` cho
+// nhánh trigger `tick`.
+//
+// Vì sao chuyển (không phải vì thừa):
+// - Script **stateless**: bản cũ phải `station_query` station của chính node rồi
+//   gộp lại từ đầu mỗi batch, nên nến phụ thuộc thứ tự batch; batch thiếu thì
+//   nến sai.
+// - Nến **đã đóng** là dữ liệu cuối: bản cũ ghi cả nến đang mở và để kernel tự
+//   lo bằng `last_closed` trong script. Nay chỉ ghi nến đóng, nên invariant
+//   "chỉ nến đóng mới tới kernel" nằm ở đúng một chỗ.
+// - Lỗi nến là lỗi dữ liệu, không phải lỗi chiến lược — nên log ở component.
+//
+// Phủ ở đâu: `Tick2Candle` có 9 unit test cho OHLC/biên/bucket/convention, và
+// `e2e_binance_config::full_pipeline_ticks_and_snapshot` chạy pipeline thật
+// (websocket → json_2_json → tick_2_candle) rồi đòi station `tick-candle` có
+// nến **và** station `grid` có snapshot. Test dưới đây chỉ còn phần script:
+// đọc nến đã gom sẵn từ `live_source`.
+//
+// Nhánh `tick` giờ phải trả rỗng — script không được ghi đè lên nến của node.
 #[tokio::test]
-async fn tick_accumulates_candle_across_ticks() {
-    let ctx = make_ctx().await;
-    let now = now();
-    let bucket = now / 60 * 60;
-    let bucket_ms = bucket * 1000;
-
-    // Tick 1 (100.0) → candle mới: o=h=l=c=100, v=1.
-    let out1 = run(&ctx, Some("tick".into()), tick_json(bucket_ms, 100.0)).await;
-    assert_eq!(out1.len(), 5, "1 tick → 5 obs OHLCV: {out1:?}");
-    let rows1 = to_observations(&out1);
-    assert!(rows1.iter().all(|o| o.ts == bucket), "ts = bucket giây");
-    assert!(rows1.iter().all(|o| o.metric_id == SYMBOL));
-    assert!(
-        rows1
-            .iter()
-            .all(|o| o.labels.get("resolution").map(String::as_str) == Some(RES)),
-        "mọi obs mang labels.resolution"
-    );
-    assert_eq!(field_value(&rows1, "o"), 100.0);
-    assert_eq!(field_value(&rows1, "h"), 100.0);
-    assert_eq!(field_value(&rows1, "l"), 100.0);
-    assert_eq!(field_value(&rows1, "c"), 100.0);
-    assert_eq!(field_value(&rows1, "v"), 1.0);
-    write(&ctx, "grid", &rows1, now).await;
-
-    // Tick 2 (95.0) → đọc lại candle qua station: o giữ 100, l/c = 95, v=2.
-    let rows2 = to_observations(
-        &run(&ctx, Some("tick".into()), tick_json(bucket_ms, 95.0)).await,
-    );
-    write(&ctx, "grid", &rows2, now).await;
-    assert_eq!(field_value(&rows2, "o"), 100.0, "open giữ giá đầu bucket");
-    assert_eq!(field_value(&rows2, "h"), 100.0);
-    assert_eq!(field_value(&rows2, "l"), 95.0);
-    assert_eq!(field_value(&rows2, "c"), 95.0);
-    assert_eq!(field_value(&rows2, "v"), 2.0, "volume đếm số tick đã gộp");
-
-    // Tick 3 (105.0) → h=105, c=105, v=3 (state sống qua station).
-    let rows3 = to_observations(
-        &run(&ctx, Some("tick".into()), tick_json(bucket_ms, 105.0)).await,
-    );
-    assert_eq!(field_value(&rows3, "o"), 100.0);
-    assert_eq!(field_value(&rows3, "h"), 105.0, "high cập nhật từ state station");
-    assert_eq!(field_value(&rows3, "l"), 95.0);
-    assert_eq!(field_value(&rows3, "c"), 105.0);
-    assert_eq!(field_value(&rows3, "v"), 3.0);
-    write(&ctx, "grid", &rows3, now).await;
-
-    // Đọc lại station: 5 field cùng ts phải reconcile thành ĐÚNG 1 candle
-    // (không bị dedup theo ts nuốt mất field).
-    let mut all = rows1.clone();
-    all.extend(rows2.iter().cloned());
-    all.extend(rows3.iter().cloned());
-    let candles = candles_from_observations(&all, RES);
-    assert_eq!(candles.len(), 1, "3 tick cùng bucket → 1 candle: {candles:?}");
-    assert_eq!(candles[0].t, bucket);
-    assert_eq!((candles[0].o, candles[0].h, candles[0].l, candles[0].c), (100.0, 105.0, 95.0, 105.0));
-    assert_eq!(candles[0].v, 3.0, "volume = số tick gộp, bản mới nhất thắng");
-}
-
-#[tokio::test]
-async fn tick_skips_observation_without_ts() {
+async fn tick_branch_is_a_noop_now_that_a_component_builds_candles() {
     let ctx = make_ctx().await;
     let bucket = now() / 60 * 60;
-
-    // Batch có 1 obs thiếu `ts` (malformed) + 1 tick hợp lệ → chỉ tick sinh candle.
-    let input = json!([
-        { "metric_id": SYMBOL, "value": 1.0 },
-        { "ts": bucket * 1000, "metric_id": SYMBOL, "value": 42.0 }
-    ]);
-    let out = run(&ctx, Some("tick".into()), input).await;
-    assert_eq!(out.len(), 5, "chỉ 1 tick hợp lệ → 5 obs: {out:?}");
-    let rows = to_observations(&out);
-    assert_eq!(field_value(&rows, "c"), 42.0, "giá của tick hợp lệ");
+    let out = run(&ctx, Some("tick".into()), tick_json(bucket * 1000, 42.0)).await;
+    assert!(
+        out.is_empty(),
+        "script không tự gộp nến nữa — node `tick_2_candle` lo: {out:?}"
+    );
 }
 
 #[tokio::test]

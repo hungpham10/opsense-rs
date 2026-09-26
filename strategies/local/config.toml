@@ -13,11 +13,6 @@ block_secs = 5
 retention_secs = 300
 # parquet_compression = "zstd"
 
-[capacity]
-cpu_usage = 4.0
-mem_usage = 16.0
-disk_usage = 1.0
-
 [[pipeline.components]]
 type = "clock"
 id = "clock"

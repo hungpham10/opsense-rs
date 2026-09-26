@@ -375,7 +375,7 @@ impl Portfolio {
             handles.push(tokio::spawn(async move {
                 let mut session = Session::new();
                 match pf
-                    .backtest(
+                    .evaluate(
                         &mut session,
                         lookback,
                         from,
@@ -426,7 +426,7 @@ impl Portfolio {
                                 let mut session = Session::new();
 
                                 if let Ok((score, _)) = sgd_self
-                                    .backtest(
+                                    .evaluate(
                                         &mut session,
                                         lookback,
                                         eval_from,
@@ -449,14 +449,18 @@ impl Portfolio {
             .await)
     }
 
-    /// Backtest entry: warm cache (nếu bật) rồi chạy kernel
-    /// [`Self::evaluate`] với fetch đóng từ `self.loader` / block cache.
+    /// Backtest entry: warm cache (nếu bật), rồi **lặp** kernel
+    /// [`Self::forward`] — mỗi lượt một nến — cho tới hết cửa sổ `[from, to)`.
     ///
     /// Đây là đường backtest: có prefetch + LRU + calendar alignment, và mỗi
     /// trial SGD chạy trên `Session` riêng. Realtime thì gọi thẳng
-    /// [`Self::evaluate`] với fetch đóng từ station.
+    /// [`Self::forward`] — mỗi lần một nến — với fetch đóng từ station.
+    ///
+    /// # Panics
+    ///
+    /// Không có.
     #[allow(clippy::too_many_arguments)]
-    pub async fn backtest(
+    pub async fn evaluate(
         &self,
         session: &mut Session,
         lookback: u64,
@@ -469,51 +473,82 @@ impl Portfolio {
             self.prefetch_cache(lookback, from, to).await?;
         }
 
+        let resolution = self.config.resolution_for_test.clone();
+
+        // Con trỏ khởi tạo: `next_ts == 0` nghĩa là session chưa chạy. Chỉ khởi
+        // tạo một lần — nếu không, lần `evaluate` thứ hai (chạy tiếp) sẽ nhảy
+        // con trỏ về đầu và xử lý lại nến cũ.
+        if session.next_ts == 0 {
+            let step_ts = to_timestamp_secs(&resolution);
+            let first_valid = self
+                .calendar
+                .next(from.saturating_sub(step_ts), &resolution);
+            session.next_ts = if first_valid > from && first_valid < to {
+                first_valid
+            } else {
+                from
+            };
+        }
+
         let mut trade = self.loader_fetch(&self.config.resolution_for_test, "trade");
         let mut analysis = self.loader_fetch(&self.config.resolution_for_rebuild, "analysis");
 
-        self.evaluate(
-            session,
-            from,
-            to,
-            params,
-            &mut *trade,
-            &mut *analysis,
-            notify,
-        )
-        .await
+        // `forward` bảo đảm tiến `next_ts` mỗi lượt. Nhưng chốt an toàn: nếu
+        // con trỏ đứng yên thì thoát, tránh quay vô hạn khi calendar trả về
+        // cùng một mốc.
+        while session.next_ts < to {
+            let before = session.next_ts;
+            self.forward(session, params, &mut *trade, &mut *analysis, notify)
+                .await?;
+            if session.next_ts <= before {
+                tracing::warn!(
+                    ts = before,
+                    "kernel không tiến con trỏ — dừng vòng lặp để tránh quay vô hạn"
+                );
+                break;
+            }
+        }
+
+        let report = Self::convert_order_history_into_report(&session.history);
+        Ok((self.score.score(&report), report))
     }
 
-    /// Kernel: đưa nến vào `session`, mỗi nến một bước (check exit → rebuild
-    /// nếu tới hạn → evaluate entry). Không tự I/O: nến đến từ `fetch`, dữ
-    /// liệu phân tích đến từ `analysis_fetch` — kernel không biết dữ liệu nằm
-    /// ở loader/cache hay station.
+    /// Kernel: tiến **đúng một nến** trên `session`.
     ///
-    /// Có thể gọi nhiều lần trên cùng `Session` để **chạy tiếp**: `session.review_at`
-    /// / `candle_seq` / `orders` / `plan` đều mang qua lời gọi, và
-    /// `session.candle_ts` chặn xử lý lại nến đã thấy.
+    /// Một lời gọi = một bước: nến tới hạn rebuild thì rebuild, rồi check exit
+    /// → đánh giá entry cho nến đó. **Không có vòng lặp** — vòng lặp là việc
+    /// của [`Self::evaluate`]. Vì vậy hàm này tích hợp được vào luồng stream:
+    /// mỗi lần driver gom xong một nến đóng thì gọi một lần, nhận về `false`
+    /// nếu chưa có nến mới nào để xử lý.
+    ///
+    /// Con trỏ thời gian nằm trong `Session` ([`Session::next_ts`]), nên caller
+    /// không cần tự biết đang ở nến nào — chỉ cần đóng `fetch` trả về nến kế
+    /// tiếp. Tham số sizing (`kelly_fraction`, `base_capital`) tra mỗi nến từ
+    /// `params`, `settlement` resolve từ [`PortfolioConfig`].
     ///
     /// `fetch` và `analysis_fetch` tách riêng vì backtest dùng 2 resolution
     /// (trade = `resolution_for_test`, rebuild = `resolution_for_rebuild`).
+    ///
+    /// Trả về: `true` = đã xử lý một nến, `false` = chưa có nến mới (con trỏ
+    /// đã được đẩy qua calendar để lần sau không kẹt ở cùng một mốc).
+    ///
+    /// # Panics
+    ///
+    /// Không có. Lỗi rebuild trả `Err` nhưng **vẫn tiến `review_at`** và giữ
+    /// plan cũ, nên lần sau không thử lại ở mọi nến.
     #[allow(clippy::too_many_arguments)]
-    pub async fn evaluate(
+    pub async fn forward(
         &self,
         session: &mut Session,
-        from: u64,
-        to: u64,
         params: ParamFn<'_>,
         fetch: FetchFn<'_>,
         analysis_fetch: FetchFn<'_>,
         notify: NotifyFn<'_>,
-    ) -> Result<(f64, Report), Error> {
+    ) -> Result<bool, Error> {
         const KELLY_FRACTION: usize = 0;
         const BASE_CAPITAL: usize = 1;
 
         let resolution = self.config.resolution_for_test.clone();
-        let kelly_fraction = params(KELLY_FRACTION);
-        let base_capital = params(BASE_CAPITAL);
-        let fee_rate = self.fee.rate();
-
         // T+N: `settlement_candles == 0` → theo thị trường (StockCalendar → T+3,
         // Crypto/Forex → T+0); giá trị >0 → ép T+N cố định.
         let settlement = if self.config.settlement_candles > 0 {
@@ -521,169 +556,175 @@ impl Portfolio {
         } else {
             self.calendar.settlement_candles()
         };
+        // Tham số sizing tra **mỗi nến**, không cache trong `Session`: SGD đổi
+        // `params` giữa chừng, cache lại sẽ dùng giá trị cũ.
+        let kelly_fraction = params(KELLY_FRACTION);
+        let base_capital = params(BASE_CAPITAL);
+        let current = session.next_ts;
 
-        // Advance to first valid trading time (tránh rebuild ở ngoài giờ giao dịch,
-        // khiến strategy fetch data không có nến → ATR/analysis fail).
-        let mut current = {
-            let step_ts = to_timestamp_secs(&resolution);
-            let first_valid = self
-                .calendar
-                .next(from.saturating_sub(step_ts), &resolution);
-            if first_valid > from && first_valid < to {
-                first_valid
-            } else {
-                from
-            }
-        };
-
-        while current < to {
-            if session.review_at <= current {
-                #[cfg(debug_assertions)]
-                let t_rebuild = std::time::Instant::now();
-
-                match self
-                    .rebuild_strategy(
-                        current,
-                        session.plan.as_slice(),
-                        &mut *analysis_fetch,
-                        params,
-                    )
-                    .await
-                {
-                    Ok((review, plan)) => {
-                        session.review_at = review;
-                        session.plan = plan;
-
-                        notify(OrderEvent::Rebuilt {
-                            ts: current,
-                            grids: session
-                                .plan
-                                .iter()
-                                .map(|g| GridSnapshot {
-                                    levels: g.levels().to_vec(),
-                                })
-                                .collect(),
-                        })
-                        .await?;
-
-                        #[cfg(debug_assertions)]
-                        println!(
-                            "  [debug] evaluate: rebuild at {}  next review={}  took {:.0}ms",
-                            current,
-                            session.review_at,
-                            t_rebuild.elapsed().as_secs_f64() * 1000.0,
-                        );
-                    }
-                    Err(error) => {
-                        // Rebuild fail (chưa đủ data, market closed, …) → giữ plan
-                        // cũ và **tiến `review_at`**, nếu không realtime sẽ thử
-                        // lại ở mọi nến. Session vẫn nhất quán: chỉ mốc thời gian
-                        // đổi, không mất lệnh/plan.
-                        session.review_at = self.strategy.next(current).await;
-                        return Err(error);
-                    }
-                }
-
-                session.candle_id = 0;
-            }
-
-            let next = std::cmp::min(session.review_at, to);
+        // ── Nến tới hạn rebuild? ───────────────────────────────────────
+        if session.review_at <= current {
             #[cfg(debug_assertions)]
-            let t_fetch = std::time::Instant::now();
-            let candles = fetch(current, next).await?;
-            #[cfg(debug_assertions)]
-            if t_fetch.elapsed().as_secs_f64() * 1000.0 > 50.0 {
-                println!(
-                    "  [debug] evaluate: fetch [{}, {})  got {} candles  took {:.0}ms",
+            let t_rebuild = std::time::Instant::now();
+
+            match self
+                .rebuild_strategy(
                     current,
-                    next,
-                    candles.len(),
-                    t_fetch.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
+                    session.plan.as_slice(),
+                    &mut *analysis_fetch,
+                    params,
+                )
+                .await
+            {
+                Ok((review, plan)) => {
+                    session.review_at = review;
+                    session.plan = plan;
 
-            for candle in &candles {
-                if candle.t <= session.candle_ts {
-                    continue;
-                }
-                session.candle_seq += 1;
-                let current_seq = session.candle_seq;
-
-                let prev_hist_len = session.history.len();
-
-                // `plan`/`orders` đưa ra local rồi ghi lại cuối nến — giữ nguyên
-                // cách `forward` cũ làm, tránh giữ borrow `session` qua `.await`.
-                let mut plan = std::mem::take(&mut session.plan);
-                let mut orders = std::mem::take(&mut session.orders);
-
-                orders.retain_mut(|order| {
-                    if let Some((exit_price, pnl_pct)) =
-                        Self::check_order_exit(order, candle, fee_rate, current_seq)
-                    {
-                        order.exit_price = Some(exit_price);
-                        order.pnl_pct = Some(pnl_pct);
-
-                        if let Some(grid) = plan.get_mut(order.grid_index) {
-                            grid.record_trade_outcome(
-                                order.level_index,
-                                order.dtype == OrderType::Long,
-                                pnl_pct,
-                            );
-                        }
-
-                        session.history.push(*order);
-                        false
-                    } else {
-                        true
-                    }
-                });
-
-                // Notify về các lệnh vừa đóng trong nến này
-                for order in &session.history[prev_hist_len..] {
-                    notify(OrderEvent::Closed {
-                        ts: candle.t.max(0) as u64,
-                        order: *order,
+                    notify(OrderEvent::Rebuilt {
+                        ts: current,
+                        grids: session
+                            .plan
+                            .iter()
+                            .map(|g| GridSnapshot {
+                                levels: g.levels().to_vec(),
+                            })
+                            .collect(),
                     })
                     .await?;
+
+                    #[cfg(debug_assertions)]
+                    println!(
+                        "  [debug] forward: rebuild at {}  next review={}  took {:.0}ms",
+                        current,
+                        session.review_at,
+                        t_rebuild.elapsed().as_secs_f64() * 1000.0,
+                    );
+                    // Log thật (không `debug_assertions`): đây là thứ duy
+                    // nhất phân biệt "kernel không dựng plan" với "plan có
+                    // nhưng giá chưa chạm level" khi chạy bản release. Trước
+                    // đây dòng này chỉ có ở debug build nên production im
+                    // lặng, và phải đoán.
+                    tracing::debug!(
+                        ts = current,
+                        next_review = session.review_at,
+                        grids = session.plan.len(),
+                        "forward: plan rebuilt"
+                    );
                 }
-
-                // Ngưỡng mở khóa = thứ tự nến hiện tại + N (T+N)
-                let unlock_seq = current_seq + settlement;
-                let events = Self::evaluate_grid_entries(
-                    session.candle_id,
-                    candle,
-                    &plan,
-                    &mut orders,
-                    fee_rate,
-                    kelly_fraction,
-                    base_capital,
-                    unlock_seq,
-                );
-
-                // Notify về lệnh vừa đặt / bị từ chối
-                for event in events {
-                    notify(event).await?;
+                Err(error) => {
+                    // Rebuild fail (chưa đủ data, market closed, …) → giữ plan
+                    // cũ và **tiến `review_at`**, nếu không realtime sẽ thử
+                    // lại ở mọi nến. Session vẫn nhất quán: chỉ mốc thời gian
+                    // đổi, không mất lệnh/plan.
+                    session.review_at = self.strategy.next(current).await;
+                    return Err(error);
                 }
-
-                session.plan = plan;
-                session.orders = orders;
-                session.candle_id += 1;
             }
 
-            // ── Advance simulation time ───────────────────────────────
-            current = if !candles.is_empty() {
-                next
-            } else {
-                self.calendar.next(current, &resolution)
-            };
-
-            if !candles.is_empty() {
-                session.candle_ts = candles.last().map_or(session.candle_ts, |c| c.t);
-            }
+            session.candle_id = 0;
         }
 
-        let report = Self::convert_order_history_into_report(&session.history);
-        Ok((self.score.score(&report), report))
+        // ── Lấy nến kế tiếp ─────────────────────────────────────────────
+        // `min(review_at, ...)`: không lấy quá mốc rebuild, vì nến đầu tiên sau
+        // mốc đó phải rebuild với plan mới, không phải plan cũ.
+        let next = session.review_at.max(current);
+        let candles = fetch(current, next).await?;
+
+        let Some(candle) = candles
+            .iter()
+            .find(|c| (c.t as u64) > session.candle_ts.max(0) as u64)
+        else {
+            // Chưa có nến mới trong cửa sổ này. Đẩy con trỏ theo calendar để
+            // lần gọi sau không hỏi lại đúng mốc cũ.
+            session.next_ts = self.calendar.next(current, &resolution);
+            tracing::debug!(
+                ts = current,
+                next_ts = session.next_ts,
+                "forward: chưa có nến mới, đẩy con trỏ theo calendar"
+            );
+            return Ok(false);
+        };
+        let candle = *candle;
+
+        session.candle_seq += 1;
+        let current_seq = session.candle_seq;
+        let prev_hist_len = session.history.len();
+
+        // `plan`/`orders` đưa ra local rồi ghi lại cuối nến — tránh giữ borrow
+        // `session` qua `.await`.
+        let mut plan = std::mem::take(&mut session.plan);
+        let mut orders = std::mem::take(&mut session.orders);
+
+        orders.retain_mut(|order| {
+            if let Some((exit_price, pnl_pct)) =
+                Self::check_order_exit(order, &candle, self.fee.as_ref(), current_seq)
+            {
+                order.exit_price = Some(exit_price);
+                order.pnl_pct = Some(pnl_pct);
+
+                if let Some(grid) = plan.get_mut(order.grid_index) {
+                    grid.record_trade_outcome(
+                        order.level_index,
+                        order.dtype == OrderType::Long,
+                        pnl_pct,
+                    );
+                }
+
+                session.history.push(*order);
+                false
+            } else {
+                true
+            }
+        });
+
+        // Notify về các lệnh vừa đóng trong nến này
+        for order in &session.history[prev_hist_len..] {
+            notify(OrderEvent::Closed {
+                ts: candle.t.max(0) as u64,
+                order: *order,
+            })
+            .await?;
+        }
+
+        // Ngưỡng mở khóa = thứ tự nến hiện tại + N (T+N)
+        let unlock_seq = current_seq + settlement;
+        let events = Self::open_orders(
+            session.candle_id,
+            &candle,
+            &plan,
+            &mut orders,
+            self.fee.as_ref(),
+            kelly_fraction,
+            base_capital,
+            unlock_seq,
+        );
+
+        // Notify về lệnh vừa đặt / bị từ chối
+        for event in events {
+            notify(event).await?;
+        }
+
+        session.plan = plan;
+        session.orders = orders;
+        session.candle_id += 1;
+        session.candle_ts = candle.t;
+        // Nhảy con trỏ theo **ranh giới nến** qua calendar, KHÔNG `t + 1`.
+        //
+        // Lý do: `candle.t + 1` làm mốc rebuild trượt khỏi ranh giới review.
+        // Với `review_interval_secs = 900` và nến 1m, nến cuối trước mốc review
+        // nằm ở `review_at − 60`; `+ 1` ⇒ rebuild xảy ra ở `review_at + 1` thay
+        // vì `review_at`, mà nến tại đúng `review_at` thì nằm ngoài khoảng
+        // `[current, review_at)` bán mở ⇒ **bị bỏ sót, không bao giờ được xử lý**.
+        // Đo được: 20 nến chỉ advance 19, và chỉ có 3 lần rebuild thay vì 2.
+        session.next_ts = self.calendar.next(candle.t.max(0) as u64, &resolution);
+
+        tracing::debug!(
+            ts = candle.t,
+            candle_seq = session.candle_seq,
+            candle_id = session.candle_id,
+            "forward: đã tiến 1 nến"
+        );
+        Ok(true)
     }
 
     /// Fetch closure đóng quanh `self.loader` + block cache + calendar: kernel
@@ -815,54 +856,70 @@ impl Portfolio {
     /// `fetch` do kernel truyền vào — strategy tự fetch range lookback nó cần,
     /// không cần biết nguồn dữ liệu.
     #[inline]
-    pub(crate) async fn rebuild_strategy(
+    async fn rebuild_strategy(
         &self,
         current: u64,
         plan: &[TradingGrid],
         fetch: FetchFn<'_>,
         params: ParamFn<'_>,
     ) -> Result<(u64, Vec<TradingGrid>), Error> {
-        #[cfg(debug_assertions)]
         let t = std::time::Instant::now();
         let review = self.strategy.next(current).await;
 
         let plan = self.strategy.rebuild(current, plan, fetch, params).await?;
 
-        #[cfg(debug_assertions)]
-        if t.elapsed().as_secs_f64() * 1000.0 > 1000.0 {
-            println!(
-                "  [debug] rebuild at {}: {} grids, {:.0}ms",
-                current,
-                plan.len(),
-                t.elapsed().as_secs_f64() * 1000.0
-            );
-        }
+        // `plan.len() == 0` ⇒ không có lưới nào để đặt lệnh — đây là nguyên nhân
+        // khả dĩ nhất khi strategy chạy mà không lệnh nào, và trước đây vô hình
+        // ở release vì chỉ có `println!` trong `debug_assertions`.
+        tracing::debug!(
+            ts = current,
+            grids = plan.len(),
+            next_review = review,
+            took_ms = (t.elapsed().as_secs_f64() * 1000.0) as u64,
+            "rebuild xong"
+        );
 
         Ok((review, plan))
     }
 
-    /// Duyệt các grid level để tìm cơ hội entry mới từ một candle.
-    /// Trả về các biến cố (Placed/Rejected) để vòng forward notify ra ngoài.
+    /// **Mở lệnh** ở các mốc lưới mà giá vừa chạm tới.
+    ///
+    /// Tên cũ `evaluate_grid_entries` sai nghĩa: hàm không "đánh giá" gì cả, nó
+    /// đặt lệnh. Trong nhánh kernel, "đánh giá" là việc của `fn rebuild` (dựng
+    /// plan) và `Strategy` — còn đây là hành động.
+    ///
+    /// Luồng: mỗi mốc `il` mà `entry_price` nằm trong `[candle.l, candle.h]` và
+    /// chưa có lệnh ở `(grid, level)` đó ⇒ đặt. Cổng phí loại những lệnh mà
+    /// lợi nhuận sau `2 × fee` không dương ⇒ `Rejected`.
+    ///
+    /// Trả về các biến cố (`Placed` / `Rejected`) để vòng `forward` notify ra
+    /// ngoài. Không tự ghi vào `orders` trước khi qua cổng phí.
     #[inline]
     #[allow(clippy::too_many_arguments)]
-    pub fn evaluate_grid_entries(
+    fn open_orders(
         id: usize,
         candle: &CandleStick,
         plan: &[TradingGrid],
         orders: &mut Vec<Order>,
-        fee_rate: f64,
+        fee: &dyn Fee,
         kelly_fraction: f64,
         base_capital: f64,
         unlock_seq: u64,
     ) -> Vec<OrderEvent> {
         let ts = candle.t.max(0) as u64;
         let mut events = Vec::new();
+        let mut grids_touched = 0usize;
 
         for (ig, grid) in plan.iter().enumerate() {
             if candle.h < grid.min() || candle.l > grid.max() {
                 continue;
             }
+            // Ghi nhận lần quét grid mà **không** chạm level nào. Đây là phân
+            // biệt quan trọng: "plan rỗng" (chưa dựng được lưới) và "plan có
+            // nhưng nến chưa chạm bậc" là hai lỗi khác nhau, mà trước đây cả hai
+            // đều chỉ biểu hiện là "không có lệnh".
 
+            grids_touched += 1;
             for il in 0..grid.num_levels() {
                 let entry_price = grid.level_price(il);
 
@@ -897,14 +954,38 @@ impl Portfolio {
                         (entry_price - tp_price) / entry_price
                     };
 
-                    if expected_profit_pct <= fee_rate {
+                    // Một lệnh limit vào rồi đóng ở TP trả **hai** lần phí sàn
+                    // (vào + ra), nên lợi nhuận thực là
+                    // `expected_profit_pct − 2 × fee_rate`. Cổng lọc trước đây
+                    // chỉ so với **một** `fee_rate` ⇒ lọt qua những lệnh lỗ
+                    // sau phí. Dùng đúng `TradingGrid::min_profitable_step`
+                    // (2 × fee × giá) cho khớp, và để con số này là nguồn
+                    // duy nhất thay vì lặp lại ở script.
+                    let roundtrip_fee_pct = fee.round_trip_rate();
+                    if expected_profit_pct <= roundtrip_fee_pct {
+                        let reason = format!(
+                            "expected_profit_pct {expected_profit_pct:.6} <= roundtrip fee \
+                             {roundtrip_fee_pct:.6}"
+                        );
+                        // Log lý do + số tiền: `expected_profit_pct <= fee_rate`
+                        // là khi bước giữa hai mốc nhỏ hơn `fee × giá`, nên
+                        // biểu diễn bằng USD sẽ thấy ngay mốc quá dày.
+                        tracing::debug!(
+                            ts,
+                            grid = ig,
+                            level = il,
+                            entry = entry_price,
+                            tp = tp_price,
+                            step_cash = (tp_price - entry_price).abs(),
+                            need_cash = roundtrip_fee_pct * entry_price,
+                            dtype = ?dtype,
+                            "bị lo vì lời sau phí không đủ"
+                        );
                         events.push(OrderEvent::Rejected {
                             ts,
                             grid: ig,
                             level: il,
-                            reason: format!(
-                                "expected_profit_pct {expected_profit_pct:.6} <= fee {fee_rate:.6}"
-                            ),
+                            reason,
                         });
                         continue;
                     }
@@ -932,14 +1013,30 @@ impl Portfolio {
             }
         }
 
+        tracing::debug!(
+            candle_ts = ts,
+            plan_grids = plan.len(),
+            grids_touched,
+            placed = events
+                .iter()
+                .filter(|e| matches!(e, OrderEvent::Placed { .. }))
+                .count(),
+            rejected = events
+                .iter()
+                .filter(|e| matches!(e, OrderEvent::Rejected { .. }))
+                .count(),
+            low = candle.l,
+            high = candle.h,
+            "mở lệnh cho nến đã đóng"
+        );
         events
     }
 
     #[inline]
-    pub fn check_order_exit(
+    fn check_order_exit(
         order: &Order,
         candle: &CandleStick,
-        fee_rate: f64,
+        fee: &dyn Fee,
         current_seq: u64,
     ) -> Option<(f64, f64)> {
         // T+N: chưa đủ N nến thì không được đóng lệnh (giữ nguyên trạng thái mở)
@@ -1009,7 +1106,8 @@ impl Portfolio {
 
         // Phí khứ hồi (entry + exit) — trừ vào PnL thực hiện để report và reward
         // (SizeAwareSharpe) là NET of fees, không chỉ dùng fee làm hurdle.
-        Some((exit_price, pnl_pct - 2.0 * fee_rate))
+        // Dùng `Fee::net_pnl_pct` để **cùng nguồn** với ngưỡng lọc lệnh vào.
+        Some((exit_price, fee.net_pnl_pct(pnl_pct)))
     }
 
     #[inline]
@@ -1531,7 +1629,7 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        let result = Portfolio::check_order_exit(&o, &c, 0.0005, 0);
+        let result = Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0);
         assert!(result.is_some());
         let (exit, pnl) = result.unwrap();
         assert!(exit <= o.sl_price);
@@ -1556,7 +1654,7 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        let result = Portfolio::check_order_exit(&o, &c, 0.0005, 0);
+        let result = Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0);
         assert!(result.is_some());
         let (exit, pnl) = result.unwrap();
         assert!(exit >= o.tp_price);
@@ -1581,7 +1679,7 @@ mod tests {
             c: 102.0,
             v: 1000.0,
         };
-        assert!(Portfolio::check_order_exit(&o, &c, 0.0005, 0).is_none());
+        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0).is_none());
     }
 
     #[test]
@@ -1604,9 +1702,9 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        assert!(Portfolio::check_order_exit(&o, &c, 0.0005, 4).is_none());
+        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 4).is_none());
         // Đủ T+N (current_seq == unlock_seq) → đóng bình thường.
-        assert!(Portfolio::check_order_exit(&o, &c, 0.0005, 5).is_some());
+        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 5).is_some());
     }
 
     #[test]
@@ -1628,7 +1726,7 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        assert!(Portfolio::check_order_exit(&o, &c, 0.0005, 0).is_some());
+        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0).is_some());
     }
 
     #[test]
@@ -1637,7 +1735,7 @@ mod tests {
         assert_eq!(report.total_trades, 0);
     }
 
-    // ── Kernel `evaluate` + `Session` ───────────────────────────────────────
+    // ── Kernel `forward` + `Session` ───────────────────────────────────────
 
     use crate::fee::SimpleFixedFee;
     use crate::score::SharpeScore;
@@ -1805,16 +1903,15 @@ mod tests {
         let mut events = Vec::new();
         let from = from_ts();
 
-        // 10 lời gọi × 4 nến: mỗi lời gọi nhận cửa sổ MỚI và chỉ tiến session
-        // (đúng cách realtime gọi từng nến) — không reset plan/seq/lệnh.
-        for i in 0..10u64 {
+        // 40 lời gọi, mỗi lời gọi `forward` tiến **đúng một nến** (đúng cách
+        // realtime: mỗi nến đóng gọi kernel một lần) — không reset plan/seq/lệnh.
+        session.next_ts = from;
+        for _ in 0..40 {
             let mut trade = slice_fetch(data.clone());
             let mut analysis = slice_fetch(data.clone());
             let mut notify = notify_box(&mut events);
-            pf.evaluate(
+            pf.forward(
                 &mut session,
-                from + i * 4 * 60,
-                from + (i + 1) * 4 * 60,
                 &|id| params[id],
                 &mut *trade,
                 &mut *analysis,
@@ -1850,15 +1947,16 @@ mod tests {
         let mut session = Session::new();
         let from = from_ts();
 
-        for _ in 0..2 {
+        // 20 lượt cho 20 nến, rồi 20 lượt nữa với **cùng dữ liệu** để chứng minh
+        // lần thứ hai không xử lý lại nến nào (guard `session.candle_ts`).
+        session.next_ts = from;
+        for _ in 0..40 {
             let mut trade = slice_fetch(data.clone());
             let mut analysis = slice_fetch(data.clone());
             let mut events = Vec::new();
             let mut notify = notify_box(&mut events);
-            pf.evaluate(
+            pf.forward(
                 &mut session,
-                from,
-                from + 20 * 60,
                 &|id| params[id],
                 &mut *trade,
                 &mut *analysis,
@@ -1888,20 +1986,21 @@ mod tests {
         let mut events = Vec::new();
 
         {
-            let mut trade = slice_fetch(data.clone());
-            let mut analysis = slice_fetch(data.clone());
-            let mut notify = notify_box(&mut events);
-            pf.evaluate(
-                &mut session,
-                from,
-                from + 30 * 60,
-                &|id| params[id],
-                &mut *trade,
-                &mut *analysis,
-                &mut *notify,
-            )
-            .await
-            .unwrap();
+            session.next_ts = from;
+            for _ in 0..30 {
+                let mut trade = slice_fetch(data.clone());
+                let mut analysis = slice_fetch(data.clone());
+                let mut notify = notify_box(&mut events);
+                pf.forward(
+                    &mut session,
+                    &|id| params[id],
+                    &mut *trade,
+                    &mut *analysis,
+                    &mut *notify,
+                )
+                .await
+                .unwrap();
+            }
         }
 
         assert!(!session.plan.is_empty(), "sau 30 nến plan phải có");
@@ -1921,10 +2020,10 @@ mod tests {
             let mut analysis = slice_fetch(data.clone());
             {
                 let mut notify = notify_box(&mut events);
-                pf.evaluate(
+                // Con trỏ đã tự tiến qua 30 lượt trên; chỉ cần 1 lượt cho nến
+                // crash, không truyền `from`/`to` nữa — `forward` tự biết vị trí.
+                pf.forward(
                     &mut session,
-                    crash_ts,
-                    crash_ts + 60,
                     &|id| params[id],
                     &mut *trade,
                     &mut *analysis,
@@ -1949,16 +2048,15 @@ mod tests {
         let pf = portfolio(grid_config(0));
         let params = grid_params();
         let mut session = Session::new();
+        session.next_ts = BASE as u64;
         let mut events = Vec::new();
         let mut notify = notify_box(&mut events);
 
         let mut trade = slice_fetch(data.clone());
         let mut analysis = slice_fetch(data.clone());
         let result = pf
-            .evaluate(
+            .forward(
                 &mut session,
-                BASE as u64,
-                BASE as u64 + 3 * 60,
                 &|id| params[id],
                 &mut *trade,
                 &mut *analysis,
@@ -2031,7 +2129,7 @@ mod tests {
         let mut session = Session::new();
         let mut events = Vec::new();
         let mut notify = notify_box(&mut events);
-        pf.backtest(
+        pf.evaluate(
             &mut session,
             3600,
             from_ts(),

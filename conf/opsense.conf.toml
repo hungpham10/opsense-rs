@@ -1,4 +1,4 @@
-# Opsense capacity-engine configuration.
+# Opsense configuration.
 # See docs/PLAN.MD for the field reference.
 
 [engine]
@@ -23,11 +23,6 @@ interval_secs = 60
 type = "timeseries_station_sink"
 id = "tsdb"
 inputs = ["clock"]
-
-# Capacity per metric (unit depends on the metric: cores, GB, req/s, ...).
-[capacity]
-cpu_usage = 32.0
-mem_usage = 64.0
 
 # Vector/Alloy metrics source. Disabled by default in dev — there is no
 # Vector service in the docker-compose stack. Uncomment the block below

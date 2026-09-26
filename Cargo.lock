@@ -3704,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "opsense"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "arrow-csv",
@@ -3746,6 +3746,7 @@ dependencies = [
  "reqwest",
  "rexpect",
  "rmcp",
+ "rustls 0.23.45",
  "serde",
  "serde_json",
  "sqlx",
@@ -3761,7 +3762,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-components"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "async-trait",
  "csv",
@@ -3781,7 +3782,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-core"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -3792,11 +3793,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
 name = "opsense-kernel-echo"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3808,7 +3810,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-julia"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3818,7 +3820,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-python"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3828,7 +3830,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-macros"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "inventory",
  "proc-macro2",
@@ -3839,7 +3841,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-mlib"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "aes-gcm",
  "arrow-array",
@@ -3856,6 +3858,7 @@ dependencies = [
  "rand 0.8.8",
  "redis",
  "rhai",
+ "rustls 0.23.45",
  "serde",
  "serde_json",
  "sqlx",
@@ -3869,7 +3872,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-model"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -3892,7 +3895,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-proto"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3908,7 +3911,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-qlib"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "async-trait",
  "csv",
@@ -3926,7 +3929,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-rhai"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "async-trait",
  "inventory",
@@ -3948,7 +3951,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-runner"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -5016,6 +5019,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",

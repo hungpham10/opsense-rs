@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Error;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ use opsense_core::Observation;
 use opsense_core::Station;
 use opsense_core::TimeseriesStation;
 use opsense_mlib::jq::JsonQuery;
-use opsense_macros::transform;
+use opsense_macros::{source, transform};
 
 use crate::station::downcast_ctx;
 use crate::vector::runtime::{Component, Identify, Message, Outbound};
@@ -170,9 +170,23 @@ impl HttpSource {
 
 /// One shared client per timeout so poll-cadence calls reuse connections.
 fn client_for(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    // Cài crypto provider **trước khi dựng client**. Workspace bật cả `ring`
+    // (qua reqwest) lẫn `aws-lc-rs` (qua AWS SDK) trên cùng `rustls 0.23`, nên
+    // `Client::builder()` panic "No provider set" nếu chưa ai cài.
+    //
+    // Trước đây việc cài nằm trong `main()` của binary `opsense`, nên mọi
+    // embedder không có `main` — integration test, crate dùng lại — chết ngay
+    // tại đây. `mlib::tls` có sẵn helper `Once`-guarded, idempotent, không
+    // panic; gọi ở **chỗ dựng client** thì mọi đường vào đều tự được bảo vệ,
+    // kể cả người gọi không biết chuyện này.
+    opsense_mlib::tls::install_default_crypto_provider();
+
     static CLIENTS: OnceLock<std::sync::Mutex<HashMap<u64, reqwest::Client>>> = OnceLock::new();
     let clients = CLIENTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut guard = clients.lock().unwrap();
+    // `unwrap()` ở đây chỉ fail nếu một thread khác **panic giữa lúc giữ lock**.
+    // Xem `poisoned_clients_still_serve` — trước đây panic ở `build()` làm
+    // nhiễm lock và mọi lời gọi sau đó chết bằng `PoisonError` thay vì lỗi thật.
+    let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
 
     let timeout_secs = timeout_secs.max(1);
     if let Some(client) = guard.get(&timeout_secs) {
@@ -209,6 +223,36 @@ pub(crate) async fn build_vars(
     bound: BTreeMap<String, String>,
     payload: &Value,
 ) -> BTreeMap<String, String> {
+    // Tầng 3 đọc `ctx` mỗi lần — chỉ dùng được khi còn `&Context` (đường push).
+    let mut names: Vec<String> = bound.keys().cloned().collect();
+    if let Some(obj) = payload.as_object() {
+        for k in obj.keys() {
+            if !names.contains(k) {
+                names.push(k.clone());
+            }
+        }
+    }
+    let mut fallback = BTreeMap::new();
+    for name in names {
+        if let Ok(v) = ctx.variable::<String>(&name).await {
+            fallback.insert(name, v);
+        }
+    }
+    merge_vars(&fallback, bound, payload)
+}
+
+/// Giống [`build_vars`] nhưng tầng 3 lấy từ bảng đã giải sẵn.
+///
+/// Dùng cho [`HttpOrigin`]: node tự quét, nên `HttpFetcher` phải sống lâu hơn
+/// một request — mà `&Context` chỉ có được trong `run`, không giữ được qua
+/// `.await` (`downcast_ctx` trả `&Context`). Tầng 3 là attributes TOML + env +
+/// secret — **cấu hình mức process** — nên đọc một lần lúc khởi động đúng hơn
+/// là đọc lại mỗi chu kỳ, và secret không bị đọc lặp cả đời process.
+pub(crate) fn merge_vars(
+    fallback: &BTreeMap<String, String>,
+    bound: BTreeMap<String, String>,
+    payload: &Value,
+) -> BTreeMap<String, String> {
     // Collect candidate names from layer 1 + layer 2.
     let mut names: Vec<String> = bound.keys().cloned().collect();
     if let Some(obj) = payload.as_object() {
@@ -231,11 +275,38 @@ pub(crate) async fn build_vars(
             vars.insert(name.clone(), value_to_string(v));
             continue;
         }
-        if let Ok(v) = ctx.variable::<String>(&name).await {
-            vars.insert(name, v);
+        if let Some(v) = fallback.get(&name) {
+            vars.insert(name, v.clone());
         }
     }
     vars
+}
+
+/// Tên mọi placeholder `{{name}}` trong template — trùng đúng luật [`render`]
+/// đọc (thẻ `{{`, khoá trim, bỏ qua thẻ rỗng).
+fn placeholder_names(template: &str) -> Vec<String> {
+    let bytes = template.as_bytes();
+    let mut names: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            let mut j = i + 2;
+            while j + 1 < bytes.len() && !(bytes[j] == b'}' && bytes[j + 1] == b'}') {
+                j += 1;
+            }
+            if j + 1 >= bytes.len() {
+                break; // chưa đóng thẻ — `render` sẽ báo lỗi lúc chạy
+            }
+            let key = template[i + 2..j].trim();
+            if !key.is_empty() && !names.iter().any(|n| n == key) {
+                names.push(key.to_string());
+            }
+            i = j + 2;
+        } else {
+            i += 1;
+        }
+    }
+    names
 }
 
 /// Parse the response body as JSON. Accepts either `[obs, obs, ...]` or a
@@ -310,6 +381,347 @@ fn cell_f64(v: &Value) -> Option<f64> {
     }
 }
 
+/// Mọi thứ cần để dựng và gửi **một** request, đã pre-parse hết.
+///
+/// Tách khỏi vòng push để hai đường dùng chung đúng một pipeline: nhịp đẩy
+/// (`while let Some(msg) = rx.recv()`) và vòng tự quét của [`HttpOrigin`].
+struct HttpFetcher {
+    url: String,
+    method: reqwest::Method,
+    headers: HashMap<String, String>,
+    body: Option<String>,
+    bindings: Vec<(String, JsonQuery)>,
+    candles: Option<CandleParse>,
+    /// Tầng 3 của `{{name}}` đã giải sẵn từ `Context::variable` (attributes +
+    /// env + secret). Xem [`merge_vars`] vì sao không giữ `&Context`.
+    attributes: BTreeMap<String, String>,
+    client: reqwest::Client,
+}
+
+impl HttpFetcher {
+    /// Pre-parse binding + dựng client. Lỗi ở đây là **lỗi config** (tên
+    /// binding sai cú pháp, method không hợp lệ, không dựng được client) — cả
+    /// hai đường đều chết vĩnh viễn với nó, nên báo lúc khởi động thay vì
+    /// `warn` rồi im lặng mỗi chu kỳ.
+    /// Dựng từ `http_source` (Transform: có input, đẩy xuống dưới).
+    async fn build(src: &HttpSource, ctx: &Context) -> Result<Self, String> {
+        Self::assemble(
+            &src.url,
+            &src.method,
+            &src.headers,
+            &src.body,
+            &src.bindings,
+            src.timeout_secs,
+            src.candles.clone(),
+            ctx,
+        )
+        .await
+    }
+
+    /// Dựng từ `http_origin` (Source: không input, kéo theo yêu cầu).
+    async fn build_origin(src: &HttpOrigin, ctx: &Context) -> Result<Self, String> {
+        Self::assemble(
+            &src.url,
+            &src.method,
+            &src.headers,
+            &src.body,
+            &src.bindings,
+            src.timeout_secs,
+            src.candles.clone(),
+            ctx,
+        )
+        .await
+    }
+
+    /// Phần chung của hai component: pre-parse binding, dựng client, giải
+    /// trước tầng 3 của `{{name}}`.
+    #[allow(clippy::too_many_arguments)]
+    async fn assemble(
+        url: &str,
+        method: &str,
+        headers: &HashMap<String, String>,
+        body: &Option<String>,
+        bindings: &HashMap<String, String>,
+        timeout_secs: u64,
+        candles: Option<CandleParse>,
+        ctx: &Context,
+    ) -> Result<Self, String> {
+        let mut parsed = Vec::with_capacity(bindings.len());
+        for (name, expr) in bindings {
+            let q = JsonQuery::parse(expr).map_err(|e| format!("binding `{name}`: {e}"))?;
+            parsed.push((name.clone(), q));
+        }
+        let method = reqwest::Method::from_bytes(method.trim().as_bytes())
+            .map_err(|e| format!("method `{method}`: {e}"))?;
+
+        // Tầng 3: giải trước mọi tên có thể xuất hiện trong template.
+        let mut wanted: Vec<String> = bindings.keys().cloned().collect();
+        wanted.extend(placeholder_names(url));
+        for v in headers.values() {
+            wanted.extend(placeholder_names(v));
+        }
+        if let Some(b) = body {
+            wanted.extend(placeholder_names(b));
+        }
+        let mut attributes = BTreeMap::new();
+        for name in wanted {
+            if let Ok(v) = ctx.variable::<String>(&name).await {
+                attributes.insert(name, v);
+            }
+        }
+
+        Ok(Self {
+            url: url.to_string(),
+            method,
+            headers: headers.clone(),
+            body: body.clone(),
+            bindings: parsed,
+            candles,
+            attributes,
+            client: client_for(timeout_secs)?,
+        })
+    }
+
+    /// Một chu kỳ: dựng URL → gửi → parse.
+    ///
+    /// `from`/`to` (giây) đi vào ctx của binding và vào tầng 2 của bảng vars, nên
+    /// template dùng `{{from_ts}}` trực tiếp. Node **không** tự quyết đơn vị mà
+    /// API cần — API nào đòi mili-giây thì config tự viết binding.
+    async fn fetch_once(
+        &self,
+        ts: i64,
+        interval: i64,
+        from: i64,
+        to: i64,
+        payload: &Value,
+    ) -> Result<Vec<Observation>, String> {
+        let ctx_value = serde_json::json!({
+            "ts": ts,
+            "interval": interval,
+            "now": signal::now_secs(),
+            "payload": payload,
+            // Cửa sổ mà node đang phục vụ, **tính bằng giây**. Node không
+            // đoán đơn vị API mong muốn: nếu API cần mili-giây thì config tự
+            // viết binding, còn việc quyết định "cửa sổ phân tích bao nhiêu
+            // và lấy vòng nào" thuộc về script, không thuộc về transport.
+            //
+            // Xem `grid.rhai` — nó quyết định cửa sổ và sieve, không phải node.
+            "from_ts": from,
+            "to_ts": to,
+        });
+        let mut bound = BTreeMap::new();
+        for (name, q) in &self.bindings {
+            let result = q.execute(&ctx_value);
+            let first = result.into_iter().next().unwrap_or(Value::Null);
+            bound.insert(name.clone(), value_to_string(&first));
+        }
+
+        // `from_ts`/`to_ts` được đưa vào tầng 2 (ngang với field của payload)
+        // nên `{{from_ts}}` dùng được trong url/headers/body mà không cần
+        // binding. Đường push không có cửa sổ nên không thêm — `from == to`.
+        let layer2 = if from == to {
+            payload.clone()
+        } else {
+            let mut obj = payload.as_object().cloned().unwrap_or_default();
+            obj.insert("from_ts".to_string(), Value::from(from));
+            obj.insert("to_ts".to_string(), Value::from(to));
+            Value::Object(obj)
+        };
+        let vars = merge_vars(&self.attributes, bound, &layer2);
+
+        let url = render(&self.url, &vars)?;
+        let mut request = self.client.request(self.method.clone(), &url);
+        for (k, v) in &self.headers {
+            request = request.header(k, render(v, &vars)?);
+        }
+        if let Some(body) = &self.body {
+            request = request.body(render(body, &vars)?);
+        }
+
+        let response = request.send().await.map_err(|e| format!("request: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("endpoint answered {}", response.status()));
+        }
+        let body_text = response.text().await.map_err(|e| format!("body: {e}"))?;
+
+        match &self.candles {
+            Some(cfg) => parse_candles(&body_text, cfg),
+            None => parse_observations(&body_text),
+        }
+    }
+}
+
+/// HTTP source cho station mà **không ai đẩy nhịp cho** — terminal trong
+/// pipeline, không có input, không có consumer.
+///
+/// Vì sao tách thành component riêng mà không làm `HttpSource` tự nhịp khi
+/// `inputs` rỗng: `HttpSource` là `ComponentType::Transform`, và engine **cấm**
+/// transform không input. Node tự quét là *nguồn*, không phải transform.
+/// `HttpSource` vẫn phục vụ `strategies/predict` và `strategies/prometheus` (cả
+/// hai dùng `inputs = ["clock"]` và cần forward xuống dưới).
+///
+/// **Vì sao quét ở đây chứ không kéo khi có người đọc.** Đường đọc của station
+/// chạy trong script Rhai, mà script chạy trên `spawn_blocking` và API đọc là
+/// **đồng bộ**: muốn kéo HTTP được thì phải `Handle::block_on` ngay trong đó.
+/// `spawn_blocking` không hủy được, nên khi runtime tắt mà script còn đang kéo
+/// thì tokio panic trong destructor và **SIGABRT giết cả process** — đo được:
+/// bật kéo-theo-yêu-cầu thì `e2e_binance_config` abort ở test thứ 3; tắt đi thì
+/// 4/4 xanh. Quét ở đây giữ đường đọc thuần RAM, nên hết hẳn.
+///
+/// **Node không cần biết cửa sổ ai sẽ hỏi.** Mỗi chu kỳ nó fetch URL và lấy
+/// đúng những gì URL đó trả về (Binance `/klines?limit=1000` ⇒ 1000 nến mới nhất
+/// ≈ 16.6h). Phủ hay không là thuộc tính của dữ liệu, không phải thứ node phải
+/// được dạy — nên không có con số nào bị copy giữa node và `grid.rhai`.
+///
+/// **Trần thật**: cửa sổ sâu hơn 16.6h sẽ không có dữ liệu. Đó là giới hạn của
+/// Binance, không phải của kiến trúc này; muốn sâu hơn thì phải đổi API.
+///
+/// Template nhận thêm hai biến: `{{from_ts}}` và `{{to_ts}}`, **tính bằng giây**.
+/// Ở vòng quét, `to_ts = now` và `from_ts = now - interval_secs` — vừa đủ để
+/// một URL có `{{from_ts}}` kéo **tăng dần** mà không phải quét lại cả lịch sử.
+/// API nào đòi đơn vị khác thì config tự viết binding — node không đoán.
+#[source(terminal_field = "station")]
+pub struct HttpOrigin {
+    pub id: String,
+
+    /// Node terminal — station của chính nó là nơi phục vụ, nên không cần
+    /// consumer. Luôn `true` trong thực tế: đặt `false` thì graph bị engine từ
+    /// chối (*"Source history must have connect with another nodes"*) vì node
+    /// này không còn việc gì khác để làm. Field này tồn tại vì macro terminal
+    /// đọc nó, và để khớp với `HttpSource` / `RhaiTransform`.
+    #[serde(default = "default_station")]
+    pub station: bool,
+
+    /// Request URL. `{{name}}` + `{{from_ts}}`/`{{to_ts}}`.
+    pub url: String,
+
+    #[serde(default = "default_method")]
+    pub method: String,
+
+    /// Header values là template (`Bearer {{token}}`).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+
+    /// Optional request body template.
+    #[serde(default)]
+    pub body: Option<String>,
+
+    /// Bindings: name → jq, chạy trên
+    /// `{"ts", "interval", "now", "payload", "from_ts", "to_ts"}`.
+    #[serde(default)]
+    pub bindings: HashMap<String, String>,
+
+    /// Chỉ còn là **giá trị binding** `{{interval}}` — node này không có nhịp.
+    #[serde(default = "default_interval")]
+    pub interval_secs: i64,
+
+    /// HTTP request timeout (giây).
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
+
+    /// Parse body thành nến OHLCV (vd Binance `/klines`).
+    #[serde(default)]
+    pub candles: Option<CandleParse>,
+}
+
+impl_http_origin!(
+    async fn run(
+        &self,
+        _id: usize,
+        _rx: &mut mpsc::Receiver<Message>,
+        tx: Outbound,
+    ) -> Result<(), Error> {
+        let ctx = downcast_ctx(&tx)?;
+        let fetcher = Arc::new(
+            HttpFetcher::build_origin(self, ctx)
+                .await
+                .map_err(|e| Error::other(format!("http_origin {}: {e}", self.id)))?,
+        );
+
+        // Giữ `Arc` của chính station để vòng quét tự ghi vào, đồng thời đăng ký
+        // một bản `Arc` nữa cho reader. `Arc` chứ không `Station` thường: mỗi
+        // chu kỳ phải `read().await` để `update_range`, mà `ctx.station()` trả
+        // `&'static Station` — không đi qua được.
+        let station = std::sync::Arc::new(tokio::sync::RwLock::new(
+            TimeseriesStation::from_storage(&self.id, ctx.storage()).await?,
+        ));
+        ctx.registry(&self.id, Station::Timeseries(std::sync::Arc::clone(&station)))
+            .await
+            .or_else(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
+
+        // `interval_secs = 0` hoặc âm là nguồn chết: `sleep(0)` quay vô hạn và
+        // spam API, `sleep` âm thì tokio lo. Chặn ở đây cho thành lỗi cấu
+        // hình, không phải thành node quay vô hạn lúc chạy.
+        let interval = self.interval_secs.max(1);
+
+        tracing::info!(
+            node = %self.id,
+            interval_secs = interval,
+            "http_origin: station terminal, tự quét theo interval"
+        );
+
+        // Vòng quét nằm **trên async**, không `spawn_blocking` và không
+        // `block_on` — đó là toàn bộ lý do node này tồn tại thay vì để
+        // `query_recent` tự kéo (xem doc trên `HttpOrigin`).
+        //
+        // Fetch **ngay** một lần trước khi ngủ: lần đọc đầu tiên của `grid`
+        // chỉ xảy ra khi nến phút đầu tiên đóng (≥ 1 phút sau), nên khi nó
+        // tới thì đã có dữ liệu — độ trễ lần đầu gần bằng 0, không phải một
+        // nhịp quét.
+        loop {
+            let now = signal::now_secs();
+            // `from_ts = now - interval_secs`: URL có `{{from_ts}}` thì kéo
+            // tăng dần (chồng đúng một nhịp) thay vì quét lại cả lịch sử.
+            // URL không dùng thì hai số này không ảnh hưởng gì.
+            match fetcher
+                .fetch_once(now, interval, now - interval, now, &Value::Null)
+                .await
+            {
+                Ok(obs) if !obs.is_empty() => {
+                    // `update_range` cần cửa sổ bọc đúng mọi obs — lấy từ chính
+                    // dữ liệu thay vì từ `from_ts`/`to_ts`, vì API có thể trả
+                    // ngoài cửa sổ mình yêu cầu (Binance với `limit` trả nến
+                    // *mới nhất*, tức phía trước `from_ts`).
+                    let from = obs.iter().map(|o| o.ts).min().unwrap_or(now);
+                    let to = obs.iter().map(|o| o.ts).max().unwrap_or(now);
+                    let n = obs.len();
+                    station.read().await.update_range(&obs, from, to, now);
+                    tracing::debug!(
+                        node = %self.id,
+                        candles = n,
+                        from,
+                        to,
+                        "http_origin: đã nạp nến"
+                    );
+                }
+                // `Ok(rỗng)` = API không có gì để cho (giờ chưa có nến nào chốt).
+                // Không phải lỗi — im lặng ở `debug` để không spam mỗi nhịp.
+                Ok(_) => {
+                    tracing::debug!(node = %self.id, "http_origin: response rỗng");
+                }
+                // Lỗi **không** làm chết node: chu kỳ sau thử lại. Nếu để `?`
+                // thì một lần 502 của Binance là pipeline chết vĩnh viễn.
+                Err(e) => {
+                    tracing::warn!(
+                        node = %self.id,
+                        interval_secs = interval,
+                        error = %e,
+                        "http_origin: fetch thất bại — thử lại ở nhịp sau"
+                    );
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(interval as u64)).await;
+        }
+    }
+);
+
 impl_http_source!(
     async fn run(
         &self,
@@ -319,14 +731,11 @@ impl_http_source!(
     ) -> Result<(), Error> {
         let ctx = downcast_ctx(&tx)?;
 
-        // Pre-parse every binding once; failures here are config errors so
-        // surface them eagerly.
-        let mut parsed: Vec<(String, JsonQuery)> = Vec::with_capacity(self.bindings.len());
-        for (name, expr) in &self.bindings {
-            let q = JsonQuery::parse(expr)
-                .map_err(|e| Error::other(format!("http {} binding `{name}`: {e}", self.id)))?;
-            parsed.push((name.clone(), q));
-        }
+        let fetcher = Arc::new(
+            HttpFetcher::build(self, ctx)
+                .await
+                .map_err(|e| Error::other(format!("http {}: {e}", self.id)))?,
+        );
 
         // Register the station eagerly so reads before the first cycle still
         // resolve to an empty timeseries rather than a `NotFound` error.
@@ -365,105 +774,18 @@ impl_http_source!(
                 .and_then(Value::as_i64)
                 .unwrap_or(self.interval_secs);
 
-            // 1. evaluate bindings against the per-cycle context.
-            let ctx_value = serde_json::json!({
-                "ts": ts,
-                "interval": interval,
-                "now": signal::now_secs(),
-                "payload": msg.payload,
-            });
-            let mut bound = BTreeMap::new();
-            for (name, q) in &parsed {
-                let result = q.execute(&ctx_value);
-                let first = result.into_iter().next().unwrap_or(Value::Null);
-                bound.insert(name.clone(), value_to_string(&first));
-            }
-
-            // 2. merge layer 2/3 to build the final lookup table.
-            let vars = build_vars(ctx, bound, &msg.payload).await;
-
-            // 3. render url, headers, body.
-            let url = match render(&self.url, &vars) {
-                Ok(s) => s,
+            let batch = match fetcher
+                .fetch_once(ts, interval, ts, ts, &msg.payload)
+                .await
+            {
+                Ok(b) => b,
                 Err(e) => {
-                    tracing::warn!("http {} url render: {e}", self.id);
+                    tracing::warn!("http {}: {e}", self.id);
                     continue;
                 }
-            };
-            let method_str = self.method.trim().to_ascii_uppercase();
-            let method = match reqwest::Method::from_bytes(method_str.as_bytes()) {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!("http {} invalid method `{}`: {e}", self.id, self.method);
-                    continue;
-                }
-            };
-            let client = match client_for(self.timeout_secs) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("http {} client: {e}", self.id);
-                    continue;
-                }
-            };
-            let mut request = client.request(method, &url);
-            for (k, v) in &self.headers {
-                match render(v, &vars) {
-                    Ok(s) => {
-                        request = request.header(k, s);
-                    }
-                    Err(e) => {
-                        tracing::warn!("http {} header `{k}` render: {e}", self.id);
-                    }
-                }
-            }
-            if let Some(body) = &self.body {
-                match render(body, &vars) {
-                    Ok(s) => {
-                        request = request.body(s);
-                    }
-                    Err(e) => {
-                        tracing::warn!("http {} body render: {e}", self.id);
-                    }
-                }
-            }
-
-            // 4. fetch + parse.
-            let response = match request.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!("http {} request: {e}", self.id);
-                    continue;
-                }
-            };
-            if !response.status().is_success() {
-                tracing::warn!("http {} endpoint answered {}", self.id, response.status());
-                continue;
-            }
-            let body_text = match response.text().await {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!("http {} body: {e}", self.id);
-                    continue;
-                }
-            };
-            let batch = match &self.candles {
-                Some(cfg) => match parse_candles(&body_text, cfg) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!("http {} candle parse: {e}", self.id);
-                        continue;
-                    }
-                },
-                None => match parse_observations(&body_text) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!("http {} parse: {e}", self.id);
-                        continue;
-                    }
-                },
             };
 
-            // 5. write to station.
+            // write to station
             if let Some(me) = &me_handle
                 && !batch.is_empty()
             {
@@ -472,10 +794,7 @@ impl_http_source!(
                 me.write().await.update_range(&batch, from, to, to);
             }
 
-            // 6. forward so downstream nodes see this cycle. Batch đã parse đi
-            //    kèm theo dưới dạng body `data` opaque — consumer tự extract
-            //    theo shape (không còn contract magic-key `payload["observations"]`),
-            //    node trung gian passthrough nguyên vẹn.
+            // forward so downstream nodes see this cycle.
             let out = if batch.is_empty() {
                 signal::data_ready(ts)
             } else {
@@ -492,8 +811,30 @@ impl_http_source!(
 
 #[cfg(test)]
 mod tests {
-    use super::{CandleParse, parse_candles};
+    use super::{CandleParse, client_for, parse_candles};
     use opsense_core::{Signal, TelemetryKind};
+
+    /// Regression: dựng reqwest client phải **không** panic "No provider set".
+    ///
+    /// Workspace bật cả `ring` lẫn `aws-lc-rs` trên `rustls 0.23`, nên
+    /// `Client::builder()` chết nếu chưa ai cài provider. Test này chạy trong
+    /// test binary — **không có `main()`** — nên nó chính là hoàn cảnh của mọi
+    /// embedder đã chết trước đây, và chặn tái phát nếu ai gỡ lời gọi
+    /// `install_default_crypto_provider()` trong `client_for`.
+    #[test]
+    fn builds_client_without_a_process_provider() {
+        client_for(5).expect("client build phải không panic");
+    }
+
+    /// Client dùng chung theo timeout ⇒ `client_for` phải trả về thành công ở
+    /// mọi lần gọi, kể cả sau một lần thất bại trước đó (lock bị nhiễm nếu
+    /// `build()` panic giữa lúc giữ lock).
+    #[test]
+    fn client_survives_repeated_calls() {
+        client_for(7).expect("lần 1");
+        client_for(7).expect("lần 2");
+        client_for(9).expect("timeout khác");
+    }
 
     fn binance_cfg() -> CandleParse {
         CandleParse {

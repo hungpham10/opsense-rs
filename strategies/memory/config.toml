@@ -9,11 +9,6 @@ cache_max_blocks = 12
 [storage]
 backend = "memory"
 
-[capacity]
-cpu_usage = 4.0
-mem_usage = 16.0
-disk_usage = 1.0
-
 [[pipeline.components]]
 type = "clock"
 id = "clock"

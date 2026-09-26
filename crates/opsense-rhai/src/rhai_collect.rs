@@ -3,7 +3,6 @@
 //! This module defines the `RhaiFreeFn` type that is used to collect
 //! free functions registered with `#[rhai_func]` via the `inventory` crate.
 
-use inventory;
 use rhai::Engine;
 
 pub struct RhaiFreeFn {

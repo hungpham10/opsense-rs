@@ -70,7 +70,7 @@ These are the **absolute core** — functions that perform trading computation w
 
 | Function | Line | Signature | Nature |
 |----------|------|-----------|--------|
-| `evaluate_grid_entries` | 862 | `(id, candle, plan, orders, fee_rate, kelly_fraction, base_capital, unlock_seq) -> Vec<OrderEvent>` | **Pure** |
+| `open_orders` | 862 | `(id, candle, plan, orders, fee_rate, kelly_fraction, base_capital, unlock_seq) -> Vec<OrderEvent>` | **Pure** |
 | `check_order_exit` | 953 | `(order, candle, fee_rate, current_seq) -> Option<(f64, f64)>` | **Pure** |
 | `calculate_order_size` | 1183 | `(win_p, sl_pct, fraction, base_capital) -> f64` | **Pure** (Kelly criterion) |
 | `convert_order_history_into_report` | 1030 | `(orders: &[Order]) -> Report` | **Pure** |
@@ -214,7 +214,7 @@ The **cleanest boundary** between "build" and "integrate" is:
 │  Calendar ─────┤                          │                      │
 │  Score ────────┘                          │                      │
 │                                          │                      │
-│  evaluate_grid_entries()                 │                      │
+│  open_orders()                 │                      │
 │  check_order_exit()                      │                      │
 │  calculate_order_size()                  │                      │
 │  convert_order_history_into_report()     │                      │
@@ -251,7 +251,7 @@ The **cleanest boundary** between "build" and "integrate" is:
 - `opsense-model` — LogLevel, Signal, TelemetryKind
 - `itertools`, `reqwest`, `lmdb`, `tract-onnx`, `tokio`, `serde`, `csv`, `prost`
 
-The key observation: **opsense-qlib's core computation (Portfolio::forward, evaluate_grid_entries, check_order_exit, calculate_order_size) does NOT depend on reqwest, lmdb, or tract-onnx directly** — those are needed only by the integration layers (DataLoader, OptCache, Graph/ONNX compilation). The pure trading logic works with just `itertools`, `serde`, and `tokio` (for async).
+The key observation: **opsense-qlib's core computation (Portfolio::forward, open_orders, check_order_exit, calculate_order_size) does NOT depend on reqwest, lmdb, or tract-onnx directly** — those are needed only by the integration layers (DataLoader, OptCache, Graph/ONNX compilation). The pure trading logic works with just `itertools`, `serde`, and `tokio` (for async).
 
 ---
 
@@ -364,7 +364,7 @@ The following queries were executed against the semantic graph to produce this a
 | Symbol search: ScriptStrategy | `codegraph_search_symbol` | struct + impl + Strategy |
 | Symbol search: CandleStick | `codegraph_search_symbol` | 9 results (struct + impl + DataLoader) |
 | Symbol search: forward (method) | `codegraph_search_symbol` | 2 results (forward + test) |
-| Symbol search: evaluate_grid_entries | `codegraph_search_symbol` | 1 result |
+| Symbol search: open_orders | `codegraph_search_symbol` | 1 result |
 | Symbol search: check_order_exit | `codegraph_search_symbol` | 6 results |
 | Symbol search: calculate_order_size | `codegraph_search_symbol` | 3 results |
 | Class detail: TradingGrid | `codegraph_graphcode_class` | 39 methods, all pure computation |
@@ -384,7 +384,7 @@ The following queries were executed against the semantic graph to produce this a
 
 The opsense-rs codebase has a **clean, natural separation** between trading computation and infrastructure plumbing. The `opsense-qlib` crate provides a complete, self-contained trading engine with:
 
-- **Pure computation**: `evaluate_grid_entries`, `check_order_exit`, `calculate_order_size`, `convert_order_history_into_report`, all `TradingGrid` methods, all `Strategy::rebuild` logic
+- **Pure computation**: `open_orders`, `check_order_exit`, `calculate_order_size`, `convert_order_history_into_report`, all `TradingGrid` methods, all `Strategy::rebuild` logic
 - **Trait-based dependency injection**: `Strategy`, `DataLoader`, `Fee`, `Score`, `Calendar`, `Extractor` traits allow pluggable implementations
 - **Zero I/O core**: The trading simulation loop runs entirely on injected closures (`FetchFn`, `ParamFn`, `NotifyFn`)
 

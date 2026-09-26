@@ -3,7 +3,10 @@ APP_ENV ?= dev
 VERSION ?= local
 OPSENSE_TAG ?= $(VERSION)
 REGISTRY ?= ghcr.io
-IMAGE_PREFIX ?= lap02921/opsense
+# Image thật nằm dưới tài khoản `hungpham10` (khớp `docs/KUBERNETES.md` §3).
+# Trước đây là `lap02921/opsense` ⇒ `make up-cloud` pull trúng `denied` vì
+# package đó không tồn tại.
+IMAGE_PREFIX ?= hungpham10/opsense
 TARGET ?= x86_64-unknown-linux-gnu
 PLATFORM := $(shell echo $(TARGET) | sed 's/x86_64-/linux\/amd64/; s/aarch64-/linux\/arm64/')
 COMPOSE := docker compose

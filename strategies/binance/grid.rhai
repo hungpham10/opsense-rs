@@ -16,11 +16,12 @@
 //
 // Params (all optional, sane defaults):
 //   history_source  = "history"   — station chứa candles klines (http candles)
-//   own_station     = "grid"      — station của node (candle tick + snapshot)
+//   own_station     = "grid"      — station của node (lệnh + snapshot)
+//   live_source     = "tick-candle" — station chứa nến gom từ tick
 //   symbol          = "BTCUSDT"
 //   resolution      = "1m"
 //   history_secs    = 3600        — cửa sổ history đọc cho fit
-//   live_window_secs = 300        — cửa sổ candle live đọc từ own station
+//   live_window_secs = 300        — cửa sổ candle live đọc từ live_source
 
 fn process(observations) {
     let hist_src = "history";
@@ -30,6 +31,14 @@ fn process(observations) {
     let own = "grid";
     if is_def_var("param_own_station") && type_of(param_own_station) != "()" {
         own = param_own_station;
+    }
+    // Station chứa nến live. Tách khỏi `own` vì nến giờ do node `tick_2_candle`
+    // gom từ tick và ghi vào station **của node đó**, không phải station của
+    // node `grid`. Trước đây nến live nằm ở `own` vì chính script tự gộp.
+    // Rỗng ⇒ lùi về `own` để cấu hình cũ không hỏng.
+    let live_src = own;
+    if is_def_var("param_live_source") && type_of(param_live_source) != "()" {
+        live_src = param_live_source;
     }
     let symbol = "BTCUSDT";
     if is_def_var("param_symbol") && type_of(param_symbol) != "()" {
@@ -60,14 +69,19 @@ fn process(observations) {
     }
 
     if trigger() == "tick" {
-        return tick_accumulate(observations, own, symbol, resolution);
+        // Nhánh tick không làm gì: node `tick_2_candle` đã gom nến và tự ghi khi
+        // nến đóng. Script chỉ cần **không** ghi đè lên nến đó.
+        return [];
     }
 
     // Clock ping (trigger "") hoặc klines mới (trigger "history") → recompute.
-    let out = snapshot(hist_src, own, symbol, resolution, hw, lw);
+    // Nhánh tick **không** còn gộp nến ở đây: node `tick_2_candle` làm việc đó
+    // và giữ nến đang mở trong RAM (script stateless, gộp lại mỗi batch thì nến
+    // phụ thuộc thứ tự batch và hỏng khi batch thiếu).
+    let out = snapshot(hist_src, live_src, symbol, resolution, hw, lw);
 
     if mode == "trading" {
-        out += trade(hist_src, own, symbol, resolution, hw);
+        out += trade(hist_src, live_src, own, symbol, resolution, hw);
     }
     out
 }
@@ -76,19 +90,24 @@ fn process(observations) {
 //
 // Station là state duy nhất: `portfolio_feed` tự tái dựng session từ các
 // observation `signal = "order"` + cursor `labels.kind = "trading_step"` trong
-// own station, nên script không giữ gì cả và restart không mất lệnh.
+// own station, nên script không giữ gì cả.
+//
+// **"Restart không mất lệnh" chỉ đúng khi backend có persist.** Config này
+// để `backend = "memory"` (v1 runtime-only) ⇒ state chỉ nằm trong RAM process,
+// restart là mất sạch lệnh. Muốn restart-safe thì đổi sang `parquet`/`sqlite`.
+// Đừng đọc comment cũ "restart không mất lệnh" là đúng với mọi backend.
 
-fn trade(hist_src, own, symbol, resolution, hw) {
+fn trade(hist_src, live_src, own, symbol, resolution, hw) {
     let now = now_secs();
     let from = now - hw;
     let step = bucket_secs(resolution);
 
-    // Series phân tích = kline history + candle live; cùng bucket thì live thắng
-    // (nến đang tích cực phản ánh giá thực tế, không phải nến đã đóng của API).
+    // Kline history cho bucket đã đóng + candle live cho bucket đang mở; xem
+    // `merge_candles` để biết vì sao không để live đè lên nến đã đóng.
     let hist = station_candles(hist_src, from, now, resolution);
-    let live = station_candles(own, from, now, resolution);
+    let live = station_candles(live_src, from, now, resolution);
     if type_of(hist) == "()" && type_of(live) == "()" { return []; }
-    let series = merge_candles(empty_if_missing(hist), empty_if_missing(live));
+    let series = merge_candles(empty_if_missing(hist), empty_if_missing(live), now, step);
     // ≥ 10 nến để AnalysisGrid dựng được plan.
     if series.len() < 10 { return []; }
 
@@ -96,9 +115,18 @@ fn trade(hist_src, own, symbol, resolution, hw) {
     let closed = last_closed(series, now, step);
     if type_of(closed) == "()" { return []; }
 
-    // Lệnh/cursor đều nằm ở own station.
-    let state = station_query(own, from, now);
-    if type_of(state) == "()" { return []; }
+    // Lệnh/cursor đều nằm ở own station — nhưng **phải lọc**, không kéo cả
+    // station. Own station lấp đầy tick aggTrade (5 obs/tick, vài nghìn
+    // tick/phút); `station_query` không lọc dựng map cho từng observation và
+    // `max_map_size` của Rhai là trần *engine-wide* (100_000) nên vài chục
+    // nghìn obs là đủ vượt ⇒ cả batch script bị bỏ với
+    // "Size of object map too large", node im bặt, không đặt được lệnh nào.
+    // Đo thật: 26_680 obs trong 1 giờ đã vỡ. Kernel chỉ cần lệnh + cursor.
+    // `station_query` trả `()` khi station chưa tồn tại (node vừa dựng) — nên
+    // gộp qua `empty_if_missing` thay vì cộng thẳng, nếu không sẽ lỗi script.
+    let state = [];
+    state += empty_if_missing(station_query(own, from, now, "order"));
+    state += empty_if_missing(station_query(own, from, now, "summary", "trading_step"));
     if already_traded(state, closed["t"].to_int()) { return []; }
 
     portfolio_feed(series, state, closed, trading_cfg(), symbol)
@@ -152,7 +180,11 @@ fn trading_cfg() {
     if is_def_var("param_strategy") && type_of(param_strategy) != "()" {
         strategy = param_strategy;
     }
-    let grid_levels = 5;
+    // Mặc định 4, khớp `trading.grid_levels` trong config.toml (contract test
+    // `config_file_contract` chốt hai chỗ này phải bằng nhau). 4 vì mỗi ô là
+    // một `TradingGrid` riêng: mốc đầu không có TP dưới, mốc cuối không có TP
+    // trên ⇒ chỉ `levels - 2` mốc dùng được thật. 2 mốc là 0 mốc dùng được.
+    let grid_levels = 4;
     if is_def_var("param_grid_levels") && type_of(param_grid_levels) != "()" {
         grid_levels = param_grid_levels.to_int();
     }
@@ -253,7 +285,7 @@ fn trading_cfg() {
 fn rebuild(candles, prev, params) {
     // Knob thiếu → dùng default (script phải chạy được khi config không set hết,
     // ví dụ node chỉ truyền 3 knob trong test live).
-    let levels = knob(params, "grid_levels", 5.0).to_int();
+    let levels = knob(params, "grid_levels", 4.0).to_int();
     let max_bit = knob(params, "max_bit", 20.0).to_int();
     let min_trades = knob(params, "min_trades", 3.0).to_int();
     let amp = knob(params, "level_edge_amp", 0.10).to_float();
@@ -284,6 +316,23 @@ fn rebuild(candles, prev, params) {
     let step = grid_step(g);
     let n_cells = num_cells(g);
 
+    // Bỏ ô nào không đủ rộng để mọi mốc trong ô còn lãi sau phí sàn.
+    //
+    // Vì sao **bỏ ô** mà không rút bớt số mốc: mỗi ô là một `TradingGrid`
+    // riêng, nên trong lưới của ô đó mốc đầu không có TP phía dưới
+    // (`tp_below(0)` trả chính nó) và mốc cuối không có TP phía trên. Rút xuống
+    // 2 mốc làm **mọi** mốc chết, còn 3 mốc chỉ còn 1 mốc dùng được — nên
+    // `max_levels_for_profit` là cách sai (đã thử, làm hỏng test). Cách đúng là
+    // giữ nguyên `grid_levels` mốc và loại ô không đủ rộng.
+    //
+    // Bề rộng ô là `step`; `levels` mốc ⇒ `levels − 1` khoảng. Đo thật trên
+    // Binance: `step` ~ $25, mốc cách nhau $6.28, còn phí đòi ≥ $168 ở
+    // `fee_rate = 0.001` ⇒ mọi entry của mọi ô đều bị kernel lo (`placed=0`).
+    let fee = knob(params, "fee_rate", 0.001).to_float();
+    // Biên an toàn 1.2: kernel so **nghiêm** (`expected_profit_pct > 2 × fee`),
+    // nên bước đúng bằng ngưỡng cũng bị lo.
+    let spacing_floor = min_profitable_step(fee, (lo + hi) / 2.0) * 1.2;
+
     let plans = [];
     for cell in 0..n_cells {
         let cell_lo = lo + cell * step;
@@ -292,6 +341,12 @@ fn rebuild(candles, prev, params) {
         let total = up + down;
         // Drift = (up - down) / (up + down) trong [-1, 1].
         let drift = if total > 0.0 { (up - down) / total } else { 0.0 };
+
+        // Ô quá hẹp: bỏ hẳn thay vì dựng lưới mà không lệnh nào lãi.
+        if type_of(spacing_floor) != "()" && levels >= 2 {
+            let spacing = step / (levels - 1);
+            if spacing < spacing_floor { continue; }
+        }
 
         // Lưới lệnh trong ô: K bậc đều, level đầu = đáy ô.
         let lv = [];
@@ -367,43 +422,22 @@ fn clamp01(x) {
     if x < 0.25 { 0.25 } else if x > 0.75 { 0.75 } else { x }
 }
 
-// ── tick: gộp trade price vào candle bucket ────────────────────────────────
-
-fn tick_accumulate(observations, own, symbol, resolution) {
-    let out = [];
-    for o in observations {
-        let ms = o["ts"];
-        if type_of(ms) == "()" { continue; }
-        if type_of(o["value"]) == "()" { continue; }
-        let price = o["value"].to_float();
-
-        // Binance klines/aggTrade ts là ms; bucket theo phút (resolution 1m).
-        let bucket = (ms / 1000) / 60 * 60;
-        let cur = station_candles(own, bucket - 60, bucket + 60, resolution);
-        let c = candle_at(cur, bucket);
-        let next = merge_price(c, price);
-        out += candle_rows(bucket, next, symbol, resolution);
-    }
-    out
-}
-
-// Candle hiện tại cho bucket trong danh sách candles (hoặc candle rỗng).
-fn candle_at(candles, bucket) {
-    for c in candles {
-        if c["t"] == bucket { return c; }
-    }
-    #{ t: bucket, o: 0.0, h: 0.0, l: 0.0, c: 0.0, v: 0.0 }
-}
-
-// Gộp một tick price vào candle: o giữ giá đầu, h/l = max/min, c = giá mới,
-// v = số tick gộp (volume xấp xỉ bằng số trade đã gộp).
-fn merge_price(c, price) {
-    let o = if c["o"].to_float() > 0.0 { c["o"].to_float() } else { price };
-    let h = if c["h"].to_float() > 0.0 && c["h"].to_float() > price { c["h"].to_float() } else { price };
-    let l = if c["l"].to_float() > 0.0 && c["l"].to_float() < price { c["l"].to_float() } else { price };
-    let v = c["v"].to_float() + 1.0;
-    #{ o: o, h: h, l: l, c: price, v: v }
-}
+// ── tick: KHÔNG gộp nến ở đây nữa ──────────────────────────────────────────
+//
+// Việc gom tick thành nến do node `tick_2_candle` lo
+// (`crates/opsense-components/src/converters/tick2candle.rs`): nó giữ nến đang
+// mở trong RAM và chỉ ghi nến khi nến đóng.
+//
+// Lý do bỏ khỏi script, không phải vì thừa:
+//
+// - **Script stateless.** Bản cũ phải `station_query` station của chính node
+//   rồi tự gộp lại từ đầu mỗi batch, nên nến tích luỹ phụ thuộc thứ tự batch;
+//   batch thiếu thì nến sai.
+// - **Nến đóng là dữ liệu cuối.** Bản cũ ghi nến **đang mở** liên tục, và
+//   kernel phải tự loại bằng `last_closed` trong script. Nay node chỉ ghi nến
+//   đã đóng, nên invariant "chỉ nến đóng mới tới kernel" nằm ở đúng một chỗ.
+// - **Lỗi nến là lỗi dữ liệu, không phải lỗi chiến lược** — nên log ở component
+//   chứ không ở strategy.
 
 // 5 obs OHLCV cho một candle, theo đúng convention station
 // (ts = giây, `labels.field` ∈ o/h/l/c/v, `labels.resolution`).
@@ -438,8 +472,9 @@ fn snapshot(hist_src, own, symbol, resolution, hw, lw) {
     let live = station_candles(own, now - lw, now, resolution);
     if type_of(live) == "()" { return []; }
 
-    // Live candle thắng history cùng bucket (bucket đang mở = giá realtime).
-    let candles = sort_by_t(merge_candles(hist, live));
+    // Kline history cho bucket đã đóng + candle live cho bucket đang mở.
+    let step = bucket_secs(resolution);
+    let candles = sort_by_t(merge_candles(hist, live, now, step));
     if candles.len() < 2 { return []; }
 
     let points = [];
@@ -504,24 +539,37 @@ fn snapshot(hist_src, own, symbol, resolution, hw, lw) {
 
 /// Merge: live candle thắng history cùng bucket, bucket live-only được thêm
 /// cuối; kết quả sort theo `t` ở caller (`sort_by_t`).
-fn merge_candles(hist, live) {
+/// Ghép kline (history) + candle live, quy tắc theo trạng thái bucket:
+///
+/// - bucket **đã đóng** (`t + step <= now`): giữ nến kline của API. Đây là
+///   dữ liệu cuối cùng của cả phút. Trước đây live đè lên mọi bucket và đó là
+///   lý do không có lệnh nào: nến live dựng từ tick 10s chỉ có vài phép nên
+///   biên ~1 cent, thay cho biên thật ~$30 — vùng `[l, h]` bé bằng 1/1000 nên
+///   không mốc lưới nào rơi vào ⇒ `grids_touched=1` mà `placed=0 rejected=0`.
+/// - bucket **đang mở** (`t + step > now`): lấy live vì nến kline chưa có.
+/// - bucket đóng chỉ có ở live (API thiếu nến): vẫn lấy, để không mất dữ liệu.
+///
+/// `merge_candles` cần `now` + `step` vì không tự biết bucket nào đã đóng.
+fn merge_candles(hist, live, now, step) {
+    // Map thay vì quét tuyến tính: `find_candle` từng là O(hist × live) và với
+    // 960 nến là ~921k phép — chạm trần `set_max_operations(1_000_000)` nên
+    // script chết "Too many operations", không dựng được lưới nào. Khoá map là
+    // chuỗi vì Rhai chỉ cho khoá `Identifier`.
+    let hist_t = #{};
+    for c in hist { hist_t[c["t"].to_string()] = true; }
+
     let out = [];
     for c in hist {
-        let hit = find_candle(live, c["t"]);
-        if type_of(hit) != "()" { out.push(hit); } else { out.push(c); }
+        // Nhường bucket đang mở cho live, nếu không sẽ có hai nến cùng `t`.
+        if c["t"].to_int() + step > now { continue; }
+        out.push(c);
     }
     for c in live {
-        if type_of(find_candle(hist, c["t"])) == "()" { out.push(c); }
+        let t = c["t"].to_int();
+        if t + step > now { out.push(c); }
+        else if !hist_t.contains(c["t"].to_string()) { out.push(c); }
     }
     out
-}
-
-/// Candle có `t` == bucket, hoặc `()` nếu không có.
-fn find_candle(candles, bucket) {
-    for c in candles {
-        if c["t"] == bucket { return c; }
-    }
-    ()
 }
 
 /// Sắp xếp candles theo `t` tăng dần (chèn — dữ liệu nhỏ).
@@ -529,11 +577,12 @@ fn sort_by_t(candles) {
     let out = [];
     for c in candles {
         let t = c["t"];
-        let i = 0;
-        while i < out.len() && out[i]["t"] <= t {
-            i = i + 1;
-        }
-        if i < out.len() { out.insert(i, c); } else { out.push(c); }
+        // Dò từ CUỐI về trước, không phải từ đầu: dữ liệu vào đã gần tăng
+        // dần (kline rồi live) nên vị trí chèn thường là cuối ⇒ O(1) mỗi
+        // phần tử. Dò từ đầu là O(n²) và với 960 nến thì vượt trần phép.
+        let i = out.len();
+        while i > 0 && out[i - 1]["t"] > t { i = i - 1; }
+        if i == out.len() { out.push(c); } else { out.insert(i, c); }
     }
     out
 }

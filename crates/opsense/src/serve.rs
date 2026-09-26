@@ -27,11 +27,23 @@ use opsense_core::Config;
 use crate::api::{AppState, admin, health_check, oauth, repl};
 
 fn init_telemetry() -> Option<(SdkTracerProvider, SdkMeterProvider)> {
+    // Log ra stdout **luôn**, kể cả khi không bật OTLP. Trước đây cả subscriber
+    // nằm trong nhánh "có OTLP", nên `opsense serve` chạy với endpoint mặc định
+    // là **không log gì cả** và `RUST_LOG` bị bỏ qua hoàn toàn — chẩn đoán
+    // pipeline (component fail, kernel không đặt lệnh, lỗi TLS) bị mù.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
+
     let agent_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:4317".to_string());
     let use_alloy = std::env::var("USE_ALLOY").unwrap_or_else(|_| "false".to_string());
 
     if agent_endpoint == "http://127.0.0.1:4317" && use_alloy != "true" {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .init();
         return None;
     }
 
@@ -79,7 +91,8 @@ fn init_telemetry() -> Option<(SdkTracerProvider, SdkMeterProvider)> {
     let telemetry_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
     tracing_subscriber::registry()
-        .with(EnvFilter::new("debug"))
+        .with(filter)
+        .with(fmt_layer)
         .with(telemetry_layer)
         .init();
 

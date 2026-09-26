@@ -386,11 +386,6 @@ mod tests {
     fn default_params() -> SessionParams {
         SessionParams {
             session_id: "test-session".into(),
-            env: Default::default(),
-            allow_fs: false,
-            allow_net: false,
-            max_memory_mb: 0,
-            packages: vec![],
             require_challenge: false,
             requested_role: String::new(),
         }

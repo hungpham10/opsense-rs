@@ -28,6 +28,10 @@ opsense-qlib = { path = "../opsense-qlib", features = ["json"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `tracing::warn!` khi query bị cắt cửa sổ — xem `MAX_BLOCKS_PER_QUERY` trong
+# `src/station.rs`. Không log thì việc cắt là thụ động, người đọc tưởng mất dữ
+# liệu chứ không phải bị giới hạn.
+tracing = { workspace = true }
 
 config_crate = { package = "config", version = "0.15", default-features = false, features = ["toml"] }
 tokio = { workspace = true }

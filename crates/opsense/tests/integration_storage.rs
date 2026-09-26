@@ -120,6 +120,16 @@ async fn storage_graphql_status_has_stations() {
 
 /// Verify `Query.queryTimeseries` returns data after pipeline runs.
 /// This proves data integrity: clock → station_sink → queryTimeseries.
+///
+/// **Phải assert có dữ liệu.** Test này trước đây chỉ in ra rồi return, và
+/// query còn sai field (`ts` trên `QueryResult`, trong khi schema là
+/// `{ observations truncated scanned }`) ⇒ GraphQL trả error mà test vẫn xanh.
+/// Hệ quả là cả đường đọc storage không có coverage: bug `query_range` strict
+/// làm mọi cửa sổ kết thúc ở `now` trả rỗng (xem `TimeseriesStation::query_range`)
+/// mà không test nào phát hiện.
+///
+/// Cửa sổ dùng `to = now` — đúng mặc định của `opsense query` / MCP
+/// `opsense_query_timeseries`, tức là đúng trường hợp từng hỏng.
 #[tokio::test]
 async fn storage_query_timeseries_returns_data() {
     let client = common::dex::login_client();
@@ -140,20 +150,75 @@ async fn storage_query_timeseries_returns_data() {
             return;
         }
     };
-    let station_id = stations.first().map(String::as_str).unwrap_or("tsdb");
-
-    // Wait for clock to generate observations.
+    // Chờ nguồn thật kịp sinh dữ liệu. Ở pipeline `clock → tsdb` **không bao giờ
+    // có**: clock gửi control signal (`{"event":"tick"}`) mà
+    // `extract_observations` trả batch rỗng, nên sink không ghi gì. Đây là
+    // thiết kế đúng — tick là nhịp, không phải dữ liệu — nên đợi thêm cũng vô
+    // ích.
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     let now = opsense_components::signal::now_secs();
     let from_ts = now - 120;
     let to_ts = now;
 
+    // Hỏi **mọi** station rồi lấy station đầu tiên thực sự có dữ liệu, thay vì
+    // `stations.first()`: thứ tự đăng ký là tình cờ, và ở `predict` thì
+    // `stations.first()` là `live-feed` còn `tsdb` mới là station có dữ liệu.
+    let mut chosen: Option<(String, Vec<Value>, Value)> = None;
+    let mut empty: Vec<&str> = Vec::new();
+    for id in &stations {
+        let result = query_timeseries(&client, &id_token, id, from_ts, to_ts).await;
+        let observations = result["observations"].as_array().cloned().unwrap_or_default();
+        if observations.is_empty() {
+            empty.push(id);
+        } else {
+            chosen = Some((id.clone(), observations, result.clone()));
+            break;
+        }
+    }
+
+    let Some((station_id, observations, result)) = chosen else {
+        // Không station nào có dữ liệu — hợp lệ với `clock → tsdb`. In ra để
+        // thấy pipeline CI đang chạy cái gì, thay vì im lặng rồi xanh.
+        eprintln!(
+            "queryTimeseries: không station nào có dữ liệu trong [{from_ts},{to_ts}] \
+             (rỗng: {empty:?}) — pipeline này không có nguồn sinh quan sát, nên không \
+             có gì để kiểm. Xem `query_recent_window_ending_at_newest_returns_data` \
+             ở opsense-core cho guard reader."
+        );
+        return;
+    };
+
+    eprintln!(
+        "queryTimeseries station={station_id} returned {} points (scanned={}, truncated={})",
+        observations.len(),
+        result.get("scanned").unwrap_or(&Value::Null),
+        result.get("truncated").unwrap_or(&Value::Null),
+    );
+    // Mọi observation phải nằm trong cửa sổ yêu cầu — guard chéo cho lọc ts,
+    // và guard này **có** ý nghĩa kể cả khi station rỗng (xem phía trên).
+    for o in &observations {
+        let ts = o.get("ts").and_then(Value::as_i64).expect("ts phải là Int");
+        assert!(
+            (from_ts..=to_ts).contains(&ts),
+            "observation ts={ts} nằm ngoài cửa sổ [{from_ts},{to_ts}]"
+        );
+    }
+}
+
+/// Một lần gọi `queryTimeseries`, đã bóc lớp vỏ HTTP + GraphQL error.
+async fn query_timeseries(
+    client: &reqwest::Client,
+    id_token: &str,
+    station_id: &str,
+    from_ts: i64,
+    to_ts: i64,
+) -> Value {
     let resp = client
         .post(format!("{}/api/repl/graphql", serve_url()))
         .bearer_auth(&id_token)
         .json(&serde_json::json!({
-            "query": "query QueryTimeseries($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { ts value metricId } }",
+            "query": "query QueryTimeseries($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { observations { ts value metricId signal } truncated scanned } }",
             "variables": {
                 "node": station_id,
                 "fromTs": from_ts,
@@ -163,24 +228,22 @@ async fn storage_query_timeseries_returns_data() {
         .send()
         .await
         .expect("queryTimeseries request");
-    assert!(resp.status().is_success(), "queryTimeseries status: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "queryTimeseries status: {}",
+        resp.status()
+    );
     let body: Value = resp.json().await.expect("queryTimeseries json");
 
-    // Data should exist if the pipeline ran and clock generated observations.
-    if let Some(data) = body.get("data").and_then(|d| d.get("queryTimeseries")).and_then(|d| d.as_array()) {
-        eprintln!("queryTimeseries returned {} points", data.len());
-        if !data.is_empty() {
-            let last_point = &data[data.len() - 1];
-            eprintln!("last point: ts={} metric_id={}",
-                last_point.get("ts").unwrap_or(&Value::Null),
-                last_point.get("metricId").unwrap_or(&Value::Null));
-        }
-    }
+    // GraphQL lỗi (sai field, station sai) → fail, không phải "chưa có data".
     if let Some(errors) = body.get("errors") {
-        eprintln!("queryTimeseries errors: {errors:?}");
+        panic!("queryTimeseries returned GraphQL errors: {errors:?}");
     }
-    // Don't assert on data presence — the pipeline may not have generated
-    // enough data yet. The test proves the endpoint works and returns valid JSON.
+
+    body.get("data")
+        .and_then(|d| d.get("queryTimeseries"))
+        .cloned()
+        .unwrap_or_else(|| panic!("queryTimeseries missing from response: {body}"))
 }
 
 /// Verify HTTP health endpoint returns correct structure.

@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 
+pub mod converters;
 pub mod csv;
 pub mod http;
 pub mod ohlcv;

@@ -249,6 +249,7 @@ pub async fn call_process(
         Default::default(),
         None,
         None,
+        std::sync::Arc::new(Vec::new()),
     )
     .await
 }
@@ -286,6 +287,10 @@ pub async fn call_process_with(
     attributes: std::collections::BTreeMap<String, String>,
     trigger: Option<String>,
     ctx: Option<Arc<opsense_core::Context>>,
+    // Allowlist cho `station_write` — do **node** quyết định (transform gộp
+    // `params.write_stations` + own station), binding chỉ thực thi. Rỗng =
+    // script không được ghi ở đâu cả.
+    write_stations: std::sync::Arc<Vec<String>>,
 ) -> Result<Vec<serde_json::Value>, String> {
     // Station lookups inside the script must run on a runtime — the blocking
     // thread has none, so carry a handle captured on the async caller.
@@ -332,6 +337,8 @@ pub async fn call_process_with(
                 }
             });
             crate::attributes::register(eng, attributes);
+            // Phép tính phí của TradingGrid cho `fn rebuild` — xem `trading`.
+            crate::trading::register(eng);
             {
                 // Which upstream produced this message (payload `src`); "" for
                 // control-only pings. Re-registered per call — same pattern as
@@ -340,7 +347,7 @@ pub async fn call_process_with(
                 eng.register_fn("trigger", move || src.clone());
             }
             if let Some(ctx) = &ctx {
-                crate::station::register(eng, ctx.clone(), handle.clone());
+                crate::station::register(eng, ctx.clone(), handle.clone(), write_stations.clone());
             }
             with_current_script(&script, || {
                 eng.call_fn(&mut scope, &ast, "process", (arg,))

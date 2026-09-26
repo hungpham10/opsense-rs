@@ -28,7 +28,10 @@ use tokio::sync::{RwLock, mpsc};
 use crate::runtime::ScriptSource;
 use crate::vector::runtime::{Component, Identify, Message, Outbound};
 
-#[transform]
+/// `station = true` makes the node terminal: its own station is queryable, so it
+/// needs no downstream consumer. The station is registered either way (see
+/// `run`), this only relaxes the graph check — same as `HttpSource`.
+#[transform(terminal_field = "station")]
 pub struct RhaiTransform {
     pub id: String,
     pub inputs: Vec<String>,
@@ -41,6 +44,9 @@ pub struct RhaiTransform {
     /// Script parameters exposed as global variables.
     #[serde(default)]
     pub params: BTreeMap<String, Value>,
+    /// Node terminal — không cần consumer downstream.
+    #[serde(default)]
+    pub station: bool,
 }
 
 impl RhaiTransform {
@@ -52,6 +58,7 @@ impl RhaiTransform {
             script: script.to_string(),
             script_path: String::new(),
             params: BTreeMap::new(),
+            station: false,
         }
     }
 
@@ -63,6 +70,7 @@ impl RhaiTransform {
             script: String::new(),
             script_path: script_path.to_string(),
             params: BTreeMap::new(),
+            station: false,
         }
     }
 
@@ -140,6 +148,19 @@ impl_rhai_transform!(
             // Run the script. The pipeline context is handed over so the
             // script can read any registered station by name — no per-feature
             // globals or snapshots are injected here.
+            //
+            // Allowlist ghi: `params.write_stations` + own station. Own station
+            // luôn được phép vì ghi ngầm (script trả về ⇒ ghi vào own station)
+            // vẫn là mặc định; node muốn bỏ hẳn thì đặt
+            // `params.implicit_station_write = false` và tự `station_write`.
+            let mut write_stations: Vec<String> = self
+                .params
+                .get("write_stations")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            write_stations.push(self.id.clone());
+
             let items = match crate::call_process_with(
                 source,
                 serde_json::to_value(&batch).unwrap_or(Value::Array(Vec::new())),
@@ -147,6 +168,7 @@ impl_rhai_transform!(
                 attributes,
                 trigger,
                 Some(Arc::new(ctx.clone())),
+                Arc::new(write_stations),
             )
             .await
             {
@@ -171,7 +193,17 @@ impl_rhai_transform!(
                 }
             }
 
-            if !processed.is_empty() {
+            // Ghi ngầm vào own station: MẶC ĐỊNH CÒN BẬT (script trả về gì thì
+            // own station nhận nấy) vì 12 script trong repo dựa vào nó. Node muốn
+            // "script tự quyết gì ghi" thì đặt
+            // `params.implicit_station_write = false` và gọi `station_write` tường
+            // minh — lúc đó return chỉ còn nghĩa forward xuống sink.
+            let implicit = self
+                .params
+                .get("implicit_station_write")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            if implicit && !processed.is_empty() {
                 // Range the write over the script's own output timestamps, so
                 // observations whose ts differ from the trigger batch (a ping
                 // with an empty payload) still land in their blocks.

@@ -329,14 +329,27 @@ impl QueryRoot {
                 async_graphql::Error::new(format!("station '{node}' is not a timeseries: {e}"))
             })?;
 
-        // `None` = cache miss (chưa có gì trong cửa sổ) → coi như rỗng nhưng phải
-        // log, vì client không phân biệt được "rỗng" với "đọc hỏng".
+        // `query_recent` (lenient) — KHÔNG dùng `query_range` (strict) ở đây.
+        //
+        // `query_range` coi "block không phủ hết cửa sổ yêu cầu" là lỗ hổng
+        // phủ và trả `None` cho **cả** query. Điều đó sai với mọi stream sống:
+        // block chỉ chứa obs tại những timestamp có thật, nên phần đuôi của
+        // partition luôn "trống", và block đầu tiên trong cửa sổ luôn bắt đầu
+        // sau `from_ts`. Đo được trên strategy binance (block 300s, candle 1m):
+        //
+        //     to = now-300 → 25 dòng      to = now-30 → 0 dòng
+        //     to = now-120 → 40 dòng      to = now    → 0 dòng
+        //
+        // Tức là `to` mặc định (`now`) gần như luôn rỗng ⇒ `opsense query` /
+        // `opsense orders` / MCP `opsense_query_timeseries` không thấy gì. Script
+        // thì vẫn chạy vì đã dùng `query_recent` (`candles.rs`), nên triệu
+        // chứng lệch: strategy có dữ liệu, API nói không.
         let rows = {
             let station = station.read().await;
-            match station.query_range(from, to).await {
+            match station.query_recent(from, to).await {
                 Some(rows) => rows,
                 None => {
-                    tracing::warn!(node = %node, "timeseries cache miss");
+                    tracing::warn!(node = %node, "timeseries read returned nothing");
                     Vec::new()
                 }
             }

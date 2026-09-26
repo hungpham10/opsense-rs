@@ -5,7 +5,8 @@
 //! [`client::RunnerClient`]), `cli` (script-friendly subcommands, mỗi lệnh = 1
 //! GraphQL round-trip), `init` (scaffold config), `repl` (interactive REPL),
 //! `runner` (kernel-runner gRPC server), `mcp` (MCP stdio server over the
-//! client) and `token`/`session` (auth helpers).
+//! client), `tls` (process-wide rustls crypto provider) and `token`/`session`
+//! (auth helpers).
 
 pub mod api;
 pub mod cli;
@@ -15,6 +16,7 @@ pub mod mcp;
 pub mod repl;
 pub mod runner;
 pub mod serve;
+pub mod tls;
 
 /// Link the `opsense-qlib` crate so its typetag-registered pipeline
 /// components join the component inventory deserialized from

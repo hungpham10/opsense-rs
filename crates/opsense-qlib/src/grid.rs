@@ -196,9 +196,19 @@ impl TradingGrid {
         self.weights[j][col]
     }
 
+    /// Ma trận trọng số đầy đủ — `matrix[level][time]`.
+    ///
+    /// Cần để **serialize** lưới: `weight(j, t)` trả giá trị đã clamp theo cột
+    /// cuối, nên không đọc ngược được ra hình dạng gốc. Không có hàm này thì
+    /// `TradingGrid` **không round-trip được** từ ngoài crate ⇒ không lưu
+    /// được plan vào station, và mọi thứ phải rebuild mỗi lần gọi.
+    pub fn weight_matrix(&self) -> &[Vec<f64>] {
+        &self.weights
+    }
+
     /// Số cột (bước thời gian) của weight matrix.
     /// Khi `max_candles > 0` thì dùng `max_candles`, ngược lại là 1 (constant).
-    fn weight_cols(&self) -> usize {
+    pub fn weight_cols(&self) -> usize {
         if self.max_candles > 0 {
             self.max_candles
         } else {
@@ -428,6 +438,15 @@ impl TradingGrid {
         self
     }
 
+    /// Số nến tối đa lưới này còn hiệu lực. `0` = không giới hạn.
+    ///
+    /// Cần để serialize: `weight_cols()` suy ra từ nó, mà `weight_matrix()`
+    /// đã đã lưu cả số cột thật — đọc `max_candles` là cách duy nhất dựng lại
+    /// hành vi "hết vòng đời" sau khi khôi phục từ station.
+    pub fn max_candles(&self) -> usize {
+        self.max_candles
+    }
+
     /// Set cả long và short win probability vectors cùng lúc.
     pub fn with_win_probabilities(mut self, long_win_p: Vec<f64>, short_win_p: Vec<f64>) -> Self {
         if long_win_p.len() == self.long_win_p.len() && short_win_p.len() == self.short_win_p.len()
@@ -526,7 +545,7 @@ impl TradingGrid {
     /// Trọng số **theo xu hướng** — đặt khối lượng lớn đúng hướng trend.
     ///
     /// Entry dưới center là LONG, trên center là SHORT (xem
-    /// `portfolio::evaluate_grid_entries`), nên:
+    /// `portfolio::open_orders`), nên:
     /// - bullish: LONG thắng khi giá lên → nặng bậc thấp: `w_j ∝ (K − j)^p`
     /// - bearish: SHORT thắng khi giá xuống → nặng bậc cao: `w_j ∝ (j + 1)^p`
     ///

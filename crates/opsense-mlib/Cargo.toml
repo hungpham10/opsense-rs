@@ -47,6 +47,8 @@ tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }
 log = { workspace = true }
 opsense-macros = { path = "../opsense-macros" }
+# `tls` — cài process-wide rustls crypto provider (xem `src/tls.rs`).
+rustls = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

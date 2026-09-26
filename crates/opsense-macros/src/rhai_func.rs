@@ -43,7 +43,7 @@ pub fn rhai_func_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return e.to_compile_error(),
     };
 
-    let mut item_fn = match syn::parse2::<ItemFn>(item) {
+    let item_fn = match syn::parse2::<ItemFn>(item) {
         Ok(f) => f,
         Err(e) => return e.to_compile_error(),
     };

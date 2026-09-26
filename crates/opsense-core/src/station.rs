@@ -17,6 +17,15 @@ use opsense_mlib::storage::LakehouseStorage;
 #[cfg(feature = "sqlite")]
 use opsense_mlib::storage::SqliteStorage;
 use opsense_mlib::storage::{CategoryStorage, PatternStorage, TimeseriesStorage};
+
+/// Trần số block một lần [`TimeseriesStation::query_recent`] duyệt.
+///
+/// `Query.queryTimeseries` mặc định lấy cửa sổ 30 ngày
+/// (`MAX_QUERY_WINDOW_SECS`); với `block_secs` nhỏ (5s) đó là ~518.400 block, mỗi
+/// block một lần tra cache + một lần đọc storage. 20.000 block ≈ 27 giờ ở block
+/// 5s, ~69 ngày ở block 300s — đủ cho mọi reader thực tế mà không để một query
+/// quét nửa triệu block.
+const MAX_BLOCKS_PER_QUERY: i64 = 20_000;
 use opsense_model::events::Observation;
 
 use crate::config::StorageConfig;
@@ -231,6 +240,32 @@ impl Default for TimeseriesStation {
     }
 }
 
+/// Toàn bộ những gì `PartialEq` của [`Observation`] so sánh, đóng gói thành
+/// một khoá `Hash + Eq` — dùng để bỏ trùng trong
+/// [`TimeseriesStation::update_range`].
+///
+/// `labels` phải vào khoá và phải **thứ tự ổn định**: `HashMap` không có thứ
+/// tự, nên sắp xếp cặp khoá–giá trị trước rồi nối lại.
+type ObsIdentity = (i64, String, u8, u8, u64, Option<u8>, String);
+
+fn obs_identity(o: &Observation) -> ObsIdentity {
+    let mut labels: Vec<(&String, &String)> = o.labels.iter().collect();
+    labels.sort_unstable();
+    let labels: String = labels
+        .iter()
+        .map(|(k, v)| format!("{k}={v}\u{1}"))
+        .collect();
+    (
+        o.ts,
+        o.metric_id.clone(),
+        o.kind as u8,
+        o.signal as u8,
+        o.value.to_bits(),
+        o.severity.map(|s| s as u8),
+        labels,
+    )
+}
+
 impl TimeseriesStation {
     /// Station thuần memory (block evict là mất).
     pub fn new(capacity: usize, block_duration_secs: Option<i64>) -> Self {
@@ -359,6 +394,19 @@ impl TimeseriesStation {
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// **Chỉ dùng khi thật sự cần ngữ nghĩa strict.** Bất kỳ reader nào (API,
+    /// CLI, MCP) phải dùng [`Self::query_recent`].
+    ///
+    /// Strict nghĩa là: nếu BẤT KỲ block nào trong cửa sổ không "phủ trọn"
+    /// khoảng yêu cầu thì trả `None` — kể cả khi block đó có dữ liệu và chỉ
+    /// thiếu phần đuôi vốn dĩ không tồn tại. Với station sống, điều đó xảy ra
+    /// gần như luôn: block chỉ chứa obs tại timestamp có thật, nên đuôi partition
+    /// luôn trống (`range.1` < `block_end`), và block đầu tiên của cửa sổ luôn
+    /// bắt đầu sau `from_ts` ⇒ `req_start >= range.0` sai. Đo được với
+    /// strategy binance (block 300s, candle 1m): `to = now-120` → 40 dòng,
+    /// `to = now-30` → 0 dòng.
+    ///
+    /// Xem [`Self::query_recent`] cho hành vi đúng của reader.
     pub async fn query_range(&self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
         let start_block = self.get_block_id(from_ts);
         let end_block = self.get_block_id(to_ts);
@@ -418,19 +466,48 @@ impl TimeseriesStation {
     /// rải rác ở block phía trước/sau lỗ hổng (vd station chỉ mới có một cửa
     /// sổ vài chục giây dưới `to_ts`). Không như [`query_range`] (trả `None`
     /// nếu BẤT KỲ block nào trong cửa sổ chưa cover trọn), method này trả
-    /// *những gì thực sự có* — dùng cho script-facing `station_query`: script
-    /// hỏi cửa sổ rộng mà không cần biết chính xác vùng dữ liệu được cover.
+    /// *những gì thực sự có* — đây là hành vi đúng cho MỌI reader:
+    /// script-facing `station_query` (`candles.rs`) và API `Query.queryTimeseries`
+    /// mà `opsense query` / `opsense orders` / MCP `opsense_query_timeseries` dùng.
     pub async fn query_recent(&self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
-        let start_block = self.get_block_id(from_ts);
         let end_block = self.get_block_id(to_ts);
+        let mut start_block = self.get_block_id(from_ts);
+
+        // Chặn trần số block một query được duyệt. Không có trần này, cửa sổ
+        // mặc định của `Query.queryTimeseries` (30 ngày) với block nhỏ là một
+        // vòng lặp khổng lồ: `block_secs = 5` ⇒ ~518.400 block, mỗi block một
+        // lần `caches.get` (miss) + `load_cold_block` ⇒ tới storage. Đo trên
+        // `strategies/binance` với `cache_block_seconds = 5` đó là hàng trăm
+        // nghìn lượt đọc cho **một** lệnh query.
+        //
+        // Cắt cửa sổ về `MAX_BLOCKS_PER_QUERY` block gần nhất thay vì quét hết:
+        // dữ liệu "gần nhất" mới là thứ mọi reader thực sự hỏi, và việc bỏ
+        // phần cũ được **log** chứ không im lặng.
+        if end_block - start_block + 1 > MAX_BLOCKS_PER_QUERY {
+            let dropped = end_block - start_block + 1 - MAX_BLOCKS_PER_QUERY;
+            start_block = end_block - MAX_BLOCKS_PER_QUERY + 1;
+            tracing::warn!(
+                from_ts,
+                to_ts,
+                dropped_blocks = dropped,
+                block_duration = self.block_duration,
+                "query_recent: cửa sổ quá rộng so với số block — chỉ duyệt \
+                 {} block gần nhất, bỏ {dropped} block cũ",
+                MAX_BLOCKS_PER_QUERY
+            );
+        }
+
         let mut result = Vec::new();
 
         for block_id in start_block..=end_block {
             let block_start = block_id * self.block_duration;
             let block_end = (block_id + 1) * self.block_duration - 1;
 
+            // `caches.get` đã trả về `Block` **sở hữu** (`LruCache::get` clone
+            // bên trong) — clone thêm ở đây là tốn gấp đôi. Block của station
+            // tick có thể vài trăm MB, nên giữ đúng một bản copy.
             let block = match self.caches.get(&block_id) {
-                Some(b) => b.clone(),
+                Some(b) => b,
                 None => match self.load_cold_block(block_id).await {
                     Some(b) => {
                         self.caches.put(block_id, b.clone());
@@ -465,6 +542,31 @@ impl TimeseriesStation {
         let start_block = self.get_block_id(query_from);
         let end_block = self.get_block_id(query_to);
 
+        // Batch trải trên nhiều block hơn sức chứa LRU ⇒ các block cũ bị đẩy ra
+        // ngay trong vòng lặp. Có storage thì hook persist cứu lại; **không có**
+        // (station memory-only) thì mất vĩnh viễn, im lặng. Đo được: ghi 40.000
+        // obs trên 667 block (cache 32) chỉ đọc lại 1.920.
+        //
+        // Thành thật trong `strategies/binance`: `history` fetch 500 nến mỗi 10s.
+        // Với `[storage] block_secs = 3600` (mặc định) đó ~9 block/lần nên an
+        // toàn; nhưng nếu ai đó hạ `block_secs` xuống 5 cho khớp
+        // `cache_block_seconds`, 500 nến = hàng nghìn block ⇒ mất ~99% mỗi
+        // lần fetch mà không có dấu vết.
+        let span = end_block - start_block + 1;
+        if span > HOT_BLOCKS as i64 && self.storage.is_none() {
+            tracing::warn!(
+                station_span_blocks = span,
+                hot_blocks = HOT_BLOCKS,
+                from_ts = query_from,
+                to_ts = query_to,
+                "update_range: batch trải {} block > sức chứa cache {} và station \
+                 không có storage ⇒ block cũ bị mất. Hoặc tăng cache_max_blocks, \
+                 hoặc tăng [storage] block_secs, hoặc bật backend có persist.",
+                span,
+                HOT_BLOCKS
+            );
+        }
+
         for block_id in start_block..=end_block {
             let mut block = self.caches.get(&block_id).unwrap_or_default();
 
@@ -478,13 +580,32 @@ impl TimeseriesStation {
                 }
             }
 
-            // Sap xep va xoa trung lặp — chỉ xoá observation giống hệt nhau
-            // (ts + metric + kind + signal + value + labels). `dedup_by_key(ts)`
-            // trước đây đè 4/5 field OHLCV dùng chung một ts (cùng ts ≠ trùng
-            // dữ liệu); với các dòng cùng (ts, field) khác giá trị, stable-sort
-            // giữ thứ tự ghi (mới append sau cũ) nên đọc lại lấy bản mới nhất.
+            // Bỏ trùng **chính xác**.
+            //
+            // Cách cũ là `sort_by_key(ts)` + `dedup_by(|a, b| a == b)`, và nó
+            // bỏ sót gần như mọi thứ: `dedup_by` chỉ so **hai phần tử liền kề**,
+            // mà nến 1m có 5 observation (`o/h/l/c/v`) dùng chung một `ts`, nên
+            // bản cũ và bản mới của cùng một field không bao giờ đứng cạnh nhau
+            // (`o h l c v o h l c v`) ⇒ không cặp nào giống nhau. Đo được: nạp 3
+            // lần cùng một bộ 61 nến (305 dòng thật) cho **915** dòng. Node
+            // `http_origin` nạp lại định kỳ nên đây là chuyện thường, không
+            // phải rì hiếm.
+            //
+            // Vì sao không gộp theo `(ts, field, metric)` — cách nhìn hiển nhiên
+            // hơn: nó **mất dữ liệu**. Record khác nhau hoàn toàn có thể trùng
+            // `ts` và `metric_id` mà khác `labels` (hai lệnh cùng giây khác
+            // `order_id`; portfolio nhiều dòng cùng mốc). Đo được: gộp kiểu đó làm
+            // nhánh `trading` của pipeline binance **ngừng sinh lệnh**. Nên khoá
+            // phải là *toàn bộ* những gì `PartialEq` so sánh — xem
+            // [`obs_identity`].
+            //
+            // `sort_by_key` là **stable** nên các observation cùng `ts` giữ thứ
+            // tự ghi, và `retain` giữ bản đầu tiên. Giữ bản đầu hay bản sau
+            // không khác gì khi chúng *giống hệt nhau*.
             block.items.sort_by_key(|x| x.ts);
-            block.items.dedup_by(|a, b| a == b);
+            let mut seen: std::collections::HashSet<ObsIdentity> =
+                std::collections::HashSet::with_capacity(block.items.len());
+            block.items.retain(|o| seen.insert(obs_identity(o)));
 
             // Cập nhật range bao phủ và timestamp sửa đổi
             let eff_from = query_from.max(block_start);
@@ -748,6 +869,84 @@ mod tests {
 
     fn obs(ts: i64, value: f64) -> Observation {
         Observation::new(ts, "cpu".into(), TelemetryKind::Metric, Signal::Raw, value)
+    }
+
+    /// Cửa sổ rộng hơn `MAX_BLOCKS_PER_QUERY` phải bị cắt về các block gần
+    /// nhất — nếu không, cửa sổ mặc định 30 ngày với `block_secs = 5` là
+    /// ~518.400 lần `caches.get` + `load_cold_block` cho **một** lệnh query.
+    #[tokio::test]
+    async fn query_recent_caps_blocks_visited() {
+        let st = TimeseriesStation::new(32, Some(5)); // block 5s — nhỏ nhất thực tế
+        let batch = vec![obs(1_000_000, 1.0)];
+        st.update_range(&batch, 1_000_000, 1_000_000, 1_000_000);
+
+        // 30 ngày ở block 5s = 518.400 block, vượt trần.
+        let from = 1_000_000 - 30 * 24 * 3600;
+        let to = 1_000_000;
+        let span = (to - from) / 5;
+        assert!(
+            span > MAX_BLOCKS_PER_QUERY,
+            "test chỉ có nghĩa khi cửa sổ vượt trần (span={span})"
+        );
+
+        // Không panic, không treo, vẫn trả dữ liệu ở phần được giữ.
+        let got = st.query_recent(from, to).await.unwrap();
+        assert!(
+            got.iter().any(|o| o.ts == 1_000_000),
+            "phải giữ được block gần nhất: {got:?}"
+        );
+
+        // Cửa sổ vừa đủ thì không bị cắt.
+        let narrow = st.query_recent(1_000_000 - 600, 1_000_000).await.unwrap();
+        assert_eq!(narrow.len(), 1);
+    }
+
+    /// Cửa sổ **kết thúc ở `now`** phải trả về dữ liệu đang có.
+    ///
+    /// Đây là bản unit của guard mà `integration_storage.rs` từng ôm: reader
+    /// `query_recent` — thứ `Query.queryTimeseries` (mà `opsense query` /
+    /// `opsense orders` / MCP `opsense_query_timeseries` dùng) gọi — phải trả
+    /// phần nó có. Bản integration **không** kiểm được điều này: pipeline CI
+    /// chỉ là `clock → tsdb`, mà tick là **control signal**
+    /// (`extract_observations` trả batch rỗng), nên station đó không bao giờ
+    /// có quan sát nào. Đo được trên CI: cả 6 job integration đỏ ở đúng assert
+    /// "phải có dữ liệu" ấy, và đỏ với lý do sai.
+    ///
+    /// Hai dạng cửa sổ, vì người đọc thật gặp cả hai:
+    /// - kết thúc **đúng** ở mốc mới nhất (vừa ghi xong),
+    /// - kết thúc **sau** mốc mới nhất (chờ một nhịp, y hệt 15 giây mà
+    ///   integration test cũ chờ trước khi hỏi).
+    #[tokio::test]
+    async fn query_recent_window_ending_at_newest_returns_data() {
+        const NEWEST: i64 = 1_700_000_000;
+        let st = TimeseriesStation::new(32, Some(300));
+
+        // 5 quan sát 60s một, giống nến phút mà clock sinh ra.
+        let batch: Vec<Observation> = (0..5)
+            .map(|i| obs(NEWEST - (4 - i) * 60, i as f64))
+            .collect();
+        st.update_range(&batch, NEWEST - 240, NEWEST, NEWEST);
+
+        for (label, to) in [("kết thúc đúng mốc mới nhất", NEWEST), ("kết thúc sau mốc mới nhất 15s", NEWEST + 15)] {
+            let from = to - 120;
+            let got = st
+                .query_recent(from, to)
+                .await
+                .unwrap_or_default();
+            assert!(
+                !got.is_empty(),
+                "cửa sổ [{from}, {to}] ({label}) phải trả dữ liệu đang có, thực tế rỗng"
+            );
+            // Và chỉ trả phần **nằm trong cửa sổ** — không lọc thì trả cả nến cũ.
+            assert!(
+                got.iter().all(|o| (from..=to).contains(&o.ts)),
+                "cửa sổ [{from}, {to}] ({label}) trả observation ngoài cửa sổ: {got:?}"
+            );
+            assert!(
+                got.iter().any(|o| o.ts == NEWEST),
+                "phải có mốc mới nhất {NEWEST} ({label})"
+            );
+        }
     }
 
     /// `query_range` trả None khi bất kỳ block nào trong cửa sổ chưa cover

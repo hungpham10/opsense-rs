@@ -107,6 +107,7 @@ async fn missing_script_source_errors_cleanly() {
         script: "".into(),
         script_path: "".into(),
         params: BTreeMap::new(),
+        station: false,
     };
 
     // Build a minimal runtime context with clock
@@ -154,6 +155,7 @@ async fn rhai_script_receives_params_and_attributes() {
         },
         None,
         None,
+        std::sync::Arc::new(Vec::new()),
     )
     .await
     .expect("call_process_with works");
