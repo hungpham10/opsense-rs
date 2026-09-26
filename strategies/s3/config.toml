@@ -23,11 +23,6 @@ url_style = "path"
 s3_flush_interval_secs = 15
 s3_snapshot_interval_secs = 60
 
-[capacity]
-cpu_usage = 4.0
-mem_usage = 16.0
-disk_usage = 1.0
-
 [[pipeline.components]]
 type = "clock"
 id = "clock"

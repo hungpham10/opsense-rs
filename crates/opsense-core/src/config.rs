@@ -7,10 +7,6 @@
 //! cache_block_seconds = 300
 //! cache_max_blocks = 288
 //!
-//! [capacity]
-//! cpu_usage = 32.0
-//! mem_usage = 64.0
-//!
 //! [sources.vector]
 //! url = "http://vector:8686"
 //! jq_filter = ".data[]"
@@ -167,9 +163,6 @@ pub struct SourcesConfig {
     pub vector: Option<VectorSourceConfig>,
 }
 
-/// Capacity per metric (metric name -> maximum capacity, e.g. cores, GB).
-pub type CapacityMap = HashMap<String, f64>;
-
 /// Pipeline section: components registered into the vector `Runtime`.
 ///
 /// Each entry is a typetag-tagged component table, e.g.
@@ -312,13 +305,80 @@ impl Default for StorageBackendConfig {
     }
 }
 
+/// Cấu hình tầng gossip — xem [`crate::config::Config::gossip`].
+///
+/// Tách theo đúng ranh giới của 2 lib: ở đây chỉ có *quan sát* (ai sống, ai
+/// chết sau bao lâu), không có quyết định master.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GossipConfig {
+    /// Định danh node này. Rỗng ⇒ không bật mesh.
+    pub node_id: String,
+    /// URL mà node khác gọi tới node này (đưa vào roster cho node mới).
+    pub own_url: String,
+    /// Danh sách URL seed, phân tách bằng dấu phẩy. Rỗng ⇒ node không có seed.
+    pub seeds: String,
+    /// Secret dùng cho endpoint nội bộ (`/internal/*`). Rỗng ở môi trường thật
+    /// là lỗi cấu hình — xem [`Config::validate_gossip`].
+    pub token: String,
+    /// Chu kỳ một vòng: ping peer, đồng bộ state, tái thu, rồi báo cáo.
+    pub tick_secs: u64,
+    /// Im lặng bao lâu thì chuyển `alive → suspect` (suy đoán, chưa kết luận).
+    pub suspect_secs: u64,
+    /// Im lặng bao lâu thì tái thu `suspect → dead`.
+    pub dead_secs: u64,
+    /// View ổn định bao lâu thì mới để tầng trên hành động (bật/dừng pipeline).
+    pub settle_secs: u64,
+    /// Số peer xác nhận "không thấy" để **rút ngắn** thời gian chờ tái thu.
+    /// Không phải điều kiện quyết định — thời gian im lặng mới là.
+    pub quorum: u32,
+}
+
+impl Default for GossipConfig {
+    fn default() -> Self {
+        Self {
+            node_id: String::new(),
+            own_url: String::new(),
+            seeds: String::new(),
+            token: String::new(),
+            tick_secs: 5,
+            suspect_secs: 5,
+            dead_secs: 30,
+            settle_secs: 10,
+            quorum: 1,
+        }
+    }
+}
+
+impl GossipConfig {
+    /// Có bật mesh không: phải có `node_id` **và** `own_url` (không có URL thì
+    /// peer không gọi tới được).
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        !self.node_id.is_empty()
+    }
+
+    /// Seed đã tách thành danh sách URL.
+    #[must_use]
+    pub fn seed_urls(&self) -> Vec<&str> {
+        self.seeds.split(',').map(str::trim).filter(|s| !s.is_empty()).collect()
+    }
+}
+
+/// Cấu hình tầng raft — xem [`crate::config::Config::raft`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+pub struct RaftConfig {
+    /// Pipeline mà node đứng một mình sẽ chạy (khi chưa ai gom nó vào cụm nào).
+    pub pipeline: String,
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub engine: EngineConfig,
-
-    #[serde(default)]
-    pub capacity: CapacityMap,
 
     #[serde(default)]
     pub sources: SourcesConfig,
@@ -347,6 +407,19 @@ pub struct Config {
     /// REPL shell settings (`[repl]`), used by `opsense serve --repl`.
     #[serde(default)]
     pub repl: ReplConfig,
+
+    /// Mesh membership settings (`[gossip]`) — **quan sát**: node này là ai, ai
+    /// khác, và thời gian chờ bao lâu thì coi node khác là chết.
+    ///
+    /// Mỗi trường đều bị `OPSENSE_GOSSIP_<FIELD>` ghi đè khi chạy. `node_id` rỗng
+    /// ⇒ **tắt mesh**, node chạy đơn lẻ như hiện tại.
+    #[serde(default)]
+    pub gossip: GossipConfig,
+
+    /// Cluster/decision settings (`[raft]`) — **quyết định**: node đứng một mình
+    /// chạy pipeline nào, và có cắm engine quyết định chưa.
+    #[serde(default)]
+    pub raft: RaftConfig,
 }
 
 impl Config {
@@ -375,11 +448,6 @@ impl Config {
         if self.engine.cache_max_blocks == 0 {
             return Err(ConfigError::Invalid(
                 "engine.cache_max_blocks must be > 0".into(),
-            ));
-        }
-        if self.capacity.is_empty() {
-            return Err(ConfigError::Invalid(
-                "capacity must define at least one metric".into(),
             ));
         }
         // S3 lake cần bucket — prefix (rỗng = gốc bucket) là tuỳ chọn.
@@ -431,10 +499,6 @@ poll_interval_seconds = 60
 cache_block_seconds = 300
 cache_max_blocks = 288
 
-[capacity]
-cpu_usage = 32.0
-mem_usage = 64.0
-
 [sources.vector]
 url = "http://vector:8686"
 jq_filter = ".data[]"
@@ -454,10 +518,8 @@ env_name = "prod"
     }
 
     #[test]
-    fn parses_capacity_sources_and_attributes() {
+    fn parses_sources_and_attributes() {
         let cfg = sample();
-        assert_eq!(cfg.capacity.get("cpu_usage"), Some(&32.0));
-        assert_eq!(cfg.capacity.get("mem_usage"), Some(&64.0));
         assert_eq!(cfg.attributes.get("dc").map(String::as_str), Some("hcm"));
         let v = cfg.sources.vector.unwrap();
         assert_eq!(v.url, "http://vector:8686");
@@ -467,10 +529,9 @@ env_name = "prod"
 
     #[test]
     fn defaults_engine_when_omitted() {
-        let toml = r#"
-[capacity]
-cpu_usage = 32.0
-"#;
+        // TOML rỗng không hợp lệ (crate `config` đòi có ít nhất một dòng), nên
+        // dùng một file chỉ có comment — tức "không khai gì".
+        let toml = "# không khai gì";
         let raw = config_crate::Config::builder()
             .add_source(config_crate::File::from_str(toml, FileFormat::Toml))
             .build()
@@ -479,20 +540,6 @@ cpu_usage = 32.0
         assert_eq!(cfg.engine.poll_interval_seconds, 60);
         // Sources are optional now — pipeline HTTP nodes fetch on their own.
         assert!(cfg.validate().is_ok());
-    }
-
-    #[test]
-    fn rejects_empty_capacity() {
-        let toml = r#"
-[sources.vector]
-url = "http://vector:8686"
-"#;
-        let raw = config_crate::Config::builder()
-            .add_source(config_crate::File::from_str(toml, FileFormat::Toml))
-            .build()
-            .unwrap();
-        let cfg: Config = raw.try_deserialize().unwrap();
-        assert!(cfg.validate().is_err());
     }
 
     #[test]

@@ -287,11 +287,6 @@ fn config_file_contract() {
     assert_eq!(s3.prefix, S3_PREFIX);
     assert_eq!(s3.url_style.as_deref(), Some("path"));
 
-    // Capacity của đúng các metric Prometheus demo mà config chú thích.
-    assert!(cfg.capacity.contains_key("up"));
-    assert!(cfg.capacity.contains_key("node_cpu_seconds_total"));
-    assert!(cfg.capacity.contains_key("node_memory_MemAvailable_bytes"));
-
     // Graph pipeline của config deserialize qua typetag registry (nếu một
     // component chưa đăng ký sẽ lỗi `unknown variant …`). `rhai_transform`
     // deserialize được vì opsense-rhai là *regular* dependency của opsense

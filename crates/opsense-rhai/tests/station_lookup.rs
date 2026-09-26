@@ -74,18 +74,6 @@ async fn context_attributes_roundtrip() {
     assert_eq!(retrieved.get("foo").unwrap(), "bar");
 }
 
-#[tokio::test]
-async fn context_capacity_lookup() {
-    let cfg: opsense_core::Config = serde_json::from_str("{}").unwrap();
-    let mut cfg = cfg;
-    cfg.capacity.insert("disk_usage".into(), 100.0);
-    let secret = Secret::new().await.unwrap();
-    let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
-
-    assert_eq!(ctx.capacity("disk_usage"), Some(100.0));
-    assert_eq!(ctx.capacity("unknown"), None);
-}
-
 /// `station_query` phải **lọc được server-side**, vì giới hạn `max_map_size` của
 /// Rhai là engine-wide: một observation là map lồng `labels` map, nên kéo cả
 /// station đầy tick sẽ vượt trần và làm **cả batch script chết**.
@@ -137,7 +125,7 @@ async fn station_query_filters_signal_and_label_kind() {
     async fn run(ctx: &Arc<Context>, body: &str) -> Result<Vec<serde_json::Value>, String> {
         let src = format!("fn process(points) {{ {body} }}");
         opsense_rhai::call_process_with(
-            opsense_rhai::ScriptSource::Inline(src.into()),
+            opsense_rhai::ScriptSource::Inline(src),
             serde_json::Value::Array(vec![]),
             Default::default(),
             Default::default(),
@@ -235,7 +223,7 @@ async fn station_write_respects_allowlist() {
     ) -> Result<Vec<serde_json::Value>, String> {
         let src = format!("fn process(points) {{ {body} [] }}");
         opsense_rhai::call_process_with(
-            opsense_rhai::ScriptSource::Inline(src.into()),
+            opsense_rhai::ScriptSource::Inline(src),
             serde_json::Value::Array(vec![]),
             Default::default(),
             Default::default(),

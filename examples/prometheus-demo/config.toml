@@ -24,10 +24,6 @@ backend = "memory"
 [attributes]
 prom_url = "https://prometheus.demo.prometheus.io"
 
-[capacity]
-up = 1.0
-node_memory_MemAvailable_bytes = 16.0
-
 # ── 1. Nguồn: nhịp 10s ────────────────────────────────────────────────────────
 [[pipeline.components]]
 type = "clock"

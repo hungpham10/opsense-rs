@@ -33,11 +33,6 @@ url_style = "path"
 # Creds/region KHÔNG khai ở đây — fallback theo env `OPSENSE_S3_*` rồi `AWS_*`
 # (xem opsense-core station.rs open_backend).
 
-[capacity]
-up = 1.0
-node_cpu_seconds_total = 4.0
-node_memory_MemAvailable_bytes = 16.0
-
 [[pipeline.components]]
 type = "clock"
 id = "clock"
