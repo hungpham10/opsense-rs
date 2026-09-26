@@ -39,6 +39,12 @@ pub mod vector;
 #[cfg(feature = "rhai")]
 pub mod script;
 
-// Cluster membership / state / election — logic thuần cho mesh nhiều node.
-#[cfg(feature = "cluster")]
-pub mod mesh;
+// Cluster cho nhiều node, tách làm hai lib theo **bản chất dữ liệu**:
+// - `gossip`: quan sát — ai còn sống, ai chạy version nào. Suy đoán, chấp nhận
+//   tạm thời sai.
+// - `raft`: quyết định — cụm gồm node nào, ai là master. Nhất quán, không được sai.
+#[cfg(feature = "gossip")]
+pub mod gossip;
+
+#[cfg(feature = "raft")]
+pub mod raft;

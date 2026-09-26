@@ -16,9 +16,12 @@ rhai = ["dep:rhai"]
 parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:object_store"]
 sqlite = ["dep:sqlx"]
 redis = ["dep:redis"]
-# Cluster/membership state + election (pure logic, no I/O — transport lives in
-# `opsense::cluster`). Off by default so this dependency-light crate stays lean.
-cluster = []
+# Cluster cho nhiều node, hai feature tách ràng. Cả hai đều tắt mặc định để
+# crate nhẹ không bị kéo thêm; vận chuyển nằm ở `opsense::cluster`.
+#   gossip = quan sát (ai sống) — không quyết định gì
+#   raft   = quyết định (ai là master) — không suy đoán gì
+gossip = []
+raft = []
 
 [dependencies]
 arrow-array = { workspace = true, optional = true }
@@ -58,15 +61,17 @@ tempfile = "3"
 
 # Test mesh cần feature `cluster`; khai `required-features` để build không bật
 # feature vẫn xanh thay vì hỏng vì không tìm thấy module.
-[[test]]
-name = "mesh_convergence"
-required-features = ["cluster"]
 
 
+
+
+
+# Test cluster cần feature tương ứng; `required-features` để build không bật
+# feature vẫn xanh thay vì hỏng vì không tìm thấy module.
 [[test]]
-name = "mesh_election"
-required-features = ["cluster"]
+name = "gossip"
+required-features = ["gossip"]
 
 [[test]]
-name = "mesh_join"
-required-features = ["cluster"]
+name = "raft"
+required-features = ["raft"]
