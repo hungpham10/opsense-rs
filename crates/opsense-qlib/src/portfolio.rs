@@ -573,6 +573,17 @@ impl Portfolio {
                             session.review_at,
                             t_rebuild.elapsed().as_secs_f64() * 1000.0,
                         );
+                        // Log thật (không `debug_assertions`): đây là thứ duy
+                        // nhất phân biệt "kernel không dựng plan" với "plan có
+                        // nhưng giá chưa chạm level" khi chạy bản release. Trước
+                        // đây dòng này chỉ có ở debug build nên production im
+                        // lặng, và phải đoán.
+                        tracing::debug!(
+                            ts = current,
+                            next_review = session.review_at,
+                            grids = session.plan.len(),
+                            "evaluate: plan rebuilt"
+                        );
                     }
                     Err(error) => {
                         // Rebuild fail (chưa đủ data, market closed, …) → giữ plan
@@ -822,21 +833,21 @@ impl Portfolio {
         fetch: FetchFn<'_>,
         params: ParamFn<'_>,
     ) -> Result<(u64, Vec<TradingGrid>), Error> {
-        #[cfg(debug_assertions)]
         let t = std::time::Instant::now();
         let review = self.strategy.next(current).await;
 
         let plan = self.strategy.rebuild(current, plan, fetch, params).await?;
 
-        #[cfg(debug_assertions)]
-        if t.elapsed().as_secs_f64() * 1000.0 > 1000.0 {
-            println!(
-                "  [debug] rebuild at {}: {} grids, {:.0}ms",
-                current,
-                plan.len(),
-                t.elapsed().as_secs_f64() * 1000.0
-            );
-        }
+        // `plan.len() == 0` ⇒ không có lưới nào để đặt lệnh — đây là nguyên nhân
+        // khả dĩ nhất khi strategy chạy mà không lệnh nào, và trước đây vô hình
+        // ở release vì chỉ có `println!` trong `debug_assertions`.
+        tracing::debug!(
+            ts = current,
+            grids = plan.len(),
+            next_review = review,
+            took_ms = (t.elapsed().as_secs_f64() * 1000.0) as u64,
+            "rebuild xong"
+        );
 
         Ok((review, plan))
     }
@@ -857,12 +868,18 @@ impl Portfolio {
     ) -> Vec<OrderEvent> {
         let ts = candle.t.max(0) as u64;
         let mut events = Vec::new();
+        let mut grids_touched = 0usize;
 
         for (ig, grid) in plan.iter().enumerate() {
             if candle.h < grid.min() || candle.l > grid.max() {
                 continue;
             }
+            // Ghi nhận lần quét grid mà **không** chạm level nào. Đây là phân
+            // biệt quan trọng: "plan rỗng" (chưa dựng được lưới) và "plan có
+            // nhưng nến chưa chạm bậc" là hai lỗi khác nhau, mà trước đây cả hai
+            // đều chỉ biểu hiện là "không có lệnh".
 
+            grids_touched += 1;
             for il in 0..grid.num_levels() {
                 let entry_price = grid.level_price(il);
 
@@ -932,6 +949,22 @@ impl Portfolio {
             }
         }
 
+        tracing::debug!(
+            candle_ts = ts,
+            plan_grids = plan.len(),
+            grids_touched,
+            placed = events
+                .iter()
+                .filter(|e| matches!(e, OrderEvent::Placed { .. }))
+                .count(),
+            rejected = events
+                .iter()
+                .filter(|e| matches!(e, OrderEvent::Rejected { .. }))
+                .count(),
+            low = candle.l,
+            high = candle.h,
+            "đánh giá entry cho nến đã đóng"
+        );
         events
     }
 

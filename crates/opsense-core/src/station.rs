@@ -516,6 +516,31 @@ impl TimeseriesStation {
         let start_block = self.get_block_id(query_from);
         let end_block = self.get_block_id(query_to);
 
+        // Batch trải trên nhiều block hơn sức chứa LRU ⇒ các block cũ bị đẩy ra
+        // ngay trong vòng lặp. Có storage thì hook persist cứu lại; **không có**
+        // (station memory-only) thì mất vĩnh viễn, im lặng. Đo được: ghi 40.000
+        // obs trên 667 block (cache 32) chỉ đọc lại 1.920.
+        //
+        // Thành thật trong `strategies/binance`: `history` fetch 500 nến mỗi 10s.
+        // Với `[storage] block_secs = 3600` (mặc định) đó ~9 block/lần nên an
+        // toàn; nhưng nếu ai đó hạ `block_secs` xuống 5 cho khớp
+        // `cache_block_seconds`, 500 nến = hàng nghìn block ⇒ mất ~99% mỗi
+        // lần fetch mà không có dấu vết.
+        let span = end_block - start_block + 1;
+        if span > HOT_BLOCKS as i64 && self.storage.is_none() {
+            tracing::warn!(
+                station_span_blocks = span,
+                hot_blocks = HOT_BLOCKS,
+                from_ts = query_from,
+                to_ts = query_to,
+                "update_range: batch trải {} block > sức chứa cache {} và station \
+                 không có storage ⇒ block cũ bị mất. Hoặc tăng cache_max_blocks, \
+                 hoặc tăng [storage] block_secs, hoặc bật backend có persist.",
+                span,
+                HOT_BLOCKS
+            );
+        }
+
         for block_id in start_block..=end_block {
             let mut block = self.caches.get(&block_id).unwrap_or_default();
 
