@@ -44,7 +44,24 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 # TLS via rustls (not OpenSSL) so cross builds don't need libssl-dev;
 # keep the remaining default features (charset/http2/macos-system-configuration)
 # for parity with the old default-tls build.
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "cookies", "charset", "http2", "macos-system-configuration", "rustls-tls-native-roots"] }
+#
+# `rustls-tls-native-roots-**no-provider**` is REQUIRED, not a style choice.
+# reqwest 0.12's non-`no-provider` features hard-wire `__rustls-ring`
+# (→ `rustls/ring`), while the AWS SDK S3 stack (aws-config →
+# aws-smithy-runtime/default-https-client → aws-smithy-http-client/
+# rustls-aws-lc) hard-wires `rustls/aws_lc_rs`. Both on the SAME rustls
+# 0.23 build ⇒ "Could not automatically determine the process-level
+# CryptoProvider" panic at the first TLS handshake, i.e. every outbound
+# https/wss in `opsense serve` dies (http_source + websocket_2_json). The
+# `-no-provider` variant leaves provider selection to us; the AWS SDK already
+# pins `aws_lc_rs`, and `crates/opsense/src/main.rs` installs it explicitly.
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "cookies", "charset", "http2", "macos-system-configuration", "rustls-tls-native-roots-no-provider"] }
+
+# Single rustls provider for the whole build. Must match the one the AWS SDK
+# enables (`aws_lc_rs`); declaring it here keeps the choice ours instead of
+# borrowed from a transitive dependency, and `install_default()` in
+# `crates/opsense/src/main.rs` makes the runtime pick explicit.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12", "logging"] }
 
 # JSON
 serde = { version = "1.0", features = ["derive"] }

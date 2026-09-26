@@ -34,6 +34,10 @@ tower-http = { version = "0.6", features = ["trace"] }
 async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
 reqwest = { workspace = true }
+# Only for `install_crypto_provider()` in src/main.rs — the process must pin ONE
+# rustls provider explicitly (see workspace `rustls` dep for why the build ends
+# up with both `ring` and `aws-lc-rs` features on).
+rustls = { workspace = true }
 
 # Observability
 tracing = { workspace = true }

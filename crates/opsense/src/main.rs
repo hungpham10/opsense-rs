@@ -233,6 +233,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {    dotenvy::dotenv().ok();
     // Register sqlx `any` drivers (mysql/postgres/sqlite) before the Resolver
     // builds its connection pools.
     sqlx::any::install_default_drivers();
+    // Pin ONE rustls crypto provider before any TLS work — the build ends up
+    // with both `ring` and `aws-lc-rs` features enabled, which makes rustls
+    // panic at the first handshake. See `opsense::tls`.
+    opsense::tls::install_default_provider();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
