@@ -35,7 +35,7 @@ pub mod rhai_collect {
 
 /// Lõi macro `#[rhai_register]` — sinh `fn register(eng)` trong module.
 pub fn rhai_register_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut item_mod: ItemMod = match parse2(item) {
+    let item_mod: ItemMod = match parse2(item) {
         Ok(m) => m,
         Err(e) => return e.to_compile_error(),
     };

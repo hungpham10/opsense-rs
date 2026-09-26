@@ -106,7 +106,7 @@ pub fn register(engine: &mut rhai::Engine) {
     engine.register_fn("ts_moving_avg", |points: Array, window_secs: i64| -> Dynamic {
         let Ok(p) = parse_points(&points) else { return Dynamic::from(Array::new()); };
         if p.is_empty() || window_secs <= 0 { return Dynamic::from(Array::new()); }
-        let ws = window_secs as i64;
+        let ws = window_secs;
         let mut out = Array::new();
         for i in 0..p.len() {
             let cutoff = p[i].0 - ws;
@@ -125,7 +125,7 @@ pub fn register(engine: &mut rhai::Engine) {
     engine.register_fn("ts_resample", |points: Array, bucket_secs: i64, agg: &str| -> Dynamic {
         let Ok(p) = parse_points(&points) else { return Dynamic::from(Array::new()); };
         if p.is_empty() || bucket_secs <= 0 { return Dynamic::from(Array::new()); }
-        let bs = bucket_secs as i64;
+        let bs = bucket_secs;
         let t0 = p[0].0;
         let t1 = p.last().unwrap().0;
         let num_buckets = ((t1 - t0) / bs + 1) as usize;

@@ -15,7 +15,7 @@ use crate::grid::AnalysisGrid;
             "num_buckets" -> |t: &mut Self| -> i64 { t.num_buckets() as i64 },
             "num_cells" -> |t: &mut Self| -> i64 { t.num_cells() as i64 },
             "interval_secs" -> |t: &mut Self| -> i64 { t.interval_secs() },
-            "grid" -> |t: &mut Self| -> AnalysisGrid { t.grid().clone() },
+            "grid" -> |t: &mut Self| -> AnalysisGrid { *t.grid() },
             "down_probability" -> |t: &mut Self| -> f64 { t.down_probability() },
             "up_probability" -> |t: &mut Self| -> f64 { t.up_probability() },
             "stay_probability" -> |t: &mut Self| -> f64 { t.stay_probability() },

@@ -99,7 +99,7 @@ fn find<'a>(items: &'a [Value], id: &str) -> &'a Value {
     items
         .iter()
         .find(|v| v["metric_id"] == id)
-        .expect(&format!("output phải có metric {id}"))
+        .unwrap_or_else(|| panic!("output phải có metric {id}"))
 }
 
 /// Clock ping (trigger ""/None) → chỉ có predictions, không có check.
