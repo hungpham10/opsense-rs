@@ -286,7 +286,13 @@ impl Settings {
                 let mut s = ScriptStrategy::new(src, self.review_interval_secs)
                     .with_knob("min_trades", self.grid_min_trades.into())
                     .with_knob("weight_sharpness", self.grid_weight_sharpness.into())
-                    .with_knob("max_bit", (self.grid_max_bit as i64).into());
+                    .with_knob("max_bit", (self.grid_max_bit as i64).into())
+                    // `fee_rate` + `grid_levels` phải tới được `fn rebuild`: script
+                    // cần chúng để tính bước giữa hai mốc tối thiểu còn lãi sau
+                    // phí. Trước đây thiếu nên script rơi về default và dựng
+                    // mốc quá dày ⇒ mọi entry bị kernel lo (`placed=0`).
+                    .with_knob("fee_rate", self.fee_rate.into())
+                    .with_knob("grid_levels", (self.grid_levels as i64).into());
                 if let Some(amp) = self.grid_level_edge_amp {
                     s = s.with_knob("level_edge_amp", amp.into());
                 }

@@ -553,6 +553,13 @@ async fn trading_orders_readable_via_graphql() {
                         .and_then(Value::as_object_mut)
                         .expect("grid node có params");
                     params.insert("mode".into(), json!("trading"));
+                    // Phí gần như 0: test này kiểm tra **lệnh có đọc được qua
+                    // API** hay không, không kiểm tra lợi nhuận sau phí. Để phí
+                    // thật (0.001) thì việc giá có chạm bậc lưới phụ thuộc thời
+                    // điểm khớp nến ⇒ test trở nên chập chờn theo thời gian. Kinh
+                    // tế phí có test riêng ở `opsense-qlib` (`min_profitable_step`
+                    // và cổng `2 × fee` trong `evaluate_grid_entries`).
+                    params.insert("fee_rate".into(), json!(0.00001));
                 }
                 _ => {}
             }

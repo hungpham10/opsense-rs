@@ -122,7 +122,12 @@ script_path = "strategies/binance/grid.rhai"
    lookback_secs = 172800
    review_interval_secs = 900
    trading_candle_secs = 60
-   fee_rate = 0.0005
+   # Phí sàn **mỗi phía** (Binance spot taker = 0.001; chỉ 0.0005 nếu chiết khấu
+   # BNB/VIP). Lệnh limit vào rồi đóng ở TP trả 2 lần phí, nên bước giữa hai mốc
+   # lưới phải > 2 × fee_rate × giá — ở 0.001 và BTC ~84000 là > $168. Kernel
+   # lo mọi entry vi phạm (`portfolio.rs`), nên đặt nhỏ hơn thực tế ⇒ không lệnh
+   # nào được đặt mà nhìn từ ngoài chỉ thấy "chiến lược không vào lệnh".
+   fee_rate = 0.001
    kelly_fraction = 0.25
    base_capital = 100000.0
    # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.

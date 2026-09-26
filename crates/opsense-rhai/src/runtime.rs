@@ -337,6 +337,8 @@ pub async fn call_process_with(
                 }
             });
             crate::attributes::register(eng, attributes);
+            // Phép tính phí của TradingGrid cho `fn rebuild` — xem `trading`.
+            crate::trading::register(eng);
             {
                 // Which upstream produced this message (payload `src`); "" for
                 // control-only pings. Re-registered per call — same pattern as

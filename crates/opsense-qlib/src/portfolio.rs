@@ -914,14 +914,38 @@ impl Portfolio {
                         (entry_price - tp_price) / entry_price
                     };
 
-                    if expected_profit_pct <= fee_rate {
+                    // Một lệnh limit vào rồi đóng ở TP trả **hai** lần phí sàn
+                    // (vào + ra), nên lợi nhuận thực là
+                    // `expected_profit_pct − 2 × fee_rate`. Cổng lọc trước đây
+                    // chỉ so với **một** `fee_rate` ⇒ lọt qua những lệnh lỗ
+                    // sau phí. Dùng đúng `TradingGrid::min_profitable_step`
+                    // (2 × fee × giá) cho khớp, và để con số này là nguồn
+                    // duy nhất thay vì lặp lại ở script.
+                    let roundtrip_fee_pct = 2.0 * fee_rate;
+                    if expected_profit_pct <= roundtrip_fee_pct {
+                        let reason = format!(
+                            "expected_profit_pct {expected_profit_pct:.6} <= roundtrip fee \
+                             {roundtrip_fee_pct:.6} (2 × fee {fee_rate:.6})"
+                        );
+                        // Log lý do + số tiền: `expected_profit_pct <= fee_rate`
+                        // là khi bước giữa hai mốc nhỏ hơn `fee × giá`, nên
+                        // biểu diễn bằng USD sẽ thấy ngay mốc quá dày.
+                        tracing::debug!(
+                            ts,
+                            grid = ig,
+                            level = il,
+                            entry = entry_price,
+                            tp = tp_price,
+                            step_cash = (tp_price - entry_price).abs(),
+                            need_cash = 2.0 * fee_rate * entry_price,
+                            dtype = ?dtype,
+                            "bị lo vì lời sau phí không đủ"
+                        );
                         events.push(OrderEvent::Rejected {
                             ts,
                             grid: ig,
                             level: il,
-                            reason: format!(
-                                "expected_profit_pct {expected_profit_pct:.6} <= fee {fee_rate:.6}"
-                            ),
+                            reason,
                         });
                         continue;
                     }

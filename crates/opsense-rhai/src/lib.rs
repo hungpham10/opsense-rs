@@ -28,6 +28,7 @@ mod runtime;
 mod station;
 mod strategy;
 mod time_fns;
+mod trading;
 mod tools;
 mod transform;
 mod ts_ops;
