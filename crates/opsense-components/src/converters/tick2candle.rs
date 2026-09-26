@@ -36,6 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, mpsc};
 
 use opsense_core::{Observation, Station, TimeseriesStation};
+use serde_json::Value;
 use opsense_macros::transform;
 
 use crate::ohlcv::OHLCV_FIELDS;
@@ -249,10 +250,6 @@ impl_tick_2_candle!(
         let mut wrote = false;
 
         while let Some(msg) = rx.recv().await {
-            for s in &tx.streams {
-                let _ = s.send(msg.clone()).await;
-            }
-
             let Some(batch) = non_empty_batch(&msg) else {
                 continue;
             };
@@ -291,6 +288,21 @@ impl_tick_2_candle!(
                 let to = rows.iter().map(|o| o.ts).max().unwrap_or(max_ts_secs);
                 me.write().await.update_range(&rows, from, to, to);
                 wrote = true;
+
+                // Phát **nến** xuống downstream, KHÔNG forward message gốc.
+                //
+                // Vì sao: message gốc của `tick-map` mang `trigger = "tick"`, và
+                // node downstream dùng `trigger()` để branch. Forward nguyên message
+                // thì downstream vẫn thấy `trigger == "tick"` và bỏ qua — đúng
+                // cái lỗi làm `grid` không bao giờ ra snapshot. Converter thì đổi
+                // hình dạng dữ liệu, nên nó phát đúng hình dạng **mới**: các obs
+                // nến vừa đóng.
+                if let Ok(payload @ Value::Array(_)) = serde_json::to_value(&rows) {
+                    let done = Message { payload };
+                    for s in &tx.streams {
+                        let _ = s.send(done.clone()).await;
+                    }
+                }
             }
 
             // Trễ so với **đồng hồ thật**, không so với tick — nếu so với tick

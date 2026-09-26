@@ -28,7 +28,10 @@ use tokio::sync::{RwLock, mpsc};
 use crate::runtime::ScriptSource;
 use crate::vector::runtime::{Component, Identify, Message, Outbound};
 
-#[transform]
+/// `station = true` makes the node terminal: its own station is queryable, so it
+/// needs no downstream consumer. The station is registered either way (see
+/// `run`), this only relaxes the graph check — same as `HttpSource`.
+#[transform(terminal_field = "station")]
 pub struct RhaiTransform {
     pub id: String,
     pub inputs: Vec<String>,
@@ -41,6 +44,9 @@ pub struct RhaiTransform {
     /// Script parameters exposed as global variables.
     #[serde(default)]
     pub params: BTreeMap<String, Value>,
+    /// Node terminal — không cần consumer downstream.
+    #[serde(default)]
+    pub station: bool,
 }
 
 impl RhaiTransform {
@@ -52,6 +58,7 @@ impl RhaiTransform {
             script: script.to_string(),
             script_path: String::new(),
             params: BTreeMap::new(),
+            station: false,
         }
     }
 
@@ -63,6 +70,7 @@ impl RhaiTransform {
             script: String::new(),
             script_path: script_path.to_string(),
             params: BTreeMap::new(),
+            station: false,
         }
     }
 

@@ -107,6 +107,7 @@ async fn missing_script_source_errors_cleanly() {
         script: "".into(),
         script_path: "".into(),
         params: BTreeMap::new(),
+        station: false,
     };
 
     // Build a minimal runtime context with clock
