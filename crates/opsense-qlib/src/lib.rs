@@ -142,7 +142,28 @@ pub trait Strategy: Sync + Send {
 
 #[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
 pub trait Fee: Send + Sync {
+    /// Phí **một chiều** (một lần khớp lệnh), dạng fraction của giá trị.
     fn rate(&self) -> f64;
+
+    /// Phí **trọn vòng**: mở + đóng. Một lượt giao dịch là HAI lệnh (vào, ra)
+    /// nên phí trả hai lần.
+    ///
+    /// Mặc định `2 × rate()`. Impl có phí khác nhau theo chiều (ví dụ vào là
+    /// maker, ra là taker) thì override — đó là lý do nó ở trait chứ không phải
+    /// một hằng số `2.0` rải rác trong code.
+    ///
+    /// **Đây là nguồn duy nhất** cho ngưỡng lãi: cổng vào lệnh và sổ sách khi
+    /// đóng đều phải dùng nó, không hardcode `2.0 * fee`. Trước đây cổng dùng
+    /// `rate()` (một phí) còn PnL dùng `2.0 * rate()` ⇒ kernel mở lệnh rồi tự
+    /// ghi sổ là lỗ.
+    fn round_trip_rate(&self) -> f64 {
+        self.rate() * 2.0
+    }
+
+    /// Lợi nhuận ròng sau phí trọn vòng, từ biên độ giá thô.
+    fn net_pnl_pct(&self, gross_pnl_pct: f64) -> f64 {
+        gross_pnl_pct - self.round_trip_rate()
+    }
 }
 
 #[cfg_attr(feature = "json", typetag::serde(tag = "type"))]
@@ -155,5 +176,40 @@ pub trait Calendar: Send + Sync {
     fn next(&self, current_ts: u64, resolution: &str) -> u64;
     fn settlement_candles(&self) -> u64 {
         0
+    }
+}
+
+#[cfg(test)]
+mod fee_trait_tests {
+    use super::Fee;
+    use crate::fee::SimpleFixedFee;
+
+    /// Ngưỡng lọc lệnh vào và sổ sách khi đóng phải dùng **cùng một** con số.
+    ///
+    /// Trước đây cổng vào so với `rate()` (một phí) còn PnL trừ `2.0 × rate()`
+    /// hardcode ⇒ kernel mở lệnh rồi tự ghi sổ là lỗ. Test này khoá lại: cùng
+    /// một `gross`, `net_pnl_pct` phải cho kết quả **âm** khi biên độ nằm giữa
+    /// một phí và hai phí.
+    #[test]
+    fn entry_gate_and_ledger_agree_on_round_trip_fee() {
+        let fee = SimpleFixedFee::new(0.001);
+        let one_side = 0.001;
+        let round_trip = fee.round_trip_rate();
+
+        assert!((round_trip - 2.0 * one_side).abs() < 1e-12);
+
+        // Biên độ 0.15%: lọt qua cổng cũ (một phí) nhưng lỗ thật (hai phí).
+        let gross = 0.0015;
+        assert!(gross > one_side, "cổng cũ sẽ cho qua");
+        assert!(
+            fee.net_pnl_pct(gross) < 0.0,
+            "sổ sách phải ghi lỗ: net={}",
+            fee.net_pnl_pct(gross)
+        );
+
+        // Biên độ 0.25%: qua cổng mới và lãi.
+        let good = 0.0025;
+        assert!(good > round_trip, "cổng mới phải cho qua");
+        assert!(fee.net_pnl_pct(good) > 0.0);
     }
 }

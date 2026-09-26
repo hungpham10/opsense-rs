@@ -512,7 +512,6 @@ impl Portfolio {
         let resolution = self.config.resolution_for_test.clone();
         let kelly_fraction = params(KELLY_FRACTION);
         let base_capital = params(BASE_CAPITAL);
-        let fee_rate = self.fee.rate();
 
         // T+N: `settlement_candles == 0` → theo thị trường (StockCalendar → T+3,
         // Crypto/Forex → T+0); giá trị >0 → ép T+N cố định.
@@ -629,7 +628,7 @@ impl Portfolio {
 
                 orders.retain_mut(|order| {
                     if let Some((exit_price, pnl_pct)) =
-                        Self::check_order_exit(order, candle, fee_rate, current_seq)
+                        Self::check_order_exit(order, candle, self.fee.as_ref(), current_seq)
                     {
                         order.exit_price = Some(exit_price);
                         order.pnl_pct = Some(pnl_pct);
@@ -665,7 +664,7 @@ impl Portfolio {
                     candle,
                     &plan,
                     &mut orders,
-                    fee_rate,
+                    self.fee.as_ref(),
                     kelly_fraction,
                     base_capital,
                     unlock_seq,
@@ -861,7 +860,7 @@ impl Portfolio {
         candle: &CandleStick,
         plan: &[TradingGrid],
         orders: &mut Vec<Order>,
-        fee_rate: f64,
+        fee: &dyn Fee,
         kelly_fraction: f64,
         base_capital: f64,
         unlock_seq: u64,
@@ -921,11 +920,11 @@ impl Portfolio {
                     // sau phí. Dùng đúng `TradingGrid::min_profitable_step`
                     // (2 × fee × giá) cho khớp, và để con số này là nguồn
                     // duy nhất thay vì lặp lại ở script.
-                    let roundtrip_fee_pct = 2.0 * fee_rate;
+                    let roundtrip_fee_pct = fee.round_trip_rate();
                     if expected_profit_pct <= roundtrip_fee_pct {
                         let reason = format!(
                             "expected_profit_pct {expected_profit_pct:.6} <= roundtrip fee \
-                             {roundtrip_fee_pct:.6} (2 × fee {fee_rate:.6})"
+                             {roundtrip_fee_pct:.6}"
                         );
                         // Log lý do + số tiền: `expected_profit_pct <= fee_rate`
                         // là khi bước giữa hai mốc nhỏ hơn `fee × giá`, nên
@@ -937,7 +936,7 @@ impl Portfolio {
                             entry = entry_price,
                             tp = tp_price,
                             step_cash = (tp_price - entry_price).abs(),
-                            need_cash = 2.0 * fee_rate * entry_price,
+                            need_cash = roundtrip_fee_pct * entry_price,
                             dtype = ?dtype,
                             "bị lo vì lời sau phí không đủ"
                         );
@@ -996,7 +995,7 @@ impl Portfolio {
     pub fn check_order_exit(
         order: &Order,
         candle: &CandleStick,
-        fee_rate: f64,
+        fee: &dyn Fee,
         current_seq: u64,
     ) -> Option<(f64, f64)> {
         // T+N: chưa đủ N nến thì không được đóng lệnh (giữ nguyên trạng thái mở)
@@ -1066,7 +1065,8 @@ impl Portfolio {
 
         // Phí khứ hồi (entry + exit) — trừ vào PnL thực hiện để report và reward
         // (SizeAwareSharpe) là NET of fees, không chỉ dùng fee làm hurdle.
-        Some((exit_price, pnl_pct - 2.0 * fee_rate))
+        // Dùng `Fee::net_pnl_pct` để **cùng nguồn** với ngưỡng lọc lệnh vào.
+        Some((exit_price, fee.net_pnl_pct(pnl_pct)))
     }
 
     #[inline]
@@ -1588,7 +1588,7 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        let result = Portfolio::check_order_exit(&o, &c, 0.0005, 0);
+        let result = Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0);
         assert!(result.is_some());
         let (exit, pnl) = result.unwrap();
         assert!(exit <= o.sl_price);
@@ -1613,7 +1613,7 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        let result = Portfolio::check_order_exit(&o, &c, 0.0005, 0);
+        let result = Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0);
         assert!(result.is_some());
         let (exit, pnl) = result.unwrap();
         assert!(exit >= o.tp_price);
@@ -1638,7 +1638,7 @@ mod tests {
             c: 102.0,
             v: 1000.0,
         };
-        assert!(Portfolio::check_order_exit(&o, &c, 0.0005, 0).is_none());
+        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0).is_none());
     }
 
     #[test]
@@ -1661,9 +1661,9 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        assert!(Portfolio::check_order_exit(&o, &c, 0.0005, 4).is_none());
+        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 4).is_none());
         // Đủ T+N (current_seq == unlock_seq) → đóng bình thường.
-        assert!(Portfolio::check_order_exit(&o, &c, 0.0005, 5).is_some());
+        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 5).is_some());
     }
 
     #[test]
@@ -1685,7 +1685,7 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        assert!(Portfolio::check_order_exit(&o, &c, 0.0005, 0).is_some());
+        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0).is_some());
     }
 
     #[test]
