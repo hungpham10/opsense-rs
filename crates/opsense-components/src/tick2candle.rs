@@ -1,4 +1,4 @@
-//! `tick_candle` — gom tick thành nến, ghi xuống station của chính node.
+//! `tick2candle` — gom tick thành nến, ghi xuống station của chính node.
 //!
 //! Thay cho việc gom nến nằm trong script (`grid.rhai` từng tự `station_query`
 //! rồi tự gộp mỗi tick). Lý do đưa ra khỏi script:
@@ -116,7 +116,7 @@ impl Bar {
 }
 
 #[transform]
-pub struct TickCandle {
+pub struct Tick2Candle {
     pub id: String,
     pub inputs: Vec<String>,
 
@@ -152,11 +152,11 @@ fn default_unit_ms() -> u64 { 1 }
 fn default_stale_secs() -> u64 { 180 }
 fn default_true() -> bool { true }
 
-impl TickCandle {
+impl Tick2Candle {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            id: "tick-candle".to_string(),
+            id: "tick2candle".to_string(),
             inputs: vec!["tick".to_string()],
             resolution: default_resolution(),
             symbol: String::new(),
@@ -167,7 +167,7 @@ impl TickCandle {
     }
 }
 
-impl Default for TickCandle {
+impl Default for Tick2Candle {
     fn default() -> Self {
         Self::new()
     }
@@ -203,7 +203,7 @@ fn bar_observations(bucket: i64, bar: &Bar, symbol: &str, resolution: &str) -> V
         .collect()
 }
 
-impl_tick_candle!(
+impl_tick_2_candle!(
     async fn run(
         &self,
         _id: usize,
@@ -302,7 +302,7 @@ impl_tick_candle!(
         }
 
         if wrote {
-            tracing::debug!(node = %self.id, "tick_candle đã ghi nến xuống station");
+            tracing::debug!(node = %self.id, "tick2candle đã ghi nến xuống station");
         }
         Ok(())
     }
