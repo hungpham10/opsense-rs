@@ -549,7 +549,7 @@ async fn trading_orders_readable_via_graphql() {
                     // thật (0.001) thì việc giá có chạm bậc lưới phụ thuộc thời
                     // điểm khớp nến ⇒ test trở nên chập chờn theo thời gian. Kinh
                     // tế phí có test riêng ở `opsense-qlib` (`min_profitable_step`
-                    // và cổng `2 × fee` trong `evaluate_grid_entries`).
+                    // và cổng `2 × fee` trong `open_orders`).
                     params.insert("fee_rate".into(), json!(0.00001));
                 }
                 _ => {}

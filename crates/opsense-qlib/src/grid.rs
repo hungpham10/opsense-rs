@@ -545,7 +545,7 @@ impl TradingGrid {
     /// Trọng số **theo xu hướng** — đặt khối lượng lớn đúng hướng trend.
     ///
     /// Entry dưới center là LONG, trên center là SHORT (xem
-    /// `portfolio::evaluate_grid_entries`), nên:
+    /// `portfolio::open_orders`), nên:
     /// - bullish: LONG thắng khi giá lên → nặng bậc thấp: `w_j ∝ (K − j)^p`
     /// - bearish: SHORT thắng khi giá xuống → nặng bậc cao: `w_j ∝ (j + 1)^p`
     ///

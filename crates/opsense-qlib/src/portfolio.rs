@@ -688,7 +688,7 @@ impl Portfolio {
 
         // Ngưỡng mở khóa = thứ tự nến hiện tại + N (T+N)
         let unlock_seq = current_seq + settlement;
-        let events = Self::evaluate_grid_entries(
+        let events = Self::open_orders(
             session.candle_id,
             &candle,
             &plan,
@@ -856,7 +856,7 @@ impl Portfolio {
     /// `fetch` do kernel truyền vào — strategy tự fetch range lookback nó cần,
     /// không cần biết nguồn dữ liệu.
     #[inline]
-    pub(crate) async fn rebuild_strategy(
+    async fn rebuild_strategy(
         &self,
         current: u64,
         plan: &[TradingGrid],
@@ -882,11 +882,21 @@ impl Portfolio {
         Ok((review, plan))
     }
 
-    /// Duyệt các grid level để tìm cơ hội entry mới từ một candle.
-    /// Trả về các biến cố (Placed/Rejected) để vòng forward notify ra ngoài.
+    /// **Mở lệnh** ở các mốc lưới mà giá vừa chạm tới.
+    ///
+    /// Tên cũ `evaluate_grid_entries` sai nghĩa: hàm không "đánh giá" gì cả, nó
+    /// đặt lệnh. Trong nhánh kernel, "đánh giá" là việc của `fn rebuild` (dựng
+    /// plan) và `Strategy` — còn đây là hành động.
+    ///
+    /// Luồng: mỗi mốc `il` mà `entry_price` nằm trong `[candle.l, candle.h]` và
+    /// chưa có lệnh ở `(grid, level)` đó ⇒ đặt. Cổng phí loại những lệnh mà
+    /// lợi nhuận sau `2 × fee` không dương ⇒ `Rejected`.
+    ///
+    /// Trả về các biến cố (`Placed` / `Rejected`) để vòng `forward` notify ra
+    /// ngoài. Không tự ghi vào `orders` trước khi qua cổng phí.
     #[inline]
     #[allow(clippy::too_many_arguments)]
-    pub fn evaluate_grid_entries(
+    fn open_orders(
         id: usize,
         candle: &CandleStick,
         plan: &[TradingGrid],
@@ -1017,13 +1027,13 @@ impl Portfolio {
                 .count(),
             low = candle.l,
             high = candle.h,
-            "đánh giá entry cho nến đã đóng"
+            "mở lệnh cho nến đã đóng"
         );
         events
     }
 
     #[inline]
-    pub fn check_order_exit(
+    fn check_order_exit(
         order: &Order,
         candle: &CandleStick,
         fee: &dyn Fee,

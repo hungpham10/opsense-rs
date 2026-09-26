@@ -262,11 +262,10 @@ impl Settings {
     /// dùng chung không cần biết strategy nào đang chạy. Với DAG, `Graph::init()`
     /// tự có layout riêng nên hai nhánh này không trùng nhau.
     fn params(&self) -> Vec<f64> {
-        if self.strategy == "dag" || self.strategy == "graph" {
-            if let Ok(graph) = self.dag() {
+        if (self.strategy == "dag" || self.strategy == "graph")
+            && let Ok(graph) = self.dag() {
                 return graph.init();
             }
-        }
         vec![
             self.kelly_fraction,
             self.base_capital,
@@ -363,7 +362,7 @@ impl DataLoader for StationlessLoader {
 struct State {
     session: Session,
     /// `order_id` của lệnh đang mở, khoá theo `(grid_index, level_index)` —
-    /// đúng khoá mà `evaluate_grid_entries` dùng để chặn đặt trùng.
+    /// đúng khoá mà `open_orders` dùng để chặn đặt trùng.
     open_ids: HashMap<(usize, usize), String>,
     next_id: u64,
 }
@@ -892,7 +891,7 @@ mod tests {
     fn cfg_map() -> Map {
         let mut m = Map::new();
         m.insert("resolution".into(), Dynamic::from("1m"));
-        m.insert("grid_levels".into(), Dynamic::from(5 as i64));
+        m.insert("grid_levels".into(), Dynamic::from(5_i64));
         m.insert("fee_rate".into(), Dynamic::from(0.0005));
         m
     }
@@ -1015,7 +1014,7 @@ mod tests {
         // Params phải lấy từ `Graph::init()` (weights vị trí 6+), không phải
         // layout dùng chung với strategy script / DAG.
         let params = settings.params();
-        assert_eq!(params.len(), 6 + 1 * 8 + 8);
+        assert_eq!(params.len(), 6 + 8 + 8);
         assert!(params[1] > 0.0, "base_capital phải > 0: {params:?}");
     }
 
@@ -1141,11 +1140,11 @@ mod tests {
         let plan = vec![grid];
 
         let mut obs: Array = vec![rhai::serde::to_dynamic(
-            &plan_observation(1_000, &plan, "BTCUSDT").expect("plan obs"),
+            plan_observation(1_000, &plan, "BTCUSDT").expect("plan obs"),
         )
         .expect("serialize")];
         obs.push(
-            rhai::serde::to_dynamic(&step_cursor(1_000, 42, 1_900, 7, "BTCUSDT"))
+            rhai::serde::to_dynamic(step_cursor(1_000, 42, 1_900, 7, "BTCUSDT"))
                 .expect("serialize"),
         );
 
