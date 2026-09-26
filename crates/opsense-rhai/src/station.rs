@@ -42,7 +42,12 @@ use tokio::sync::RwLock;
 /// Stations are resolved through the per-call pipeline `Context`, so the
 /// bindings are re-registered per call — same pattern as
 /// [`crate::attributes::register`].
-pub fn register(eng: &mut rhai::Engine, ctx: Arc<Context>, handle: tokio::runtime::Handle) {
+pub fn register(
+    eng: &mut rhai::Engine,
+    ctx: Arc<Context>,
+    handle: tokio::runtime::Handle,
+    write_stations: Arc<Vec<String>>,
+) {
     // Arity 3: không lọc (giữ hành vi cũ cho script đang chạy).
     let (ctx3, handle3) = (ctx.clone(), handle.clone());
     eng.register_fn(
@@ -98,6 +103,60 @@ pub fn register(eng: &mut rhai::Engine, ctx: Arc<Context>, handle: tokio::runtim
             }
         },
     );
+    // Ghi tường minh: script tự chọn nơi để ghi. Chỉ được ghi vào station đã
+    // khai trong `params.write_stations` (ngoài own station, vốn luôn được
+    // phép) — không mở vô hạn, vì `station_query` cho đọc mọi station.
+    let (ctx7, handle7) = (ctx, handle);
+    eng.register_fn(
+        "station_write",
+        move |name: String, obs: Dynamic| -> Result<(), Box<EvalAltResult>> {
+            write_obs(&ctx7, &handle7, &write_stations, &name, &obs)
+        },
+    );
+}
+
+/// Ghi 1 observation vào station được khai báo trong `params.write_stations`.
+///
+/// Ghi vào station không khai báo ⇒ **lỗi**, không phải im lặng bỏ qua: script
+/// ghi nhầm chỗ là lỗi cấu hình, và im lặng sẽ biến nó thành "dữ liệu biến
+/// mất không rõ ở đâu".
+fn write_obs(
+    ctx: &Arc<Context>,
+    handle: &tokio::runtime::Handle,
+    allowed: &[String],
+    name: &str,
+    obs: &Dynamic,
+) -> Result<(), Box<EvalAltResult>> {
+    if !allowed.iter().any(|a| a == name) {
+        let msg = format!(
+            "station_write(\"{name}\") không được phép — khai trong \
+             params.write_stations trước (hiện cho phép: {allowed:?})"
+        );
+        return Err(EvalAltResult::ErrorRuntime(msg.into(), rhai::Position::NONE).into());
+    }
+    // `()` nghĩa là "không có gì để ghi" — script vẫn chạy.
+    if obs.is_unit() {
+        return Ok(());
+    }
+    let value = rhai::serde::from_dynamic::<Observation>(obs).map_err(|e| {
+        let msg = format!("station_write(\"{name}\"): không đọc được observation: {e}");
+        EvalAltResult::ErrorRuntime(msg.into(), rhai::Position::NONE)
+    })?;
+    handle.block_on(async {
+        let st = match station_handle(ctx, name).await {
+            Ok(st) => st,
+            Err(e) => {
+                let msg =
+                    format!("station_write(\"{name}\"): không resolve được station: {e}");
+                tracing::warn!("{msg}");
+                return;
+            }
+        };
+        let guard = st.write().await;
+        let from = value.ts;
+        guard.update_range(&[value], from, from, opsense_components::signal::now_secs());
+    });
+    Ok(())
 }
 
 /// Đọc 1 tham số lọc kiểu string; `()` / rỗng ⇒ `None` (không lọc).

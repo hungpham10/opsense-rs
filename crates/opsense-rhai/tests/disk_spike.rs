@@ -76,6 +76,7 @@ async fn disk_spike_script_alert_flow() {
         std::collections::BTreeMap::new(),
         None,
         None,
+        std::sync::Arc::new(Vec::new()),
     )
     .await
     .expect("script runs with param_baseline");
@@ -95,6 +96,7 @@ async fn disk_spike_script_alert_flow() {
         std::collections::BTreeMap::new(),
         None,
         None,
+        std::sync::Arc::new(Vec::new()),
     )
     .await
     .expect("script runs with param_saturated");

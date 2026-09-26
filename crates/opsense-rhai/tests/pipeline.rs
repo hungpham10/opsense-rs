@@ -154,6 +154,7 @@ async fn rhai_script_receives_params_and_attributes() {
         },
         None,
         None,
+        std::sync::Arc::new(Vec::new()),
     )
     .await
     .expect("call_process_with works");

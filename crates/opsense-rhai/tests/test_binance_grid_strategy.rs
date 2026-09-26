@@ -131,6 +131,7 @@ async fn run_with(
         attrs(),
         trigger,
         Some(ctx.clone()),
+        std::sync::Arc::new(Vec::new()),
     )
     .await
     .expect("script chạy")

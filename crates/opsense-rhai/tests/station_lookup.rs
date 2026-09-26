@@ -143,7 +143,8 @@ async fn station_query_filters_signal_and_label_kind() {
             Default::default(),
             None,
             Some(ctx.clone()),
-        )
+        std::sync::Arc::new(Vec::new()),
+    )
         .await
     }
     let ctx = &ctx;
@@ -199,4 +200,97 @@ async fn station_query_filters_signal_and_label_kind() {
     .await
     .expect("`()` = không lọc, phải đọc được");
     assert_eq!(unit.len(), all, "`()` phải nghĩa là không lọc");
+}
+
+/// `station_write` là API ghi **tường minh**: script tự chọn nơi ghi, và chỉ
+/// được ghi vào station đã khai ở `params.write_stations` (+ own station).
+///
+/// Ghi vào station không khai phải **báo lỗi** chứ không im lặng bỏ qua — ghi
+/// nhầm chỗ là lỗi cấu hình, im lặng sẽ biến nó thành "dữ liệu mất không rõ ở
+/// đâu".
+#[tokio::test]
+async fn station_write_respects_allowlist() {
+    let cfg: opsense_core::Config = serde_json::from_str("{}").unwrap();
+    let secret = Secret::new().await.unwrap();
+    let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
+
+    async fn mk(
+        ctx: &Arc<Context>,
+        id: &'static str,
+    ) -> Arc<RwLock<TimeseriesStation>> {
+        let st = TimeseriesStation::from_storage(id, ctx.storage()).await.unwrap();
+        let arc = Arc::new(RwLock::new(st));
+        ctx.registry(id, Station::Timeseries(arc.clone()))
+            .await
+            .unwrap();
+        arc
+    }
+    let grid = mk(&ctx, "grid").await;
+    let history = mk(&ctx, "history").await;
+
+    async fn run(
+        ctx: &Arc<Context>,
+        allowed: Vec<String>,
+        body: &str,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        let src = format!("fn process(points) {{ {body} [] }}");
+        opsense_rhai::call_process_with(
+            opsense_rhai::ScriptSource::Inline(src.into()),
+            serde_json::Value::Array(vec![]),
+            Default::default(),
+            Default::default(),
+            None,
+            Some(ctx.clone()),
+            std::sync::Arc::new(allowed),
+        )
+        .await
+    }
+
+    let write = |station: &str, ts: i64| {
+        format!(
+            r#"station_write("{station}", #{{
+                ts: {ts}, metric_id: "BTCUSDT", kind: "metric", signal: "order",
+                value: 1.0, labels: #{{ order_id: "o{ts}" }}
+            }});"#
+        )
+    };
+
+    // Không khai gì cả → ghi vào `history` bị từ chối.
+    let denied = run(&ctx, vec![], &write("history", 1_700_000_000)).await;
+    assert!(
+        denied.is_err(),
+        "ghi vào station không khai phải lỗi: {denied:?}"
+    );
+
+    // Khai `history` → ghi được, và đọc lại thấy đúng 1 dòng.
+    let ok = run(
+        &ctx,
+        vec!["history".into()],
+        &write("history", 1_700_000_000),
+    )
+    .await
+    .expect("ghi vào station đã khai phải chạy được");
+    assert!(ok.is_empty());
+    let got = history
+        .read()
+        .await
+        .query_recent(1_700_000_000, 1_700_000_000)
+        .await
+        .expect("station phải đọc được");
+    assert_eq!(got.len(), 1, "phải ghi đúng 1 observation: {got:?}");
+    assert_eq!(got[0].labels.get("order_id").map(String::as_str), Some("o1700000000"));
+
+    // Own station: **transform** gộp id của chính nó vào allowlist, nên ở đây
+    // mô phỏng allowlist mà transform dựng (`params.write_stations` + own id).
+    // Không có id own trong allowlist thì bị từ chối — đúng như trường hợp trên.
+    run(&ctx, vec!["grid".into()], &write("grid", 1_700_000_100))
+        .await
+        .expect("own station phải được phép ghi khi transform đã khai nó");
+    let got = grid
+        .read()
+        .await
+        .query_recent(1_700_000_100, 1_700_000_100)
+        .await
+        .expect("own station phải đọc được");
+    assert_eq!(got.len(), 1, "own station phải nhận 1 observation: {got:?}");
 }
