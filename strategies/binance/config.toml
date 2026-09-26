@@ -112,7 +112,10 @@ script_path = "strategies/binance/grid.rhai"
    # `fn rebuild(candles, prev, params)` — đổi chiến lược = sửa file .rhai, không
    # phải viết class Rust rồi recompile (xem `opsense-rhai::ScriptStrategy`).
    strategy = "rhai"
-   grid_levels = 5
+   # 4 mốc/ô: mỗi ô là một TradingGrid riêng nên mốc đầu không có TP dưới,
+   # mốc cuối không có TP trên ⇒ `levels - 2` mốc dùng được thật. 2 mốc là
+   # 0 mốc dùng được; 5 mốc chỉ 3 mốc mà bán kính thì hẹp quá so với phí.
+   grid_levels = 4
    sl_pct = 0.008
    # Knob cho `fn rebuild`: số lệnh đóng tối thiểu trước khi tin tỉ lệ thắng
    # thực tế, độ nhọn phân bổ vốn, sieve max_bit.
@@ -127,7 +130,10 @@ script_path = "strategies/binance/grid.rhai"
    # lưới phải > 2 × fee_rate × giá — ở 0.001 và BTC ~84000 là > $168. Kernel
    # lo mọi entry vi phạm (`portfolio.rs`), nên đặt nhỏ hơn thực tế ⇒ không lệnh
    # nào được đặt mà nhìn từ ngoài chỉ thấy "chiến lược không vào lệnh".
-   fee_rate = 0.001
+   # 0.0005 = giả định **maker** (lệnh giới hạn nằm sẵn trên sàn). Nếu tài
+   # khoản của bạn là taker thuần 0.001 thì đổi lại, và lưới sẽ phải rộng hơn
+   # nhiều để còn mốc lãi — đo bằng `poc/step_probe.py`.
+   fee_rate = 0.0005
    kelly_fraction = 0.25
    base_capital = 100000.0
    # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.

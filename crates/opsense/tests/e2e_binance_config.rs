@@ -172,7 +172,7 @@ fn config_file_contract() {
         "strategy mặc định = script `fn rebuild` (không còn class Rust)"
     );
     for (key, want) in [
-        ("grid_levels", 5.0),
+        ("grid_levels", 4.0),
         ("sl_pct", 0.008),
         ("grid_min_trades", 3.0),
         ("grid_weight_sharpness", 4.0),

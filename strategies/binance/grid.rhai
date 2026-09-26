@@ -166,7 +166,11 @@ fn trading_cfg() {
     if is_def_var("param_strategy") && type_of(param_strategy) != "()" {
         strategy = param_strategy;
     }
-    let grid_levels = 5;
+    // Mặc định 4, khớp `trading.grid_levels` trong config.toml (contract test
+    // `config_file_contract` chốt hai chỗ này phải bằng nhau). 4 vì mỗi ô là
+    // một `TradingGrid` riêng: mốc đầu không có TP dưới, mốc cuối không có TP
+    // trên ⇒ chỉ `levels - 2` mốc dùng được thật. 2 mốc là 0 mốc dùng được.
+    let grid_levels = 4;
     if is_def_var("param_grid_levels") && type_of(param_grid_levels) != "()" {
         grid_levels = param_grid_levels.to_int();
     }
@@ -267,7 +271,7 @@ fn trading_cfg() {
 fn rebuild(candles, prev, params) {
     // Knob thiếu → dùng default (script phải chạy được khi config không set hết,
     // ví dụ node chỉ truyền 3 knob trong test live).
-    let levels = knob(params, "grid_levels", 5.0).to_int();
+    let levels = knob(params, "grid_levels", 4.0).to_int();
     let max_bit = knob(params, "max_bit", 20.0).to_int();
     let min_trades = knob(params, "min_trades", 3.0).to_int();
     let amp = knob(params, "level_edge_amp", 0.10).to_float();
