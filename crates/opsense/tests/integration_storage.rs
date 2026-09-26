@@ -120,6 +120,16 @@ async fn storage_graphql_status_has_stations() {
 
 /// Verify `Query.queryTimeseries` returns data after pipeline runs.
 /// This proves data integrity: clock → station_sink → queryTimeseries.
+///
+/// **Phải assert có dữ liệu.** Test này trước đây chỉ in ra rồi return, và
+/// query còn sai field (`ts` trên `QueryResult`, trong khi schema là
+/// `{ observations truncated scanned }`) ⇒ GraphQL trả error mà test vẫn xanh.
+/// Hệ quả là cả đường đọc storage không có coverage: bug `query_range` strict
+/// làm mọi cửa sổ kết thúc ở `now` trả rỗng (xem `TimeseriesStation::query_range`)
+/// mà không test nào phát hiện.
+///
+/// Cửa sổ dùng `to = now` — đúng mặc định của `opsense query` / MCP
+/// `opsense_query_timeseries`, tức là đúng trường hợp từng hỏng.
 #[tokio::test]
 async fn storage_query_timeseries_returns_data() {
     let client = common::dex::login_client();
@@ -153,7 +163,7 @@ async fn storage_query_timeseries_returns_data() {
         .post(format!("{}/api/repl/graphql", serve_url()))
         .bearer_auth(&id_token)
         .json(&serde_json::json!({
-            "query": "query QueryTimeseries($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { ts value metricId } }",
+            "query": "query QueryTimeseries($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { observations { ts value metricId signal } truncated scanned } }",
             "variables": {
                 "node": station_id,
                 "fromTs": from_ts,
@@ -166,21 +176,40 @@ async fn storage_query_timeseries_returns_data() {
     assert!(resp.status().is_success(), "queryTimeseries status: {}", resp.status());
     let body: Value = resp.json().await.expect("queryTimeseries json");
 
-    // Data should exist if the pipeline ran and clock generated observations.
-    if let Some(data) = body.get("data").and_then(|d| d.get("queryTimeseries")).and_then(|d| d.as_array()) {
-        eprintln!("queryTimeseries returned {} points", data.len());
-        if !data.is_empty() {
-            let last_point = &data[data.len() - 1];
-            eprintln!("last point: ts={} metric_id={}",
-                last_point.get("ts").unwrap_or(&Value::Null),
-                last_point.get("metricId").unwrap_or(&Value::Null));
-        }
-    }
+    // GraphQL lỗi (sai field, station sai) → fail, không phải "chưa có data".
     if let Some(errors) = body.get("errors") {
-        eprintln!("queryTimeseries errors: {errors:?}");
+        panic!("queryTimeseries returned GraphQL errors: {errors:?}");
     }
-    // Don't assert on data presence — the pipeline may not have generated
-    // enough data yet. The test proves the endpoint works and returns valid JSON.
+
+    let result = body
+        .get("data")
+        .and_then(|d| d.get("queryTimeseries"))
+        .unwrap_or_else(|| panic!("queryTimeseries missing from response: {body}"));
+    let observations = result
+        .get("observations")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("queryTimeseries.observations missing: {result}"));
+
+    assert!(
+        !observations.is_empty(),
+        "queryTimeseries(window=[{from_ts},{to_ts}]) rỗng trong khi station '{station_id}' \
+         đã chạy ≥15s. Đây là regression của reader: cửa sổ kết thúc ở `now` \
+         phải trả về dữ liệu có (xem TimeseriesStation::query_recent)."
+    );
+    eprintln!(
+        "queryTimeseries returned {} points (scanned={}, truncated={})",
+        observations.len(),
+        result.get("scanned").unwrap_or(&Value::Null),
+        result.get("truncated").unwrap_or(&Value::Null),
+    );
+    // Mọi observation phải nằm trong cửa sổ yêu cầu — guard chéo cho lọc ts.
+    for o in observations {
+        let ts = o.get("ts").and_then(Value::as_i64).expect("ts phải là Int");
+        assert!(
+            (from_ts..=to_ts).contains(&ts),
+            "observation ts={ts} nằm ngoài cửa sổ [{from_ts},{to_ts}]"
+        );
+    }
 }
 
 /// Verify HTTP health endpoint returns correct structure.

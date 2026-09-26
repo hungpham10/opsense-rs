@@ -359,6 +359,19 @@ impl TimeseriesStation {
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// **Chỉ dùng khi thật sự cần ngữ nghĩa strict.** Bất kỳ reader nào (API,
+    /// CLI, MCP) phải dùng [`Self::query_recent`].
+    ///
+    /// Strict nghĩa là: nếu BẤT KỲ block nào trong cửa sổ không "phủ trọn"
+    /// khoảng yêu cầu thì trả `None` — kể cả khi block đó có dữ liệu và chỉ
+    /// thiếu phần đuôi vốn dĩ không tồn tại. Với station sống, điều đó xảy ra
+    /// gần như luôn: block chỉ chứa obs tại timestamp có thật, nên đuôi partition
+    /// luôn trống (`range.1` < `block_end`), và block đầu tiên của cửa sổ luôn
+    /// bắt đầu sau `from_ts` ⇒ `req_start >= range.0` sai. Đo được với
+    /// strategy binance (block 300s, candle 1m): `to = now-120` → 40 dòng,
+    /// `to = now-30` → 0 dòng.
+    ///
+    /// Xem [`Self::query_recent`] cho hành vi đúng của reader.
     pub async fn query_range(&self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
         let start_block = self.get_block_id(from_ts);
         let end_block = self.get_block_id(to_ts);
@@ -418,8 +431,9 @@ impl TimeseriesStation {
     /// rải rác ở block phía trước/sau lỗ hổng (vd station chỉ mới có một cửa
     /// sổ vài chục giây dưới `to_ts`). Không như [`query_range`] (trả `None`
     /// nếu BẤT KỲ block nào trong cửa sổ chưa cover trọn), method này trả
-    /// *những gì thực sự có* — dùng cho script-facing `station_query`: script
-    /// hỏi cửa sổ rộng mà không cần biết chính xác vùng dữ liệu được cover.
+    /// *những gì thực sự có* — đây là hành vi đúng cho MỌI reader:
+    /// script-facing `station_query` (`candles.rs`) và API `Query.queryTimeseries`
+    /// mà `opsense query` / `opsense orders` / MCP `opsense_query_timeseries` dùng.
     pub async fn query_recent(&self, from_ts: i64, to_ts: i64) -> Option<Vec<Observation>> {
         let start_block = self.get_block_id(from_ts);
         let end_block = self.get_block_id(to_ts);
@@ -429,8 +443,11 @@ impl TimeseriesStation {
             let block_start = block_id * self.block_duration;
             let block_end = (block_id + 1) * self.block_duration - 1;
 
+            // `caches.get` đã trả về `Block` **sở hữu** (`LruCache::get` clone
+            // bên trong) — clone thêm ở đây là tốn gấp đôi. Block của station
+            // tick có thể vài trăm MB, nên giữ đúng một bản copy.
             let block = match self.caches.get(&block_id) {
-                Some(b) => b.clone(),
+                Some(b) => b,
                 None => match self.load_cold_block(block_id).await {
                     Some(b) => {
                         self.caches.put(block_id, b.clone());
