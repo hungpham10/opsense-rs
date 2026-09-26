@@ -359,7 +359,7 @@ mod tests {
                     >,
                 >
         };
-        pf.evaluate(
+        pf.forward(
             &mut session,
             7_200,
             7_260,

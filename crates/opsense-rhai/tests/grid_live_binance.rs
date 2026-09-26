@@ -318,7 +318,7 @@ async fn rebuild_on_live_binance_data_yields_usable_plan() {
             >
     };
     let mut session = Session::new();
-    pf.evaluate(
+    pf.forward(
         &mut session,
         from,
         from + 60,
@@ -328,7 +328,7 @@ async fn rebuild_on_live_binance_data_yields_usable_plan() {
         &mut notify,
     )
     .await
-    .expect("evaluate trên nến cuối");
+    .expect("forward trên nến cuối");
     assert_eq!(session.candle_seq, 1, "kernel chạy đúng 1 nến");
     println!(
         "kernel: plan {} ô, {} sự kiện, seq={}",

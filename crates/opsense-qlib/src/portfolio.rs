@@ -375,7 +375,7 @@ impl Portfolio {
             handles.push(tokio::spawn(async move {
                 let mut session = Session::new();
                 match pf
-                    .backtest(
+                    .evaluate(
                         &mut session,
                         lookback,
                         from,
@@ -426,7 +426,7 @@ impl Portfolio {
                                 let mut session = Session::new();
 
                                 if let Ok((score, _)) = sgd_self
-                                    .backtest(
+                                    .evaluate(
                                         &mut session,
                                         lookback,
                                         eval_from,
@@ -450,13 +450,13 @@ impl Portfolio {
     }
 
     /// Backtest entry: warm cache (nếu bật) rồi chạy kernel
-    /// [`Self::evaluate`] với fetch đóng từ `self.loader` / block cache.
+    /// [`Self::forward`] với fetch đóng từ `self.loader` / block cache.
     ///
     /// Đây là đường backtest: có prefetch + LRU + calendar alignment, và mỗi
     /// trial SGD chạy trên `Session` riêng. Realtime thì gọi thẳng
-    /// [`Self::evaluate`] với fetch đóng từ station.
+    /// [`Self::forward`] với fetch đóng từ station.
     #[allow(clippy::too_many_arguments)]
-    pub async fn backtest(
+    pub async fn evaluate(
         &self,
         session: &mut Session,
         lookback: u64,
@@ -472,7 +472,7 @@ impl Portfolio {
         let mut trade = self.loader_fetch(&self.config.resolution_for_test, "trade");
         let mut analysis = self.loader_fetch(&self.config.resolution_for_rebuild, "analysis");
 
-        self.evaluate(
+        self.forward(
             session,
             from,
             to,
@@ -496,7 +496,7 @@ impl Portfolio {
     /// `fetch` và `analysis_fetch` tách riêng vì backtest dùng 2 resolution
     /// (trade = `resolution_for_test`, rebuild = `resolution_for_rebuild`).
     #[allow(clippy::too_many_arguments)]
-    pub async fn evaluate(
+    pub async fn forward(
         &self,
         session: &mut Session,
         from: u64,
@@ -567,7 +567,7 @@ impl Portfolio {
 
                         #[cfg(debug_assertions)]
                         println!(
-                            "  [debug] evaluate: rebuild at {}  next review={}  took {:.0}ms",
+                            "  [debug] forward: rebuild at {}  next review={}  took {:.0}ms",
                             current,
                             session.review_at,
                             t_rebuild.elapsed().as_secs_f64() * 1000.0,
@@ -581,7 +581,7 @@ impl Portfolio {
                             ts = current,
                             next_review = session.review_at,
                             grids = session.plan.len(),
-                            "evaluate: plan rebuilt"
+                            "forward: plan rebuilt"
                         );
                     }
                     Err(error) => {
@@ -604,7 +604,7 @@ impl Portfolio {
             #[cfg(debug_assertions)]
             if t_fetch.elapsed().as_secs_f64() * 1000.0 > 50.0 {
                 println!(
-                    "  [debug] evaluate: fetch [{}, {})  got {} candles  took {:.0}ms",
+                    "  [debug] forward: fetch [{}, {})  got {} candles  took {:.0}ms",
                     current,
                     next,
                     candles.len(),
@@ -1694,7 +1694,7 @@ mod tests {
         assert_eq!(report.total_trades, 0);
     }
 
-    // ── Kernel `evaluate` + `Session` ───────────────────────────────────────
+    // ── Kernel `forward` + `Session` ───────────────────────────────────────
 
     use crate::fee::SimpleFixedFee;
     use crate::score::SharpeScore;
@@ -1868,7 +1868,7 @@ mod tests {
             let mut trade = slice_fetch(data.clone());
             let mut analysis = slice_fetch(data.clone());
             let mut notify = notify_box(&mut events);
-            pf.evaluate(
+            pf.forward(
                 &mut session,
                 from + i * 4 * 60,
                 from + (i + 1) * 4 * 60,
@@ -1912,7 +1912,7 @@ mod tests {
             let mut analysis = slice_fetch(data.clone());
             let mut events = Vec::new();
             let mut notify = notify_box(&mut events);
-            pf.evaluate(
+            pf.forward(
                 &mut session,
                 from,
                 from + 20 * 60,
@@ -1948,7 +1948,7 @@ mod tests {
             let mut trade = slice_fetch(data.clone());
             let mut analysis = slice_fetch(data.clone());
             let mut notify = notify_box(&mut events);
-            pf.evaluate(
+            pf.forward(
                 &mut session,
                 from,
                 from + 30 * 60,
@@ -1978,7 +1978,7 @@ mod tests {
             let mut analysis = slice_fetch(data.clone());
             {
                 let mut notify = notify_box(&mut events);
-                pf.evaluate(
+                pf.forward(
                     &mut session,
                     crash_ts,
                     crash_ts + 60,
@@ -2012,7 +2012,7 @@ mod tests {
         let mut trade = slice_fetch(data.clone());
         let mut analysis = slice_fetch(data.clone());
         let result = pf
-            .evaluate(
+            .forward(
                 &mut session,
                 BASE as u64,
                 BASE as u64 + 3 * 60,
@@ -2088,7 +2088,7 @@ mod tests {
         let mut session = Session::new();
         let mut events = Vec::new();
         let mut notify = notify_box(&mut events);
-        pf.backtest(
+        pf.evaluate(
             &mut session,
             3600,
             from_ts(),

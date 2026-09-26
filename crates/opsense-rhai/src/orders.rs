@@ -15,7 +15,7 @@
 //!    `labels.kind = "trading_step"` cho cursor (`candle_ts` + `candle_seq`).
 //! 2. **Đóng gói nến thành [`FetchFn`]** tự phục vụ — kernel hỏi range nào cũng
 //!    được, không cần biết dữ liệu nằm ở station.
-//! 3. **Chạy [`Portfolio::evaluate`]** cho đúng nến mới (window 1 nến) — cùng
+//! 3. **Chạy [`Portfolio::forward`]** cho đúng nến mới (window 1 nến) — cùng
 //!    kernel backtest dùng qua `Portfolio::backtest`.
 //! 4. **Trả observation**: lệnh vừa đóng / vừa đặt + cursor mới.
 //!
@@ -487,7 +487,7 @@ async fn feed(
     // giống hệt "chiến lược hợp lý nhưng giá chưa chạm level", và không có
     // cách nào phân biệt ngoài log.
     if let Err(e) = portfolio
-        .evaluate(
+        .forward(
             &mut session,
             from,
             to,
@@ -501,7 +501,7 @@ async fn feed(
         tracing::warn!(
             candle_ts = incoming.t,
             error = %e,
-            "portfolio evaluate lỗi — giữ plan cũ, lần sau thử lại"
+            "portfolio forward lỗi — giữ plan cũ, lần sau thử lại"
         );
     }
 
@@ -915,7 +915,7 @@ mod tests {
         let cursor = out
             .iter()
             .find(|o| o.labels.get(L_KIND).map(String::as_str) == Some(KIND_STEP))
-            .expect("cursor phải có → kernel evaluate đã chạy");
+            .expect("cursor phải có → kernel forward đã chạy");
         assert!(cursor.ts > 0);
     }
 
