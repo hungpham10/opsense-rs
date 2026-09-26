@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use opsense::api::pipeline_from_config;
+use opsense::api::{AppState, repl};
 use opsense_components::http::HttpSource;
 use opsense_components::signal;
 use opsense_components::station::TimeseriesStationSink;
@@ -439,10 +440,22 @@ async fn full_pipeline_trading_emits_orders() {
             matches!(status, Some("open") | Some("closed")),
             "status phải open|closed: {order:?}"
         );
+        // `value` = giá vào lệnh khi MỞ, PnL % khi ĐÓNG (`opsense-rhai/src/orders.rs:557`).
+        // PnL âm là chuyện bình thường nên không thể assert dương cho lệnh đã đóng —
+        // assertion cũ chỉ xanh vì tình cờ lần chạy đó chưa có lệnh đóng lỗ.
         if status == Some("open") {
             opened += 1;
+            assert!(order.value > 0.0, "entry price dương: {order:?}");
+        } else if let Some(pnl) = order
+            .labels
+            .get("pnl_pct")
+            .and_then(|v| v.parse::<f64>().ok())
+        {
+            assert!(
+                (order.value - pnl).abs() < 1e-9,
+                "lệnh đóng: value phải bằng pnl_pct: {order:?}"
+            );
         }
-        assert!(order.value > 0.0, "entry price dương: {order:?}");
         for key in ["order_id", "dtype", "grid", "level", "size", "sl", "tp"] {
             assert!(order.labels.contains_key(key), "thiếu label `{key}`: {order:?}");
         }
@@ -484,6 +497,180 @@ async fn full_pipeline_trading_emits_orders() {
         ts.last().is_some_and(|last| *last >= last_order_ts),
         "cursor phải không cũ hơn order: {cursor:?}"
     );
+}
+
+/// ── Tầng 4: order đọc được qua `Query.queryTimeseries` ────────────────────
+///
+/// Tầng 3 chứng minh *kernel sinh ra* order, nhưng đọc station bằng
+/// `ctx.station(...)` — tức không qua tầng API. Nên nó không bắt được bug ở
+/// `Query.queryTimeseries`: reader strict (`query_range`) làm mọi cửa sổ kết
+/// thúc ở `now` trả rỗng, và cửa sổ mặc định của `opsense orders` /
+/// MCP `opsense_query_timeseries` **chính là** `to = now` ⇒ CLI/MCP báo "không
+/// có lệnh" trong khi strategy vẫn chạy.
+///
+/// Tầng này chạy đúng state của server ([`AppState::new`] — dựng context +
+/// runtime từ config thật) và đọc order bằng **schema GraphQL thật** của
+/// `POST /api/repl/graphql`, filter `signal = "order"`, cửa sổ kết thúc ở `now`.
+///
+/// Không cần Docker: `Resolver` bỏ qua Redis khi `REDIS_DSN` rỗng
+/// (`Secret::get` đọc env trước ⇒ dsn rỗng bị `continue`), và Postgres chỉ cần
+/// DSN parse được — connect fail chỉ log, không làm hỏng (`resolver.rs:129`).
+#[tokio::test(flavor = "multi_thread")]
+async fn trading_orders_readable_via_graphql() {
+    // SAFETY: env là process-global. Các test khác trong file này không đọc
+    // `REDIS_DSN`/`DB_DSN`, nên không có tương tác đáng kể; test chạy
+    // `--test-threads=1` cùng cả suite e2e.
+    unsafe {
+        std::env::set_var("REDIS_DSN", "");
+        std::env::set_var("DB_DSN", "postgres://poc:poc@127.0.0.1:1/poc");
+    }
+
+    let now = signal::now_secs();
+    let mut cfg = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
+    let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
+    let script = dir.join("grid.rhai");
+
+    let (src_addr, _reqs) = spawn_http_mock(swing_klines_body(now)).await;
+    let src_url = format!("http://{src_addr}/api/v3/klines?symbol={SYMBOL}&interval=1m");
+    let ws_uri = spawn_ws_mock();
+
+    if let Some(p) = &mut cfg.pipeline {
+        for comp in &mut p.components {
+            let Some(obj) = comp.as_object_mut() else {
+                continue;
+            };
+            match obj.get("id").and_then(Value::as_str) {
+                Some(STATION_HISTORY) => {
+                    obj.insert("url".into(), json!(src_url));
+                }
+                Some(NODE_TICK_FEED) => {
+                    obj.insert("uri".into(), json!(ws_uri));
+                }
+                Some(STATION_GRID) => {
+                    obj.insert("script_path".into(), json!(script.to_string_lossy().as_ref()));
+                    let params = obj
+                        .get_mut("params")
+                        .and_then(Value::as_object_mut)
+                        .expect("grid node có params");
+                    params.insert("mode".into(), json!("trading"));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let state = AppState::new(&cfg)
+        .await
+        .expect("AppState::new — dựng context + runtime từ config thật");
+    let schema = repl::schema();
+
+    // Poll đúng query mà CLI/MCP gửi. `to = now` là cửa sổ mặc định — tức đúng
+    // trường hợp từng trả rỗng dù station đầy order.
+    const QUERY: &str = r#"
+        query Orders($node: String!, $signal: String) {
+            queryTimeseries(node: $node, signal: $signal, limit: 50) {
+                observations { ts metricId kind signal value labels }
+                truncated
+                scanned
+            }
+        }
+    "#;
+
+    // Poll đến khi thấy order. Trả về `(orders, scanned, payload)` thay vì gán
+    // biến ngoài vòng lặp — crate bật `warnings = "deny"`, và giá trị khởi tạo
+    // trước loop luôn bị ghi đè nên là dead code.
+    let deadline = Instant::now() + Duration::from_secs(150);
+    let (orders, scanned, payload) = loop {
+        let res = schema
+            .execute(
+                async_graphql::Request::new(QUERY)
+                    .variables(async_graphql::Variables::from_json(serde_json::json!({
+                        "node": STATION_GRID,
+                        "signal": "order",
+                    })))
+                    .data(state.clone()),
+            )
+            .await;
+        assert!(
+            res.errors.is_empty(),
+            "queryTimeseries trả GraphQL error: {:?}",
+            res.errors
+        );
+        let payload = res.data.into_json().expect("data");
+        let result = &payload["queryTimeseries"];
+        let scanned = result["scanned"].as_u64().unwrap_or_default() as usize;
+        let orders = result["observations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !orders.is_empty() || Instant::now() >= deadline {
+            break (orders, scanned, payload);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
+
+    assert!(
+        !orders.is_empty(),
+        "không có order nào đọc được qua GraphQL sau 150s (scanned={scanned}, payload={payload}). \
+         Kernel có thể đã sinh lệnh (xem `full_pipeline_trading_emits_orders`) \
+         — nếu vậy thì đường đọc của API lại hỏng."
+    );
+    eprintln!("queryTimeseries: scanned={scanned} orders={}", orders.len());
+    assert!(
+        scanned > 0,
+        "phải quét được observation trong cửa sổ `to = now`: {payload}"
+    );
+
+    let mut opened = 0usize;
+    for order in &orders {
+        let ts = order["ts"].as_i64().expect("ts phải là Int");
+        let status = order["labels"]["status"].as_str();
+        let value = order["value"].as_f64().expect("value phải là Float");
+        assert_eq!(order["signal"], "order", "filter signal=order: {order}");
+        assert_eq!(order["metricId"], SYMBOL, "symbol: {order}");
+        assert!(
+            matches!(status, Some("open") | Some("closed")),
+            "status phải open|closed: {order}"
+        );
+        // `value` = giá vào lệnh khi MỞ, PnL % khi ĐÓNG
+        // (`opsense-rhai/src/orders.rs:557`) — PnL âm là bình thường.
+        match status {
+            Some("open") => {
+                opened += 1;
+                assert!(value > 0.0, "entry price dương: {order}");
+            }
+            Some("closed") => {
+                let pnl = order["labels"]["pnl_pct"]
+                    .as_f64()
+                    .unwrap_or_else(|| panic!("lệnh đóng phải có label pnl_pct: {order}"));
+                assert!((value - pnl).abs() < 1e-9, "value phải bằng pnl_pct: {order}");
+            }
+            _ => unreachable!("status đã assert ở trên"),
+        }
+        for key in ["order_id", "dtype", "grid", "level", "size", "sl", "tp"] {
+            assert!(
+                order["labels"].get(key).is_some(),
+                "thiếu label `{key}`: {order}"
+            );
+        }
+        // ts phải nằm trong cửa sổ đã xin (guard chéo cho lọc ts ở tầng API).
+        assert!(ts <= signal::now_secs(), "order ts={ts} ở tương lai: {order}");
+    }
+    assert!(
+        opened > 0,
+        "phải có ít nhất 1 lệnh đang mở (mọi lệnh đều đóng thì nghi ngờ đọc sai): {orders:?}"
+    );
+
+    // `opsense orders` lọc theo `labels.kind`, nên `order_id` phải hiện được ở
+    // tầng GraphQL (không bị lọc/strip trong `queryTimeseries`).
+    assert!(
+        orders
+            .iter()
+            .all(|o| o["labels"]["order_id"].as_str().is_some_and(|s| !s.is_empty())),
+        "mọi order phải có order_id để `opsense orders` dùng được: {orders:?}"
+    );
+
+    state.stop().await.expect("dừng runtime");
 }
 
 /// Klines giá nhấn sóng; **candle mới nhất** có range rộng để chạm level grid.

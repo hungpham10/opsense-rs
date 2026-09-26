@@ -87,6 +87,13 @@ pub struct AppState {
 
 impl AppState {
     pub async fn new(config: &Config) -> Result<Self, Error> {
+        // `Resolver` pool dùng `sqlx::any`, nên driver phải được đăng ký trước.
+        // Gọi ở đây (idempotent, `Once`) thay vì chỉ trong `main()` để crate này
+        // tự đủ: embedder khác — integration test hay binary sau này — gọi
+        // `AppState::new` mà không có `main` sẽ vỡ với
+        // "No drivers installed. Please see the documentation in `sqlx::any`".
+        sqlx::any::install_default_drivers();
+
         let runtime = Arc::new(RwLock::new(Runtime::new()));
         let secret = Arc::new(Secret::new().await?);
         let context = Arc::new(Context::new(config, secret.clone()));

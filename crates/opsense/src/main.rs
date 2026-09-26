@@ -230,8 +230,9 @@ mod tests {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {    dotenvy::dotenv().ok();
-    // Register sqlx `any` drivers (mysql/postgres/sqlite) before the Resolver
-    // builds its connection pools.
+    // sqlx `any` drivers (mysql/postgres/sqlite) — `AppState::new` tự đăng ký
+    // (idempotent) vì crate này phải tự đủ khi không có `main`; giữ lời gọi ở
+    // đây để mọi lệnh CLI đều có driver sẵn.
     sqlx::any::install_default_drivers();
     // Pin ONE rustls crypto provider before any TLS work — the build ends up
     // with both `ring` and `aws-lc-rs` features enabled, which makes rustls

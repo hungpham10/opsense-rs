@@ -65,8 +65,18 @@ pub struct ReplHeaders {
     pub user_id: XUserId,
 }
 
+/// Schema GraphQL của REPL — **nguồn duy nhất** cho cả route HTTP lẫn test.
+///
+/// `routes()` dùng schema này, và integration test (`e2e_binance_config.rs`)
+/// cũng build nó để chạy `Query.queryTimeseries` **in-process** — tức đúng code
+/// path mà `opsense query` / `opsense orders` / MCP `opsense_query_timeseries`
+/// gọi, thay vì đi vòng qua HTTP + Nginx + header `x-tenant-id`.
+pub fn schema() -> Schema<QueryRoot, MutationRoot, EmptySubscription> {
+    Schema::build(QueryRoot, MutationRoot, EmptySubscription).finish()
+}
+
 pub fn routes(state: AppState) -> Router<AppState> {
-    let schema = Arc::new(Schema::build(QueryRoot, MutationRoot, EmptySubscription).finish());
+    let schema = Arc::new(schema());
     Router::new()
         .route("/graphql", post(v1::graphql))
         .layer(Extension(schema))
