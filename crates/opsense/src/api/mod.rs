@@ -136,6 +136,42 @@ impl AppState {
         self.runtime.read().await.stop()
     }
 
+    /// Chờ station `id` **đăng ký xong** — tức node tương ứng đã qua bước `prepare`
+    /// và tự `registry()` vào context.
+    ///
+    /// `AppState::new` **không** chờ việc đó: engine khởi động từng node một, nên
+    /// ngay sau khi `new` trả về thì station cuối cùng trong graph chưa chắc đã
+    /// có. Đo được trên CI (`trading_orders_readable_via_graphql` fail, 3 test
+    /// kia xanh): lần query đầu tiên trả `Station 'grid' not found` trong khi log
+    /// engine vẫn đang *"prepare completed ok for tick-map"*. Cửa sổ này rộng
+    /// hơn hẳn khi máy chậm — cùng log có
+    /// `Error during connect to database: pool timed out`.
+    ///
+    /// Cổng này cho caller (và test) chờ đúng thứ cần chờ, thay vì mỗi nơi tự
+    /// phát minh cách "thử lại và hy vọng".
+    ///
+    /// Trả `false` khi hết thời gian mà station vẫn chưa có.
+    pub async fn wait_for_station(
+        &self,
+        id: &str,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.context.has_station(id).await {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    station = %id,
+                    "wait_for_station: hết thời gian mà station chưa đăng ký"
+                );
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     pub async fn wait_for_shutdown(&self) -> Result<(), Error> {
         self.runtime.read().await.wait_for_shutdown().await
     }

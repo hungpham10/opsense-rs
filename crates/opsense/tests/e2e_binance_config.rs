@@ -639,6 +639,17 @@ async fn trading_orders_readable_via_graphql() {
         .expect("AppState::new — dựng context + runtime từ config thật");
     let schema = repl::schema();
 
+    // `AppState::new` không chờ node nào đăng ký station, mà engine khởi động
+    // từng node một. Chờ `grid` — node cuối — trước khi hỏi GraphQL, nếu không
+    // lần query đầu sẽ gặp `Station 'grid' not found` và test fail với lý do
+    // không liên quan tới GraphQL. Đo được trên CI.
+    assert!(
+        state
+            .wait_for_station(STATION_GRID, Duration::from_secs(30))
+            .await,
+        "node `grid` không đăng ký station sau 30s — engine không khởi động xong"
+    );
+
     // Poll đúng query mà CLI/MCP gửi. `to = now` là cửa sổ mặc định — tức đúng
     // trường hợp từng trả rỗng dù station đầy order.
     const QUERY: &str = r#"
@@ -654,7 +665,11 @@ async fn trading_orders_readable_via_graphql() {
     // Poll đến khi thấy order. Trả về `(orders, scanned, payload)` thay vì gán
     // biến ngoài vòng lặp — crate bật `warnings = "deny"`, và giá trị khởi tạo
     // trước loop luôn bị ghi đè nên là dead code.
-    let deadline = Instant::now() + Duration::from_secs(150);
+    const TIMEOUT_SECS: u64 = 150;
+    let deadline = Instant::now() + Duration::from_secs(TIMEOUT_SECS);
+    // Lỗi cuối cùng gặp phải, để nếu hết giờ thì biết **vì sao** chứ không
+    // chỉ "rỗng".
+    let mut last_error: Option<String> = None;
     let (orders, scanned, payload) = loop {
         let res = schema
             .execute(
@@ -666,11 +681,35 @@ async fn trading_orders_readable_via_graphql() {
                     .data(state.clone()),
             )
             .await;
-        assert!(
-            res.errors.is_empty(),
-            "queryTimeseries trả GraphQL error: {:?}",
-            res.errors
-        );
+        if !res.errors.is_empty() {
+            let msg = res
+                .errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+
+            // "station chưa có" là **chưa sẵn sàng**, không phải lỗi: test hỏi
+            // GraphQL ngay khi `AppState::new` vừa trả về, còn engine đang lần
+            // lượt khởi động từng node và `grid` đăng ký station ở bước `prepare`
+            // cuối. Trước đây `assert!(res.errors.is_empty())` đứng trước kiểm
+            // tra deadline nên giết test **ngay lần query đầu**, dù vòng lặp còn
+            // 150s để chờ. Đo được trên CI: lần đầu trả
+            // `Station 'grid' not found` ⇒ fail, trong khi 3 test còn lại xanh.
+            //
+            // Cửa sổ này rộng hơn hẳn trên CI: log có thêm
+            // `Error during connect to database: pool timed out` ⇒ khởi động
+            // chậm hơn. Nên "chờ" là hợp lý, **nhưng** lỗi khác (query sai, schema
+            // hỏng) thì phải nổ ngay — không bị nuốt mất.
+            let not_ready = msg.contains("not found");
+            assert!(
+                !not_ready || Instant::now() < deadline,
+                "queryTimeseries trả lỗi (không phải 'chưa sẵn sàng') trong {TIMEOUT_SECS}s: {msg}"
+            );
+            last_error = Some(msg);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
         let payload = res.data.into_json().expect("data");
         let result = &payload["queryTimeseries"];
         let scanned = result["scanned"].as_u64().unwrap_or_default() as usize;
@@ -686,7 +725,8 @@ async fn trading_orders_readable_via_graphql() {
 
     assert!(
         !orders.is_empty(),
-        "không có order nào đọc được qua GraphQL sau 150s (scanned={scanned}, payload={payload}). \
+        "không có order nào đọc được qua GraphQL sau {TIMEOUT_SECS}s \
+         (scanned={scanned}, payload={payload}, last_error={last_error:?}). \
          Kernel có thể đã sinh lệnh (xem `full_pipeline_trading_emits_orders`) \
          — nếu vậy thì đường đọc của API lại hỏng."
     );
