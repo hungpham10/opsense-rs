@@ -88,12 +88,12 @@ fn trade(hist_src, own, symbol, resolution, hw) {
     let from = now - hw;
     let step = bucket_secs(resolution);
 
-    // Series phân tích = kline history + candle live; cùng bucket thì live thắng
-    // (nến đang tích cực phản ánh giá thực tế, không phải nến đã đóng của API).
+    // Kline history cho bucket đã đóng + candle live cho bucket đang mở; xem
+    // `merge_candles` để biết vì sao không để live đè lên nến đã đóng.
     let hist = station_candles(hist_src, from, now, resolution);
     let live = station_candles(own, from, now, resolution);
     if type_of(hist) == "()" && type_of(live) == "()" { return []; }
-    let series = merge_candles(empty_if_missing(hist), empty_if_missing(live));
+    let series = merge_candles(empty_if_missing(hist), empty_if_missing(live), now, step);
     // ≥ 10 nến để AnalysisGrid dựng được plan.
     if series.len() < 10 { return []; }
 
@@ -475,8 +475,9 @@ fn snapshot(hist_src, own, symbol, resolution, hw, lw) {
     let live = station_candles(own, now - lw, now, resolution);
     if type_of(live) == "()" { return []; }
 
-    // Live candle thắng history cùng bucket (bucket đang mở = giá realtime).
-    let candles = sort_by_t(merge_candles(hist, live));
+    // Kline history cho bucket đã đóng + candle live cho bucket đang mở.
+    let step = bucket_secs(resolution);
+    let candles = sort_by_t(merge_candles(hist, live, now, step));
     if candles.len() < 2 { return []; }
 
     let points = [];
@@ -541,24 +542,37 @@ fn snapshot(hist_src, own, symbol, resolution, hw, lw) {
 
 /// Merge: live candle thắng history cùng bucket, bucket live-only được thêm
 /// cuối; kết quả sort theo `t` ở caller (`sort_by_t`).
-fn merge_candles(hist, live) {
+/// Ghép kline (history) + candle live, quy tắc theo trạng thái bucket:
+///
+/// - bucket **đã đóng** (`t + step <= now`): giữ nến kline của API. Đây là
+///   dữ liệu cuối cùng của cả phút. Trước đây live đè lên mọi bucket và đó là
+///   lý do không có lệnh nào: nến live dựng từ tick 10s chỉ có vài phép nên
+///   biên ~1 cent, thay cho biên thật ~$30 — vùng `[l, h]` bé bằng 1/1000 nên
+///   không mốc lưới nào rơi vào ⇒ `grids_touched=1` mà `placed=0 rejected=0`.
+/// - bucket **đang mở** (`t + step > now`): lấy live vì nến kline chưa có.
+/// - bucket đóng chỉ có ở live (API thiếu nến): vẫn lấy, để không mất dữ liệu.
+///
+/// `merge_candles` cần `now` + `step` vì không tự biết bucket nào đã đóng.
+fn merge_candles(hist, live, now, step) {
+    // Map thay vì quét tuyến tính: `find_candle` từng là O(hist × live) và với
+    // 960 nến là ~921k phép — chạm trần `set_max_operations(1_000_000)` nên
+    // script chết "Too many operations", không dựng được lưới nào. Khoá map là
+    // chuỗi vì Rhai chỉ cho khoá `Identifier`.
+    let hist_t = #{};
+    for c in hist { hist_t[c["t"].to_string()] = true; }
+
     let out = [];
     for c in hist {
-        let hit = find_candle(live, c["t"]);
-        if type_of(hit) != "()" { out.push(hit); } else { out.push(c); }
+        // Nhường bucket đang mở cho live, nếu không sẽ có hai nến cùng `t`.
+        if c["t"].to_int() + step > now { continue; }
+        out.push(c);
     }
     for c in live {
-        if type_of(find_candle(hist, c["t"])) == "()" { out.push(c); }
+        let t = c["t"].to_int();
+        if t + step > now { out.push(c); }
+        else if !hist_t.contains(c["t"].to_string()) { out.push(c); }
     }
     out
-}
-
-/// Candle có `t` == bucket, hoặc `()` nếu không có.
-fn find_candle(candles, bucket) {
-    for c in candles {
-        if c["t"] == bucket { return c; }
-    }
-    ()
 }
 
 /// Sắp xếp candles theo `t` tăng dần (chèn — dữ liệu nhỏ).
@@ -566,11 +580,12 @@ fn sort_by_t(candles) {
     let out = [];
     for c in candles {
         let t = c["t"];
-        let i = 0;
-        while i < out.len() && out[i]["t"] <= t {
-            i = i + 1;
-        }
-        if i < out.len() { out.insert(i, c); } else { out.push(c); }
+        // Dò từ CUỐI về trước, không phải từ đầu: dữ liệu vào đã gần tăng
+        // dần (kline rồi live) nên vị trí chèn thường là cuối ⇒ O(1) mỗi
+        // phần tử. Dò từ đầu là O(n²) và với 960 nến thì vượt trần phép.
+        let i = out.len();
+        while i > 0 && out[i - 1]["t"] > t { i = i - 1; }
+        if i == out.len() { out.push(c); } else { out.insert(i, c); }
     }
     out
 }
