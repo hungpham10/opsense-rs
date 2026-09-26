@@ -170,9 +170,23 @@ impl HttpSource {
 
 /// One shared client per timeout so poll-cadence calls reuse connections.
 fn client_for(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    // Cài crypto provider **trước khi dựng client**. Workspace bật cả `ring`
+    // (qua reqwest) lẫn `aws-lc-rs` (qua AWS SDK) trên cùng `rustls 0.23`, nên
+    // `Client::builder()` panic "No provider set" nếu chưa ai cài.
+    //
+    // Trước đây việc cài nằm trong `main()` của binary `opsense`, nên mọi
+    // embedder không có `main` — integration test, crate dùng lại — chết ngay
+    // tại đây. `mlib::tls` có sẵn helper `Once`-guarded, idempotent, không
+    // panic; gọi ở **chỗ dựng client** thì mọi đường vào đều tự được bảo vệ,
+    // kể cả người gọi không biết chuyện này.
+    opsense_mlib::tls::install_default_crypto_provider();
+
     static CLIENTS: OnceLock<std::sync::Mutex<HashMap<u64, reqwest::Client>>> = OnceLock::new();
     let clients = CLIENTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    let mut guard = clients.lock().unwrap();
+    // `unwrap()` ở đây chỉ fail nếu một thread khác **panic giữa lúc giữ lock**.
+    // Xem `poisoned_clients_still_serve` — trước đây panic ở `build()` làm
+    // nhiễm lock và mọi lời gọi sau đó chết bằng `PoisonError` thay vì lỗi thật.
+    let mut guard = clients.lock().unwrap_or_else(|e| e.into_inner());
 
     let timeout_secs = timeout_secs.max(1);
     if let Some(client) = guard.get(&timeout_secs) {
@@ -492,8 +506,30 @@ impl_http_source!(
 
 #[cfg(test)]
 mod tests {
-    use super::{CandleParse, parse_candles};
+    use super::{CandleParse, client_for, parse_candles};
     use opsense_core::{Signal, TelemetryKind};
+
+    /// Regression: dựng reqwest client phải **không** panic "No provider set".
+    ///
+    /// Workspace bật cả `ring` lẫn `aws-lc-rs` trên `rustls 0.23`, nên
+    /// `Client::builder()` chết nếu chưa ai cài provider. Test này chạy trong
+    /// test binary — **không có `main()`** — nên nó chính là hoàn cảnh của mọi
+    /// embedder đã chết trước đây, và chặn tái phát nếu ai gỡ lời gọi
+    /// `install_default_crypto_provider()` trong `client_for`.
+    #[test]
+    fn builds_client_without_a_process_provider() {
+        client_for(5).expect("client build phải không panic");
+    }
+
+    /// Client dùng chung theo timeout ⇒ `client_for` phải trả về thành công ở
+    /// mọi lần gọi, kể cả sau một lần thất bại trước đó (lock bị nhiễm nếu
+    /// `build()` panic giữa lúc giữ lock).
+    #[test]
+    fn client_survives_repeated_calls() {
+        client_for(7).expect("lần 1");
+        client_for(7).expect("lần 2");
+        client_for(9).expect("timeout khác");
+    }
 
     fn binance_cfg() -> CandleParse {
         CandleParse {
