@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use opsense_components::converters::Tick2Candle;
 use opsense_components::vector::runtime::{Component, Message, Runtime};
 use opsense_core::{Config, Context, Observation, TimeseriesStation};
 use opsense_mlib::vector::components::clock::Clock;
@@ -37,12 +38,16 @@ const SCRIPT: &str = concat!(
 );
 const SYMBOL: &str = "BTCUSDT";
 const GRID: &str = "grid";
+/// Station của node `tick_2_candle` — nến gom từ tick.
+const CANDLE: &str = "tick-candle";
 const CLOSED_CANDLES: i64 = 40;
 
 fn params() -> BTreeMap<String, Value> {
     let mut m = BTreeMap::new();
     m.insert("history_source".into(), Value::from("history"));
     m.insert("own_station".into(), Value::from(GRID));
+    // Nến live do node `tick_2_candle` gom, không phải script tự gộp.
+    m.insert("live_source".into(), Value::from(CANDLE));
     m.insert("symbol".into(), Value::from(SYMBOL));
     m.insert("resolution".into(), Value::from("1m"));
     m.insert("history_secs".into(), Value::from(3600));
@@ -113,7 +118,34 @@ async fn wait_grid_orders(ctx: &Arc<Context>, timeout_secs: u64) -> Vec<Observat
             }
         }
         if std::time::Instant::now() >= deadline {
-            panic!("station `{GRID}` không có order sau {timeout_secs}s");
+            // Chẩn đoán: nến đã vào station `tick-candle` chưa? Không có nó thì
+            // `grid` không có gì để vào lệnh — nhưng nhìn log kernel thì thấy
+            // "chưa đủ dữ liệu", rất dễ chẩn đoán nhầm thành lỗi chiến lược.
+            let n_candle = match ctx
+                .station::<Arc<RwLock<TimeseriesStation>>>(CANDLE)
+                .await
+            {
+                Ok(s) => s
+                    .read()
+                    .await
+                    .query_recent(now - WINDOW_SECS, now)
+                    .await
+                    .map_or(0, |v| v.len()),
+                Err(_) => 0,
+            };
+            let grid_n = match ctx.station::<Arc<RwLock<TimeseriesStation>>>(GRID).await {
+                Ok(s) => s
+                    .read()
+                    .await
+                    .query_recent(now - WINDOW_SECS, now)
+                    .await
+                    .map_or(0, |v| v.len()),
+                Err(_) => 0,
+            };
+            panic!(
+                "station `{GRID}` không có order sau {timeout_secs}s \
+                 (tick-candle: {n_candle} obs, grid: {grid_n} obs)"
+            );
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -130,7 +162,12 @@ async fn grid_trading_emits_order_events_through_runtime() {
     let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
     // `SCRIPT` là path → dùng `new_file` (compile lại khi file đổi mtime).
-    let mut transform = RhaiTransform::new_file(GRID, &["candles", "clock"], SCRIPT);
+    //
+    // Nhánh tick của script **không** tự gộp nến nữa — node `tick_2_candle` làm
+    // việc đó (xem `strategies/binance/config.toml`: `tick-map → tick_2_candle →
+    // grid`). Test dựng đúng chuỗi đó, nếu không thì tick không bao giờ thành
+    // nến và kernel không có gì để vào lệnh.
+    let mut transform = RhaiTransform::new_file(GRID, &["candles", "clock", CANDLE], SCRIPT);
     transform.params = params();
 
     let components: Vec<Arc<dyn Component>> = vec![
@@ -138,6 +175,15 @@ async fn grid_trading_emits_order_events_through_runtime() {
             id: "candles".into(),
         }),
         Arc::new(Clock::new(Duration::from_secs(1))),
+        Arc::new(Tick2Candle {
+            id: CANDLE.into(),
+            inputs: vec!["candles".into()],
+            resolution: "1m".into(),
+            symbol: SYMBOL.into(),
+            unit_ms: 1,
+            stale_secs: 0,
+            station: true,
+        }),
         Arc::new(transform),
         Arc::new(Output {
             id: "sink".into(),
@@ -155,7 +201,7 @@ async fn grid_trading_emits_order_events_through_runtime() {
     })
     .expect("runtime starts");
 
-    // Nạp nến đã đóng qua Input (tick branch gộp OHLCV vào station `grid`).
+    // Nạp nến qua Input → node `tick_2_candle` gom rồi ghi vào station `CANDLE`.
     let open_bucket = opsense_components::signal::now_secs() / 60 * 60;
     for (ts, price, wide) in feed_ticks(open_bucket) {
         let prices: &[f64] = if wide {
@@ -174,6 +220,21 @@ async fn grid_trading_emits_order_events_through_runtime() {
             .expect("inject tick");
         }
     }
+    // **Một** tick ở bucket kế tiếp để đẩy nến cuối đóng.
+    //
+    // Đây là luật của nến chảy, không phải chi tiết của test: nến bucket B chỉ
+    // là dữ liệu cuối khi đã thấy tick ở bucket B + step. Nến chưa đóng thì
+    // **đúng là** chưa được ghi — đó là điều kiện để lỡ sót nến chưa hoàn tất.
+    // Ở hệ thật thì tick kế tiếp tới 1 phút sau sẽ tự đẩy, không cần node nào
+    // nhắc; ở test thì tick kế tiếp là tick cuối nên phải bơm thêm.
+    rt.inject(
+        "candles".into(),
+        Message {
+            payload: tick_payload(open_bucket, 100.0),
+        },
+    )
+    .await
+    .expect("inject tick mở bucket kế tiếp");
     // Clock ping sẽ kích nhánh trading; nến cuối đã đóng (`open_bucket - 60`).
     let obs = wait_grid_orders(&ctx, 60).await;
 

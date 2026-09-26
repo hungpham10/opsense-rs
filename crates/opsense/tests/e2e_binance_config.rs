@@ -23,6 +23,7 @@ use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use opsense::api::pipeline_from_config;
 use opsense::api::{AppState, repl};
+use opsense_components::converters::Tick2Candle;
 use opsense_components::http::HttpSource;
 use opsense_components::signal;
 use opsense_components::station::TimeseriesStationSink;
@@ -47,6 +48,8 @@ const CONFIG_PATH: &str = concat!(
 const SYMBOL: &str = "BTCUSDT";
 const STATION_HISTORY: &str = "history";
 const STATION_GRID: &str = "grid";
+/// Station của node `tick_2_candle` — nến gom từ tick.
+const STATION_TICK_CANDLE: &str = "tick-candle";
 const STATION_SINK: &str = "binance-tsdb";
 const NODE_TICK_FEED: &str = "tick-feed";
 const NODE_TICK_MAP: &str = "tick-map";
@@ -61,13 +64,14 @@ fn config_file_contract() {
         "v1 runtime-only: không persist, không RustFS"
     );
 
-    // Graph 6 node: clock → history (http candles) + tick-feed (ws) → tick-map
-    // (json) → grid (rhai) → binance-tsdb (terminal sink).
+    // Graph 7 node: clock → history (http candles) + tick-feed (ws) → tick-map
+    // (json) → tick-candle (gom nến) → grid (rhai) → binance-tsdb (terminal sink).
     let graph = pipeline_from_config(&cfg).expect("components của config phải deserialize");
     assert_eq!(
         graph.len(),
-        6,
-        "config khai clock + history http + tick-feed ws + tick-map json + grid rhai + tsdb sink"
+        7,
+        "config khai clock + history http + tick-feed ws + tick-map json \
+         + tick_2_candle + grid rhai + tsdb sink"
     );
 
     let clock = graph[0]
@@ -141,15 +145,34 @@ fn config_file_contract() {
     assert_eq!(constants["signal"], "raw");
     assert_eq!(constants["labels"]["resolution"], "1m");
 
-    let grid = graph[4]
+    // Gom nến: nằm giữa `tick-map` và `grid`, là node duy nhất ghi nến từ tick.
+    // Thứ tự graph theo đúng thứ tự `[[pipeline.components]]` trong config.
+    let candle = graph[4]
+        .as_any()
+        .downcast_ref::<Tick2Candle>()
+        .expect("component 4 = tick_2_candle");
+    assert_eq!(candle.id, STATION_TICK_CANDLE);
+    assert_eq!(candle.inputs, vec![NODE_TICK_MAP.to_string()]);
+    assert_eq!(candle.resolution, "1m");
+    assert_eq!(candle.symbol, SYMBOL);
+    assert_eq!(candle.unit_ms, 1, "Binance aggTrade ts là mili-giây");
+    assert!(candle.stale_secs > 0, "phải cảnh báo khi tick ngừng");
+    assert!(candle.station, "nến phải vào station của chính node");
+
+    let grid = graph[5]
         .as_any()
         .downcast_ref::<RhaiTransform>()
-        .expect("component 4 = rhai_transform grid");
+        .expect("component 5 = rhai_transform grid");
     assert_eq!(grid.id, STATION_GRID);
     assert_eq!(
         grid.inputs,
-        vec!["clock".to_string(), STATION_HISTORY.to_string(), NODE_TICK_MAP.to_string()],
-        "grid nhận clock + history + tick để branch theo trigger"
+        vec![
+            "clock".to_string(),
+            STATION_HISTORY.to_string(),
+            NODE_TICK_MAP.to_string(),
+            STATION_TICK_CANDLE.to_string(),
+        ],
+        "grid nhận clock + history + tick + tick-candle (nến đã gom) để branch theo trigger"
     );
     assert_eq!(grid.script_path, "strategies/binance/grid.rhai");
     assert_eq!(
@@ -207,10 +230,10 @@ fn config_file_contract() {
         "grid.rhai phải nằm cạnh config trong strategies/binance/"
     );
 
-    let sink = graph[5]
+    let sink = graph[6]
         .as_any()
         .downcast_ref::<TimeseriesStationSink>()
-        .expect("component 5 = timeseries_station_sink");
+        .expect("component 6 = timeseries_station_sink");
     assert_eq!(sink.id, STATION_SINK);
     assert_eq!(
         sink.inputs,
@@ -323,10 +346,22 @@ async fn full_pipeline_ticks_and_snapshot() {
         "volume của candle = số tick đã gộp: {tick_candles:?}"
     );
 
-    let snapshot = grid_obs
+    // Snapshot nằm ở station `grid`; nến thì ở station `tick-candle`. Trả về
+    // của `wait_grid_snapshot` là **nến**, nên phải hỏi riêng station `grid`.
+    let grid_station = ctx
+        .station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID)
+        .await
+        .expect("station grid phải đăng ký");
+    let snapshot_obs = grid_station
+        .write()
+        .await
+        .query_recent(now - 3600, now + 60)
+        .await
+        .unwrap_or_default();
+    let snapshot = snapshot_obs
         .iter()
         .find(|o| o.labels.get("kind").map(String::as_str) == Some("snapshot"))
-        .expect("grid station phải có snapshot");
+        .expect("station grid phải có snapshot");
     assert_eq!(snapshot.metric_id, SYMBOL);
     let step: f64 = snapshot
         .labels
@@ -879,7 +914,15 @@ async fn wait_station_data(
     }
 }
 
-/// Đợi station `grid` có CẢ candle từ tick VÀ snapshot grid.
+/// Đợi **cả hai**: node `tick_2_candle` đã ghi nến VÀ node `grid` đã phát
+/// snapshot.
+///
+/// Hai station tách bạch là điểm cần chứng minh của kiến trúc mới: nến do node
+/// `tick_2_candle` gom rồi ghi vào station **của node đó**, còn `grid` chỉ đọc
+/// để dựng lưới. Trước đây script tự gộp nến nên `grid` vừa gốc nguồn vừa sinh
+/// ra nến — không kiểm được là nến đi qua bước gom hay không.
+///
+/// Nến chỉ được ghi khi **đã đóng**, nên phải chờ đủ một bucket đóng.
 async fn wait_grid_snapshot(
     ctx: &Arc<Context>,
     from: i64,
@@ -888,23 +931,41 @@ async fn wait_grid_snapshot(
 ) -> Vec<Observation> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
-        if let Ok(st) = ctx.station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID).await {
-            let obs = st
+        let candles = match ctx
+            .station::<Arc<RwLock<TimeseriesStation>>>(STATION_TICK_CANDLE)
+            .await
+        {
+            Ok(st) => st
                 .write()
                 .await
                 .query_recent(from, to)
                 .await
-                .unwrap_or_default();
-            let has_candle = obs.iter().any(|o| o.labels.contains_key("field"));
-            let has_snapshot = obs
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        let has_candle = candles.iter().any(|o| o.labels.contains_key("field"));
+
+        let has_snapshot = match ctx.station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID).await
+        {
+            Ok(st) => st
+                .write()
+                .await
+                .query_recent(from, to)
+                .await
+                .unwrap_or_default()
                 .iter()
-                .any(|o| o.labels.get("kind").map(String::as_str) == Some("snapshot"));
-            if has_candle && has_snapshot {
-                return obs;
-            }
+                .any(|o| o.labels.get("kind").map(String::as_str) == Some("snapshot")),
+            Err(_) => false,
+        };
+
+        if has_candle && has_snapshot {
+            return candles;
         }
         if Instant::now() >= deadline {
-            panic!("station `{STATION_GRID}` chưa có candle + snapshot sau {timeout_secs}s");
+            panic!(
+                "`{STATION_TICK_CANDLE}` có candle={has_candle}, \
+                 `{STATION_GRID}` có snapshot={has_snapshot} sau {timeout_secs}s"
+            );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

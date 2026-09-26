@@ -3,7 +3,7 @@
 #
 # Pipeline graph:
 #   clock ─────────┐
-#                  ├──→ grid (rhai_transform, inputs = ["clock", "history", "tick-map"])
+#                  ├──→ grid (rhai_transform, inputs = ["clock", "history", "tick-map", "tick-candle"])
 #   history ───────┘   (http_source, station=true, candles mode — Binance klines)
 #   tick-feed ───────────────────────────────────┐
 #                                              (websocket_2_json → json_2_json:
@@ -87,15 +87,41 @@ inputs = ["tick-feed"]
    query = "p"
    cast_to = "f64"
 
+# Gom tick thành nến. Nhận tick từ `tick-map`, giữ nến đang mở trong RAM và **chỉ
+# ghi nến khi nến đã đóng** (bucket + step <= now).
+#
+# Vì sao tách khỏi script: script stateless, mỗi batch phải dựng lại nến tích
+# luỹ từ station — nên nến phụ thuộc thứ tự batch và hỏng khi batch thiếu. Ở đây
+# nến đang mở nằm trong RAM của node.
+#
+# Hệ quả có chủ ý: **tick chết ⇒ không nến nào đóng ⇒ kernel không tiến**, tức
+# giao dịch dừng thay vì đặt lệnh trên dữ liệu cũ. Không có cảnh báo nào nếu
+# không để `stale_secs` — nên để mặc định 180s.
+#
+# `labels.field = "v"` là **số tick đã gộp**, không phải volume thật: tick
+# stream không mang khối lượng. Cần thanh khoản thì lấy từ kline API (`history`).
+[[pipeline.components]]
+type = "tick_2_candle"
+id = "tick-candle"
+inputs = ["tick-map"]
+resolution = "1m"
+symbol = "BTCUSDT"
+# `ts` của tick tính bằng đơn vị gì: 1 = millisecond (Binance aggTrade).
+unit_ms = 1
+stale_secs = 180
+station = true
+
 [[pipeline.components]]
 type = "rhai_transform"
 id = "grid"
-inputs = ["clock", "history", "tick-map"]
+inputs = ["clock", "history", "tick-map", "tick-candle"]
 script_path = "strategies/binance/grid.rhai"
 
    [pipeline.components.params]
    history_source = "history"
    own_station = "grid"
+   # Nến live do node `tick-candle` gom từ tick, không phải script tự gộp.
+   live_source = "tick-candle"
    symbol = "BTCUSDT"
    resolution = "1m"
    history_secs = 3600

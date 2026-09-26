@@ -16,11 +16,12 @@
 //
 // Params (all optional, sane defaults):
 //   history_source  = "history"   — station chứa candles klines (http candles)
-//   own_station     = "grid"      — station của node (candle tick + snapshot)
+//   own_station     = "grid"      — station của node (lệnh + snapshot)
+//   live_source     = "tick-candle" — station chứa nến gom từ tick
 //   symbol          = "BTCUSDT"
 //   resolution      = "1m"
 //   history_secs    = 3600        — cửa sổ history đọc cho fit
-//   live_window_secs = 300        — cửa sổ candle live đọc từ own station
+//   live_window_secs = 300        — cửa sổ candle live đọc từ live_source
 
 fn process(observations) {
     let hist_src = "history";
@@ -30,6 +31,14 @@ fn process(observations) {
     let own = "grid";
     if is_def_var("param_own_station") && type_of(param_own_station) != "()" {
         own = param_own_station;
+    }
+    // Station chứa nến live. Tách khỏi `own` vì nến giờ do node `tick_2_candle`
+    // gom từ tick và ghi vào station **của node đó**, không phải station của
+    // node `grid`. Trước đây nến live nằm ở `own` vì chính script tự gộp.
+    // Rỗng ⇒ lùi về `own` để cấu hình cũ không hỏng.
+    let live_src = own;
+    if is_def_var("param_live_source") && type_of(param_live_source) != "()" {
+        live_src = param_live_source;
     }
     let symbol = "BTCUSDT";
     if is_def_var("param_symbol") && type_of(param_symbol) != "()" {
@@ -60,14 +69,19 @@ fn process(observations) {
     }
 
     if trigger() == "tick" {
-        return tick_accumulate(observations, own, symbol, resolution);
+        // Nhánh tick không làm gì: node `tick_2_candle` đã gom nến và tự ghi khi
+        // nến đóng. Script chỉ cần **không** ghi đè lên nến đó.
+        return [];
     }
 
     // Clock ping (trigger "") hoặc klines mới (trigger "history") → recompute.
-    let out = snapshot(hist_src, own, symbol, resolution, hw, lw);
+    // Nhánh tick **không** còn gộp nến ở đây: node `tick_2_candle` làm việc đó
+    // và giữ nến đang mở trong RAM (script stateless, gộp lại mỗi batch thì nến
+    // phụ thuộc thứ tự batch và hỏng khi batch thiếu).
+    let out = snapshot(hist_src, live_src, symbol, resolution, hw, lw);
 
     if mode == "trading" {
-        out += trade(hist_src, own, symbol, resolution, hw);
+        out += trade(hist_src, live_src, own, symbol, resolution, hw);
     }
     out
 }
@@ -83,7 +97,7 @@ fn process(observations) {
 // restart là mất sạch lệnh. Muốn restart-safe thì đổi sang `parquet`/`sqlite`.
 // Đừng đọc comment cũ "restart không mất lệnh" là đúng với mọi backend.
 
-fn trade(hist_src, own, symbol, resolution, hw) {
+fn trade(hist_src, live_src, own, symbol, resolution, hw) {
     let now = now_secs();
     let from = now - hw;
     let step = bucket_secs(resolution);
@@ -91,7 +105,7 @@ fn trade(hist_src, own, symbol, resolution, hw) {
     // Kline history cho bucket đã đóng + candle live cho bucket đang mở; xem
     // `merge_candles` để biết vì sao không để live đè lên nến đã đóng.
     let hist = station_candles(hist_src, from, now, resolution);
-    let live = station_candles(own, from, now, resolution);
+    let live = station_candles(live_src, from, now, resolution);
     if type_of(hist) == "()" && type_of(live) == "()" { return []; }
     let series = merge_candles(empty_if_missing(hist), empty_if_missing(live), now, step);
     // ≥ 10 nến để AnalysisGrid dựng được plan.
@@ -408,43 +422,22 @@ fn clamp01(x) {
     if x < 0.25 { 0.25 } else if x > 0.75 { 0.75 } else { x }
 }
 
-// ── tick: gộp trade price vào candle bucket ────────────────────────────────
-
-fn tick_accumulate(observations, own, symbol, resolution) {
-    let out = [];
-    for o in observations {
-        let ms = o["ts"];
-        if type_of(ms) == "()" { continue; }
-        if type_of(o["value"]) == "()" { continue; }
-        let price = o["value"].to_float();
-
-        // Binance klines/aggTrade ts là ms; bucket theo phút (resolution 1m).
-        let bucket = (ms / 1000) / 60 * 60;
-        let cur = station_candles(own, bucket - 60, bucket + 60, resolution);
-        let c = candle_at(cur, bucket);
-        let next = merge_price(c, price);
-        out += candle_rows(bucket, next, symbol, resolution);
-    }
-    out
-}
-
-// Candle hiện tại cho bucket trong danh sách candles (hoặc candle rỗng).
-fn candle_at(candles, bucket) {
-    for c in candles {
-        if c["t"] == bucket { return c; }
-    }
-    #{ t: bucket, o: 0.0, h: 0.0, l: 0.0, c: 0.0, v: 0.0 }
-}
-
-// Gộp một tick price vào candle: o giữ giá đầu, h/l = max/min, c = giá mới,
-// v = số tick gộp (volume xấp xỉ bằng số trade đã gộp).
-fn merge_price(c, price) {
-    let o = if c["o"].to_float() > 0.0 { c["o"].to_float() } else { price };
-    let h = if c["h"].to_float() > 0.0 && c["h"].to_float() > price { c["h"].to_float() } else { price };
-    let l = if c["l"].to_float() > 0.0 && c["l"].to_float() < price { c["l"].to_float() } else { price };
-    let v = c["v"].to_float() + 1.0;
-    #{ o: o, h: h, l: l, c: price, v: v }
-}
+// ── tick: KHÔNG gộp nến ở đây nữa ──────────────────────────────────────────
+//
+// Việc gom tick thành nến do node `tick_2_candle` lo
+// (`crates/opsense-components/src/converters/tick2candle.rs`): nó giữ nến đang
+// mở trong RAM và chỉ ghi nến khi nến đóng.
+//
+// Lý do bỏ khỏi script, không phải vì thừa:
+//
+// - **Script stateless.** Bản cũ phải `station_query` station của chính node
+//   rồi tự gộp lại từ đầu mỗi batch, nên nến tích luỹ phụ thuộc thứ tự batch;
+//   batch thiếu thì nến sai.
+// - **Nến đóng là dữ liệu cuối.** Bản cũ ghi nến **đang mở** liên tục, và
+//   kernel phải tự loại bằng `last_closed` trong script. Nay node chỉ ghi nến
+//   đã đóng, nên invariant "chỉ nến đóng mới tới kernel" nằm ở đúng một chỗ.
+// - **Lỗi nến là lỗi dữ liệu, không phải lỗi chiến lược** — nên log ở component
+//   chứ không ở strategy.
 
 // 5 obs OHLCV cho một candle, theo đúng convention station
 // (ts = giây, `labels.field` ∈ o/h/l/c/v, `labels.resolution`).

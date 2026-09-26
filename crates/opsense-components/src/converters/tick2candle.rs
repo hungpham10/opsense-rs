@@ -31,6 +31,7 @@
 use std::collections::BTreeMap;
 use std::io::Error;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{RwLock, mpsc};
 
@@ -230,10 +231,21 @@ impl_tick_2_candle!(
             .station::<Arc<RwLock<TimeseriesStation>>>(&self.id)
             .await?;
 
-        // Nến đang mở: giữ trong RAM, chỉ ghi khi đóng. `BTreeMap` để xả nến đã
-        // đóng theo thứ tự thời gian khi batch về nhiều bucket.
+        // Nến đang mở: giữ trong RAM, chỉ ghi khi **đã đóng**. `BTreeMap` để xả
+        // nến đóng theo thứ tự thời gian khi một batch về nhiều bucket.
         let mut open: BTreeMap<i64, Bar> = BTreeMap::new();
-        let mut last_ts: i64 = 0;
+        // Mốc thời gian lớn nhất **đã thấy**, đơn vị giây, chỉ tiến. Đây là
+        // đồng hồ để quyết định đóng nến — KHÔNG phải `ts` của tick hiện tại.
+        //
+        // Vì sao: bản đầu tiên lấy `now = max(ts trong batch)` rồi đóng nến khi
+        // `bucket + step <= now`. Tick nằm đúng mốc bucket nên `now == bucket` và
+        // điều kiện luôn sai ⇒ nến **không** đóng; tệ hơn, `last_ts` trộn giây
+        // với mili-giây làm điều kiện luôn đúng ⇒ mỗi tick một nến, biên 0.
+        // Log đã thấy đúng triệu chứng: `low=109.0 high=109.0`, `placed=0`.
+        //
+        // Luật đúng cho nến chảy: nến bucket B **đóng** khi đã thấy tick ở
+        // bucket B + step trở đi — tức đã sang phút kế tiếp, B là dữ liệu cuối.
+        let mut max_ts_secs: i64 = 0;
         let mut wrote = false;
 
         while let Some(msg) = rx.recv().await {
@@ -244,27 +256,25 @@ impl_tick_2_candle!(
             let Some(batch) = non_empty_batch(&msg) else {
                 continue;
             };
-            let now = batch.iter().map(|o| o.ts).max().unwrap_or(last_ts);
 
             for o in &batch {
-                let Some(price) = tick_price(o, self.unit_ms) else {
+                let Some(price) = tick_price(o) else {
                     continue;
                 };
-                let ts_secs = o.ts / i64::try_from(self.unit_ms).unwrap_or(1).max(1);
-                last_ts = last_ts.max(ts_secs);
+                let ts_secs = ts_to_secs(o.ts, self.unit_ms);
+                max_ts_secs = max_ts_secs.max(ts_secs);
                 open.entry(bucket_of(ts_secs, step))
                     .or_default()
                     .push(price);
             }
 
-            // Đóng các nến đã đủ một bucket. Điều kiện `bucket + step <= now`
-            // ⇒ nến đúng `now` chưa đóng, nên không bao giờ ghi nến chưa hoàn
-            // tất — cũng là lý do bucket đầu sau restart bị bỏ: `open` không có
-            // `o` nên `is_complete` false.
+            // Đóng mọi nến đã đủ một bucket. `BTreeMap` ⇒ duyệt tăng dần, xả
+            // theo thứ tự thời gian.
+            let step_secs = i64::try_from(step).unwrap_or(60);
             let due: Vec<i64> = open
                 .keys()
                 .copied()
-                .filter(|b| b.saturating_add(i64::try_from(step).unwrap_or(60)) <= now)
+                .filter(|b| b.saturating_add(step_secs) <= max_ts_secs)
                 .collect();
 
             let mut rows: Vec<Observation> = Vec::new();
@@ -277,25 +287,31 @@ impl_tick_2_candle!(
             }
 
             if !rows.is_empty() {
-                let from = rows.iter().map(|o| o.ts).min().unwrap_or(now);
-                let to = rows.iter().map(|o| o.ts).max().unwrap_or(now);
+                let from = rows.iter().map(|o| o.ts).min().unwrap_or(max_ts_secs);
+                let to = rows.iter().map(|o| o.ts).max().unwrap_or(max_ts_secs);
                 me.write().await.update_range(&rows, from, to, to);
                 wrote = true;
             }
 
-            if self.stale_secs > 0 && last_ts > 0 {
-                let age = now.saturating_sub(last_ts);
+            // Trễ so với **đồng hồ thật**, không so với tick — nếu so với tick
+            // thì tick tắt hẳn thì `max_ts_secs` đứng yên và ta không bao giờ
+            // phát hiện. Đây là tín hiệu "nguồn tick đã chết".
+            if self.stale_secs > 0 && max_ts_secs > 0 {
+                let wall = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
+                let age = wall.saturating_sub(max_ts_secs);
                 if age > i64::try_from(self.stale_secs).unwrap_or(i64::MAX) {
                     tracing::warn!(
                         node = %self.id,
-                        last_tick = last_ts,
+                        last_tick = max_ts_secs,
                         age,
                         "tick ngừng — không có nến nào đóng, giao dịch đang dừng im lặng"
                     );
                 }
             }
 
-            let done = signal::tagged(signal::processed(now), &self.id);
+            let done = signal::tagged(signal::processed(max_ts_secs), &self.id);
             for s in &tx.streams {
                 let _ = s.send(done.clone()).await;
             }
@@ -308,6 +324,20 @@ impl_tick_2_candle!(
     }
 );
 
+/// `ts` thô → giây.
+///
+/// `unit_ms` là **hệ số nhân** (milliseconds per open-time unit), đúng convention
+/// của `ohlcv::open_time_to_secs`: `1` = timestamp tính bằng mili-giây (Binance
+/// aggTrade), `1000` = tính bằng giây.
+///
+/// Chia thay vì nhân là lỗi rất dễ mắc: với `unit_ms = 1` thì `ts / 1` **giữ
+/// nguyên mili-giây**, bucket thành 60 *mili*-giây, và điều kiện đóng nến sai
+/// hoàn toàn.
+#[must_use]
+pub fn ts_to_secs(raw: i64, unit_ms: u64) -> i64 {
+    (raw.saturating_mul(i64::try_from(unit_ms).unwrap_or(1).max(1))) / 1_000
+}
+
 /// Batch observation từ message, `None` nếu rỗng.
 fn non_empty_batch(msg: &Message) -> Option<Vec<Observation>> {
     let batch = extract_observations(&msg.payload);
@@ -315,8 +345,7 @@ fn non_empty_batch(msg: &Message) -> Option<Vec<Observation>> {
 }
 
 /// Giá của một tick: `value` nếu hữu ích, không thì `labels.price`.
-fn tick_price(o: &Observation, unit_ms: u64) -> Option<f64> {
-    let _ = unit_ms;
+fn tick_price(o: &Observation) -> Option<f64> {
     let v = o.value;
     if v.is_finite() && v > 0.0 {
         return Some(v);
@@ -341,6 +370,90 @@ mod tests {
         );
         o.labels.insert("field".to_string(), "c".to_string());
         o
+    }
+
+    /// `unit_ms` là hệ số **nhân**, không phải mẫu số.
+    ///
+    /// Bản đầu tiên viết `ts / unit_ms` — với `unit_ms = 1` thì `ts / 1` giữ
+    /// nguyên mili-giây, nên bucket thành 60 mili-giây và điều kiện đóng nến sai
+    /// hoàn toàn. Test này chặn đúng lỗi đó.
+    #[test]
+    fn ts_converts_millis_to_secs() {
+        // Binance aggTrade: ts là ms. 1_758_900_000_123 ms ⇒ 1_758_900_000 s
+        assert_eq!(ts_to_secs(1_758_900_000_123, 1), 1_758_900_000);
+        // Giây thì nhân 1000 trước rồi chia 1000 ⇒ giữ nguyên.
+        assert_eq!(ts_to_secs(1_758_900_000, 1000), 1_758_900_000);
+        // Giá trị nhỏ: 1_500_000 ms = 1_500 s
+        assert_eq!(ts_to_secs(1_500_000, 1), 1_500);
+        // Tránh tràn khi ts khổng lồ.
+        assert!(ts_to_secs(i64::MAX, 1000) > 0, "không được tràn/âm");
+    }
+
+    /// Bucket tính trên **giây** phải ra 60 giây khi resolution là 1m.
+    ///
+    /// Đây là test tích hợp của hai hàm: nếu `ts_to_secs` sai thì bucket sai.
+    #[test]
+    fn millisecond_tick_lands_in_minute_bucket() {
+        let bucket = bucket_of(ts_to_secs(1_758_900_000_123, 1), bucket_secs("1m"));
+        assert_eq!(bucket % 60, 0, "bucket phải bám mốc phút");
+        assert_eq!(bucket, 1_758_900_000);
+    }
+
+    /// `bucket_secs` → `i64` (bucket offset). Tách riêng cho test đỡ phải `.unwrap()`.
+fn step_secs_of(step: u64) -> i64 {
+    i64::try_from(step).unwrap_or(60)
+}
+
+/// Nến chỉ đóng khi **đã sang bucket kế tiếp**, nên nhiều tick trong cùng
+    /// một bucket phải gộp lại — không phải mỗi tick một nến.
+    ///
+    /// Bản đầu tiên lấy `now = max(ts batch)` rồi đóng khi `bucket + step <= now`.
+    /// Tick nằm đúng mốc bucket nên `now == bucket`, điều kiện hoặc luôn sai
+    /// (nến không đóng) hoặc luôn đúng (mỗi tick một nến) tuỳ chỗ đặt phép so.
+    /// Bản đầu rơi vào ca hai: log thật cho thấy `low=109.0 high=109.0` —
+    /// biên 0 nên không mốc lưới nào vào được, `placed=0` dù plan có 2 ô.
+    #[test]
+    fn candles_close_only_when_a_later_bucket_is_seen() {
+        let step = bucket_secs("1m");
+        let base = 1_758_900_000i64;
+        let b0 = bucket_of(base, step);
+        let b1 = bucket_of(base + 61, step);
+        assert_eq!(b1 - b0, step_secs_of(step), "hai bucket liền nhau");
+
+        let mut open: BTreeMap<i64, Bar> = BTreeMap::new();
+        let mut max_ts = 0i64;
+
+        // Ba tick cùng bucket `b0` — mọi tick phải vào **cùng một** nến.
+        for (ts, price) in [(b0, 100.0), (b0 + 10, 105.0), (b0 + 20, 95.0)] {
+            max_ts = max_ts.max(ts);
+            open.entry(bucket_of(ts, step)).or_default().push(price);
+        }
+        // Đồng hồ chỉ tới trong `b0` ⇒ chưa nến nào đóng.
+        let step_secs = i64::try_from(step).unwrap_or(60);
+        let due: Vec<i64> = open
+            .keys()
+            .copied()
+            .filter(|b| b.saturating_add(step_secs) <= max_ts)
+            .collect();
+        assert!(due.is_empty(), "bucket đang mở không được đóng: {due:?}");
+
+        // Tick đầu bucket kế tiếp ⇒ `b0` là dữ liệu cuối, đóng được.
+        max_ts = max_ts.max(b1);
+        let due: Vec<i64> = open
+            .keys()
+            .copied()
+            .filter(|b| b.saturating_add(step_secs) <= max_ts)
+            .collect();
+        assert_eq!(due, vec![b0], "chỉ nến đã đủ bucket mới đóng");
+
+        let bar = open.remove(&b0).expect("b0 còn trong open");
+        let v = bar.values();
+        assert_eq!(v[0], 100.0, "open = giá tick đầu");
+        assert_eq!(v[1], 105.0, "high = max tick");
+        assert_eq!(v[2], 95.0, "low = min tick");
+        assert_eq!(v[3], 95.0, "close = giá tick cuối");
+        assert_eq!(v[4], 3.0, "3 tick trong 1 nến");
+        assert!(v[1] - v[2] > 0.0, "biên phải khác 0 — nến 1 tick thì hỏng");
     }
 
     #[test]
@@ -434,12 +547,12 @@ mod tests {
 
     #[test]
     fn tick_price_rejects_non_positive_and_falls_back_to_label() {
-        assert_eq!(tick_price(&obs(1_000, 42.0), 1), Some(42.0));
-        assert_eq!(tick_price(&obs(1_000, 0.0), 1), None, "giá 0 là dữ liệu hỏng");
-        assert_eq!(tick_price(&obs(1_000, f64::NAN), 1), None, "NaN phải bị lo");
+        assert_eq!(tick_price(&obs(1_000, 42.0)), Some(42.0));
+        assert_eq!(tick_price(&obs(1_000, 0.0)), None, "giá 0 là dữ liệu hỏng");
+        assert_eq!(tick_price(&obs(1_000, f64::NAN)), None, "NaN phải bị lo");
 
         let mut o = obs(1_000, 0.0);
         o.labels.insert("price".to_string(), "99.5".to_string());
-        assert_eq!(tick_price(&o, 1), Some(99.5), "fallback sang labels.price");
+        assert_eq!(tick_price(&o), Some(99.5), "fallback sang labels.price");
     }
 }
