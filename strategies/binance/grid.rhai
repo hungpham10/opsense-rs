@@ -298,6 +298,23 @@ fn rebuild(candles, prev, params) {
     let step = grid_step(g);
     let n_cells = num_cells(g);
 
+    // Bỏ ô nào không đủ rộng để mọi mốc trong ô còn lãi sau phí sàn.
+    //
+    // Vì sao **bỏ ô** mà không rút bớt số mốc: mỗi ô là một `TradingGrid`
+    // riêng, nên trong lưới của ô đó mốc đầu không có TP phía dưới
+    // (`tp_below(0)` trả chính nó) và mốc cuối không có TP phía trên. Rút xuống
+    // 2 mốc làm **mọi** mốc chết, còn 3 mốc chỉ còn 1 mốc dùng được — nên
+    // `max_levels_for_profit` là cách sai (đã thử, làm hỏng test). Cách đúng là
+    // giữ nguyên `grid_levels` mốc và loại ô không đủ rộng.
+    //
+    // Bề rộng ô là `step`; `levels` mốc ⇒ `levels − 1` khoảng. Đo thật trên
+    // Binance: `step` ~ $25, mốc cách nhau $6.28, còn phí đòi ≥ $168 ở
+    // `fee_rate = 0.001` ⇒ mọi entry của mọi ô đều bị kernel lo (`placed=0`).
+    let fee = knob(params, "fee_rate", 0.001).to_float();
+    // Biên an toàn 1.2: kernel so **nghiêm** (`expected_profit_pct > 2 × fee`),
+    // nên bước đúng bằng ngưỡng cũng bị lo.
+    let spacing_floor = min_profitable_step(fee, (lo + hi) / 2.0) * 1.2;
+
     let plans = [];
     for cell in 0..n_cells {
         let cell_lo = lo + cell * step;
@@ -306,6 +323,12 @@ fn rebuild(candles, prev, params) {
         let total = up + down;
         // Drift = (up - down) / (up + down) trong [-1, 1].
         let drift = if total > 0.0 { (up - down) / total } else { 0.0 };
+
+        // Ô quá hẹp: bỏ hẳn thay vì dựng lưới mà không lệnh nào lãi.
+        if type_of(spacing_floor) != "()" && levels >= 2 {
+            let spacing = step / (levels - 1);
+            if spacing < spacing_floor { continue; }
+        }
 
         // Lưới lệnh trong ô: K bậc đều, level đầu = đáy ô.
         let lv = [];

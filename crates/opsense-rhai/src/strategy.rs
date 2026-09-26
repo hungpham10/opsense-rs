@@ -161,6 +161,11 @@ fn call_rebuild(
     let deadline = std::time::Instant::now() + runtime::rhai_timeout();
     let out = STRATEGY_ENGINE.with(|cell| {
         let mut eng = cell.borrow_mut();
+        // `fn rebuild` chạy trên engine strategy này, **không phải** engine của
+        // transform, nên phải đăng ký lại ở đây — cùng bộ hàm, cùng lý do.
+        // Thiếu bước này thì script gọi `min_profitable_step` trong `rebuild`
+        // chết với "Function not found" ⇒ plan rỗng ⇒ không lệnh nào.
+        crate::trading::register(&mut eng);
         eng.on_progress(move |_| {
             if std::time::Instant::now() <= deadline {
                 None
