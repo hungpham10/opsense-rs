@@ -24,6 +24,7 @@ use axum::response::Response;
 use opsense::api::pipeline_from_config;
 use opsense::api::{AppState, repl};
 use opsense_components::converters::Tick2Candle;
+use opsense_components::http::HttpOrigin;
 use opsense_components::signal;
 use opsense_components::vector::runtime::Runtime;
 use opsense_core::{Config, Context, Observation, TimeseriesStation};
@@ -47,6 +48,7 @@ const STATION_GRID: &str = "grid";
 /// Station của node `tick_2_candle` — nến gom từ tick.
 const STATION_TICK_CANDLE: &str = "tick-candle";
 const NODE_TICK_FEED: &str = "tick-feed";
+const STATION_HISTORY: &str = "history";
 const NODE_TICK_MAP: &str = "tick-map";
 /// Số nến mock phát ra. ≥ 10 vì `AnalysisGrid` cần tối thiểu 10 nến.
 const CANDLE_ROUNDS: i64 = 40;
@@ -61,21 +63,66 @@ fn config_file_contract() {
         "v1 runtime-only: không persist, không RustFS"
     );
 
-    // Graph **4** node, chỉ từ websocket — không clock, không kline history,
-    // không sink:
+    // Graph **5** node:
+    //   history (http, tự nhịp — seed trading range)
     //   tick-feed (ws) → tick-map (json) → tick-candle (gom nến) → grid (rhai)
-    // Thứ tự graph theo đúng thứ tự `[[pipeline.components]]` trong config.
+    // Không `clock`, không sink. Thứ tự graph theo `[[pipeline.components]]`.
     let graph = pipeline_from_config(&cfg).expect("components của config phải deserialize");
     assert_eq!(
         graph.len(),
-        4,
-        "config chỉ khai tick-feed ws + tick-map json + tick_2_candle + grid rhai"
+        5,
+        "config khai history http + tick-feed ws + tick-map json \
+         + tick_2_candle + grid rhai"
     );
 
-    let feed = graph[0]
-        .as_any()
+    // Tìm node theo `id` thay vì theo chỉ số: thứ tự `graph` là thứ tự
+    // `[[pipeline.components]]`, nhưng đặt thêm/bớt một node giữa chừng thì
+    // mọi assert theo chỉ số phía sau lệch hết — và lỗi hiện ra là
+    // "component N = <tên sai>" chứ không phải "thiếu node".
+    // Tìm node theo `id` (`Identify::id`, có sẵn trên mọi component) thay vì
+    // theo chỉ số. Thứ tự `graph` là thứ tự `[[pipeline.components]]`, nên
+    // thêm/bớt một node giữa chừng làm mọi assert theo chỉ số phía sau lệch hết
+    // — và lỗi hiện ra là "component N = <tên sai>" chứ không phải "thiếu node".
+    let node = |id: &str| -> &dyn std::any::Any {
+        graph
+            .iter()
+            .find(|c| c.id() == id)
+            .unwrap_or_else(|| panic!("không có node `{id}` trong graph"))
+            .as_any()
+    };
+
+
+    // History: node **kéo theo yêu cầu** — `http_origin` là
+    // `ComponentType::Source` nên không cần node `clock`: nó tự làm origin của
+    // chính station nên dữ liệu tới đúng lúc có người đọc.
+    let history = node(STATION_HISTORY)
+        .downcast_ref::<HttpOrigin>()
+        .expect("node `history` phải là http_origin (kéo), không phải http_source");
+    assert!(
+        history.url.contains("limit=1000"),
+        "1000 nến = trần Binance, 16.6 giờ: {}",
+        history.url
+    );
+    // Không binding đổi đơn vị: node không đoán API muốn giây hay mili-giây,
+    // và `grid.rhai` mới là chỗ quyết định cửa sổ phân tích.
+    assert!(
+        history.bindings.is_empty(),
+        "không binding: node không lo phép nhân đơn vị — xem `grid.rhai`"
+    );
+    assert!(history.station, "http_origin phải terminal: không còn node sink");
+    let candles = history.candles.as_ref().expect("http source phải bật candle parse mode");
+    assert_eq!(candles.symbol, SYMBOL);
+    assert_eq!(candles.resolution, "1m");
+    assert_eq!(candles.unit_ms, 1, "Binance openTime là milliseconds");
+    assert_eq!(
+        candles.mapping,
+        ["[].0", "[].1", "[].2", "[].3", "[].4", "[].5"],
+        "mapping mặc định = layout Binance klines"
+    );
+
+    let feed = node(NODE_TICK_FEED)
         .downcast_ref::<Websocket2Json>()
-        .expect("component 0 = websocket_2_json");
+        .expect("node tick-feed phải là websocket_2_json");
     assert_eq!(feed.id, NODE_TICK_FEED);
     assert!(
         feed.uri.starts_with("wss://"),
@@ -85,10 +132,9 @@ fn config_file_contract() {
 
     // Tick map: jq path dạng chuỗi deserialize được, price string cast f64,
     // constants định danh người gửi (`trigger`) + convention OHLCV.
-    let map = graph[1]
-        .as_any()
+    let map = node(NODE_TICK_MAP)
         .downcast_ref::<Json2Json>()
-        .expect("component 1 = json_2_json");
+        .expect("node tick-map phải là json_2_json");
     assert_eq!(map.inputs, vec![NODE_TICK_FEED.to_string()]);
     assert_eq!(
         map.transforms.get("ts").expect("transform ts").query,
@@ -118,10 +164,9 @@ fn config_file_contract() {
     assert_eq!(constants["labels"]["resolution"], "1m");
 
     // Gom nến: nằm giữa `tick-map` và `grid`, là node **duy nhất** sinh nến.
-    let candle = graph[2]
-        .as_any()
+    let candle = node(STATION_TICK_CANDLE)
         .downcast_ref::<Tick2Candle>()
-        .expect("component 2 = tick_2_candle");
+        .expect("node tick-candle phải là tick_2_candle");
     assert_eq!(candle.id, STATION_TICK_CANDLE);
     assert_eq!(candle.inputs, vec![NODE_TICK_MAP.to_string()]);
     assert_eq!(candle.resolution, "1m");
@@ -130,10 +175,9 @@ fn config_file_contract() {
     assert!(candle.stale_secs > 0, "phải cảnh báo khi tick ngừng");
     assert!(candle.station, "nến phải vào station của chính node");
 
-    let grid = graph[3]
-        .as_any()
+    let grid = node(STATION_GRID)
         .downcast_ref::<RhaiTransform>()
-        .expect("component 3 = rhai_transform grid");
+        .expect("node grid phải là rhai_transform");
     assert_eq!(grid.id, STATION_GRID);
     assert_eq!(
         grid.inputs,
@@ -146,13 +190,18 @@ fn config_file_contract() {
     assert_eq!(grid.script_path, "strategies/binance/grid.rhai");
     // Không còn node `history`, nên cả cửa sổ phân tích lẫn nến live đều đọc
     // từ station của `tick-candle`.
-    for key in ["history_source", "live_source"] {
-        assert_eq!(
-            grid.params.get(key).and_then(Value::as_str),
-            Some(STATION_TICK_CANDLE),
-            "`{key}` phải trỏ vào station nến gom từ tick"
-        );
-    }
+    // `history` seed trading range (nến đã đóng), `tick-candle` cho nến phút
+    // đang chạy. Trộn hai nguồn là sai: nến API tới trễ và đã đóng một phần.
+    assert_eq!(
+        grid.params.get("history_source").and_then(Value::as_str),
+        Some(STATION_HISTORY),
+        "history_source phải là nến API — đây là nguồn mở rộng phạm vi giá"
+    );
+    assert_eq!(
+        grid.params.get("live_source").and_then(Value::as_str),
+        Some(STATION_TICK_CANDLE),
+        "live_source phải là nến gom từ tick — nến phút đang chạy"
+    );
     assert_eq!(
         grid.params.get("own_station").and_then(Value::as_str),
         Some(STATION_GRID)
@@ -363,6 +412,18 @@ async fn full_pipeline_ticks_and_snapshot() {
             .is_ok(),
         "station `grid` phải đăng ký — đó là nơi lưu snapshot + lệnh"
     );
+
+    // Dừng runtime **trước** khi test kết thúc, rồi đợi tắt hẳn: để `Runtime`
+    // rơi xuống ở cuối scope thì engine, script và mock còn việc dở dang bị bỏ
+    // giữa chừng, và test sau phải chịu thay.
+    //
+    // Lưu ý: `wait_for_shutdown` **không** phải cách chữa SIGABRT từng xảy ra
+    // ở đây. Nguyên nhân thật là `station_candles` kéo HTTP ngay trong script
+    // Rhai (script chạy trên `spawn_blocking`, nên task đó không hủy được);
+    // nó đã được sửa đúng chỗ — xem `HttpOrigin` — bằng cách dời việc kéo ra
+    // khỏi đường đọc.
+    rt.stop().expect("dừng runtime");
+    rt.wait_for_shutdown().await.expect("runtime đã tắt hẳn");
 }
 
 /// ── Tầng 3: `params.mode = "trading"` trên chính config thật ────────────────
@@ -384,8 +445,10 @@ async fn full_pipeline_trading_emits_orders() {
     let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
     let script = dir.join("grid.rhai");
 
-    // Không còn node `history` (kline HTTP) nên chỉ mock websocket.
+    // `history` là http_origin → trỏ về mock, nếu không test gọi Binance thật.
+    let kline_url = spawn_kline_mock().await;
     let ws_uri = spawn_ws_mock();
+    point_history_at_mock(&mut cfg, &kline_url);
 
     if let Some(p) = &mut cfg.pipeline {
         for comp in &mut p.components {
@@ -493,6 +556,18 @@ async fn full_pipeline_trading_emits_orders() {
         ts.last().is_some_and(|last| *last >= last_order_ts),
         "cursor phải không cũ hơn order: {cursor:?}"
     );
+
+    // Dừng runtime **trước** khi test kết thúc, rồi đợi tắt hẳn: để `Runtime`
+    // rơi xuống ở cuối scope thì engine, script và mock còn việc dở dang bị bỏ
+    // giữa chừng, và test sau phải chịu thay.
+    //
+    // Lưu ý: `wait_for_shutdown` **không** phải cách chữa SIGABRT từng xảy ra
+    // ở đây. Nguyên nhân thật là `station_candles` kéo HTTP ngay trong script
+    // Rhai (script chạy trên `spawn_blocking`, nên task đó không hủy được);
+    // nó đã được sửa đúng chỗ — xem `HttpOrigin` — bằng cách dời việc kéo ra
+    // khỏi đường đọc.
+    rt.stop().expect("dừng runtime");
+    rt.wait_for_shutdown().await.expect("runtime đã tắt hẳn");
 }
 
 /// ── Tầng 4: order đọc được qua `Query.queryTimeseries` ────────────────────
@@ -525,8 +600,10 @@ async fn trading_orders_readable_via_graphql() {
     let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
     let script = dir.join("grid.rhai");
 
-    // Không còn node `history` (kline HTTP) nên chỉ mock websocket.
+    // `history` là http_origin → trỏ về mock, nếu không test gọi Binance thật.
+    let kline_url = spawn_kline_mock().await;
     let ws_uri = spawn_ws_mock();
+    point_history_at_mock(&mut cfg, &kline_url);
 
     if let Some(p) = &mut cfg.pipeline {
         for comp in &mut p.components {
@@ -800,6 +877,73 @@ fn candle_ranges(obs: &[Observation]) -> Vec<(i64, f64)> {
     acc.into_iter()
         .map(|(ts, (h, l))| (ts, if h.is_finite() && l.is_finite() { h - l } else { 0.0 }))
         .collect()
+}
+
+/// Mock `/klines` cho node `history`.
+///
+/// Node `history` là `http_origin` với URL **Binance thật** trong config, nên
+/// test phải trỏ về mock — nếu không test phụ thuộc mạng, và khi mạng chập chờn
+/// thì lưới không dựng được ⇒ không có lệnh ⇒ test đỏ với lý do sai.
+///
+/// Nến nhấn sóng rộng để `grid_step` vượt ngưỡng phí `2 × fee_rate × giá`.
+async fn spawn_kline_mock() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let now = signal::now_secs();
+    // 400 nến 1m, giá dao động ~±40 quanh 100 ⇒ biên ~$80, `step` đủ rộng.
+    let mut rows = Vec::new();
+    for i in 0..400i64 {
+        let ts = now - 400 * 60 + i * 60;
+        let base = 100.0 + (i % 20) as f64 * 4.0;
+        rows.push(format!(
+            "[{}, \"{}\", \"{}\", \"{}\", \"{}\", \"10\"]",
+            ts * 1000,
+            base,
+            base + 3.0,
+            base - 3.0,
+            base + 1.0
+        ));
+    }
+    let body = format!("[{}]", rows.join(","));
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let body = body.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 2048];
+                while !buf.ends_with(b"\r\n\r\n") {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    format!("http://{addr}/api/v3/klines?symbol={SYMBOL}&interval=1m&limit=1000")
+}
+
+/// Đổi URL của node `history` sang mock (xem [`spawn_kline_mock`]).
+fn point_history_at_mock(cfg: &mut Config, url: &str) {
+    let Some(p) = &mut cfg.pipeline else {
+        return;
+    };
+    for comp in &mut p.components {
+        let Some(obj) = comp.as_object_mut() else {
+            continue;
+        };
+        if obj.get("id").and_then(Value::as_str) == Some(STATION_HISTORY) {
+            obj.insert("url".into(), json!(url));
+        }
+    }
 }
 
 /// Đợi station có **nến** (obs có `labels.field`), không phải bất kỳ obs nào.

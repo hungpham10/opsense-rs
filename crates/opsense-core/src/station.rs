@@ -240,6 +240,32 @@ impl Default for TimeseriesStation {
     }
 }
 
+/// Toàn bộ những gì `PartialEq` của [`Observation`] so sánh, đóng gói thành
+/// một khoá `Hash + Eq` — dùng để bỏ trùng trong
+/// [`TimeseriesStation::update_range`].
+///
+/// `labels` phải vào khoá và phải **thứ tự ổn định**: `HashMap` không có thứ
+/// tự, nên sắp xếp cặp khoá–giá trị trước rồi nối lại.
+type ObsIdentity = (i64, String, u8, u8, u64, Option<u8>, String);
+
+fn obs_identity(o: &Observation) -> ObsIdentity {
+    let mut labels: Vec<(&String, &String)> = o.labels.iter().collect();
+    labels.sort_unstable();
+    let labels: String = labels
+        .iter()
+        .map(|(k, v)| format!("{k}={v}\u{1}"))
+        .collect();
+    (
+        o.ts,
+        o.metric_id.clone(),
+        o.kind as u8,
+        o.signal as u8,
+        o.value.to_bits(),
+        o.severity.map(|s| s as u8),
+        labels,
+    )
+}
+
 impl TimeseriesStation {
     /// Station thuần memory (block evict là mất).
     pub fn new(capacity: usize, block_duration_secs: Option<i64>) -> Self {
@@ -554,13 +580,32 @@ impl TimeseriesStation {
                 }
             }
 
-            // Sap xep va xoa trung lặp — chỉ xoá observation giống hệt nhau
-            // (ts + metric + kind + signal + value + labels). `dedup_by_key(ts)`
-            // trước đây đè 4/5 field OHLCV dùng chung một ts (cùng ts ≠ trùng
-            // dữ liệu); với các dòng cùng (ts, field) khác giá trị, stable-sort
-            // giữ thứ tự ghi (mới append sau cũ) nên đọc lại lấy bản mới nhất.
+            // Bỏ trùng **chính xác**.
+            //
+            // Cách cũ là `sort_by_key(ts)` + `dedup_by(|a, b| a == b)`, và nó
+            // bỏ sót gần như mọi thứ: `dedup_by` chỉ so **hai phần tử liền kề**,
+            // mà nến 1m có 5 observation (`o/h/l/c/v`) dùng chung một `ts`, nên
+            // bản cũ và bản mới của cùng một field không bao giờ đứng cạnh nhau
+            // (`o h l c v o h l c v`) ⇒ không cặp nào giống nhau. Đo được: nạp 3
+            // lần cùng một bộ 61 nến (305 dòng thật) cho **915** dòng. Node
+            // `http_origin` nạp lại định kỳ nên đây là chuyện thường, không
+            // phải rì hiếm.
+            //
+            // Vì sao không gộp theo `(ts, field, metric)` — cách nhìn hiển nhiên
+            // hơn: nó **mất dữ liệu**. Record khác nhau hoàn toàn có thể trùng
+            // `ts` và `metric_id` mà khác `labels` (hai lệnh cùng giây khác
+            // `order_id`; portfolio nhiều dòng cùng mốc). Đo được: gộp kiểu đó làm
+            // nhánh `trading` của pipeline binance **ngừng sinh lệnh**. Nên khoá
+            // phải là *toàn bộ* những gì `PartialEq` so sánh — xem
+            // [`obs_identity`].
+            //
+            // `sort_by_key` là **stable** nên các observation cùng `ts` giữ thứ
+            // tự ghi, và `retain` giữ bản đầu tiên. Giữ bản đầu hay bản sau
+            // không khác gì khi chúng *giống hệt nhau*.
             block.items.sort_by_key(|x| x.ts);
-            block.items.dedup_by(|a, b| a == b);
+            let mut seen: std::collections::HashSet<ObsIdentity> =
+                std::collections::HashSet::with_capacity(block.items.len());
+            block.items.retain(|o| seen.insert(obs_identity(o)));
 
             // Cập nhật range bao phủ và timestamp sửa đổi
             let eff_from = query_from.max(block_start);
