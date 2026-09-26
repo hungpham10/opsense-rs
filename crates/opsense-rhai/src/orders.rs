@@ -476,8 +476,11 @@ async fn feed(
     let mut analysis = slice_fetch(series.clone());
 
     // Rebuild fail (thiếu data) → kernel giữ plan cũ, không đặt lệnh; lần sau
-    // thử lại. Không phải lỗi của script nên không ném.
-    let _ = portfolio
+    // thử lại. Không phải lỗi của script nên không ném — nhưng **phải log**:
+    // nuốt im lặng (`let _ =`) khiến "kernel chạy mà không đặt lệnh" trông
+    // giống hệt "chiến lược hợp lý nhưng giá chưa chạm level", và không có
+    // cách nào phân biệt ngoài log.
+    if let Err(e) = portfolio
         .evaluate(
             &mut session,
             from,
@@ -487,7 +490,14 @@ async fn feed(
             &mut *analysis,
             &mut notify,
         )
-        .await;
+        .await
+    {
+        tracing::warn!(
+            candle_ts = incoming.t,
+            error = %e,
+            "portfolio evaluate lỗi — giữ plan cũ, lần sau thử lại"
+        );
+    }
 
     let events = events.lock().map(|g| g.clone()).unwrap_or_default();
     let mut out = Vec::new();
