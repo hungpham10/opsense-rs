@@ -11,13 +11,13 @@
 
 use std::collections::BTreeMap;
 
+pub mod converters;
 pub mod csv;
 pub mod http;
 pub mod ohlcv;
 pub mod processor;
 pub mod station;
 pub mod telegram;
-pub mod tick2candle;
 
 /// Pipeline signal helpers shared by graph nodes.
 pub mod signal {
