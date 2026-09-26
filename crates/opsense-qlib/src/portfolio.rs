@@ -523,8 +523,8 @@ impl Portfolio {
     ///
     /// Con trỏ thời gian nằm trong `Session` ([`Session::next_ts`]), nên caller
     /// không cần tự biết đang ở nến nào — chỉ cần đóng `fetch` trả về nến kế
-    /// tiếp. Hằng số tính toán (`kelly_fraction`, `base_capital`, `settlement`)
-    /// cũng lấy từ `Session`, xem [`Session::prime`].
+    /// tiếp. Tham số sizing (`kelly_fraction`, `base_capital`) tra mỗi nến từ
+    /// `params`, `settlement` resolve từ [`PortfolioConfig`].
     ///
     /// `fetch` và `analysis_fetch` tách riêng vì backtest dùng 2 resolution
     /// (trade = `resolution_for_test`, rebuild = `resolution_for_rebuild`).
@@ -545,12 +545,21 @@ impl Portfolio {
         analysis_fetch: FetchFn<'_>,
         notify: NotifyFn<'_>,
     ) -> Result<bool, Error> {
+        const KELLY_FRACTION: usize = 0;
+        const BASE_CAPITAL: usize = 1;
+
         let resolution = self.config.resolution_for_test.clone();
-        // Hằng số tính toán (`kelly_fraction`, `base_capital`, `settlement`) nạp
-        // vào `Session` ở đây thay vì tra `ParamFn` mỗi nến. `forward` là nơi
-        // duy nhất dùng chúng, nên nạp ở đây giữ đúng một nguồn cho cả hai
-        // đường (`evaluate` gọi `forward`, live gọi `forward`).
-        session.prime(&self.config, self.calendar.as_ref(), params);
+        // T+N: `settlement_candles == 0` → theo thị trường (StockCalendar → T+3,
+        // Crypto/Forex → T+0); giá trị >0 → ép T+N cố định.
+        let settlement = if self.config.settlement_candles > 0 {
+            self.config.settlement_candles
+        } else {
+            self.calendar.settlement_candles()
+        };
+        // Tham số sizing tra **mỗi nến**, không cache trong `Session`: SGD đổi
+        // `params` giữa chừng, cache lại sẽ dùng giá trị cũ.
+        let kelly_fraction = params(KELLY_FRACTION);
+        let base_capital = params(BASE_CAPITAL);
         let current = session.next_ts;
 
         // ── Nến tới hạn rebuild? ───────────────────────────────────────
@@ -678,15 +687,15 @@ impl Portfolio {
         }
 
         // Ngưỡng mở khóa = thứ tự nến hiện tại + N (T+N)
-        let unlock_seq = current_seq + session.settlement;
+        let unlock_seq = current_seq + settlement;
         let events = Self::evaluate_grid_entries(
             session.candle_id,
             &candle,
             &plan,
             &mut orders,
             self.fee.as_ref(),
-            session.kelly_fraction,
-            session.base_capital,
+            kelly_fraction,
+            base_capital,
             unlock_seq,
         );
 
