@@ -901,6 +901,54 @@ mod tests {
         assert_eq!(narrow.len(), 1);
     }
 
+    /// Cửa sổ **kết thúc ở `now`** phải trả về dữ liệu đang có.
+    ///
+    /// Đây là bản unit của guard mà `integration_storage.rs` từng ôm: reader
+    /// `query_recent` — thứ `Query.queryTimeseries` (mà `opsense query` /
+    /// `opsense orders` / MCP `opsense_query_timeseries` dùng) gọi — phải trả
+    /// phần nó có. Bản integration **không** kiểm được điều này: pipeline CI
+    /// chỉ là `clock → tsdb`, mà tick là **control signal**
+    /// (`extract_observations` trả batch rỗng), nên station đó không bao giờ
+    /// có quan sát nào. Đo được trên CI: cả 6 job integration đỏ ở đúng assert
+    /// "phải có dữ liệu" ấy, và đỏ với lý do sai.
+    ///
+    /// Hai dạng cửa sổ, vì người đọc thật gặp cả hai:
+    /// - kết thúc **đúng** ở mốc mới nhất (vừa ghi xong),
+    /// - kết thúc **sau** mốc mới nhất (chờ một nhịp, y hệt 15 giây mà
+    ///   integration test cũ chờ trước khi hỏi).
+    #[tokio::test]
+    async fn query_recent_window_ending_at_newest_returns_data() {
+        const NEWEST: i64 = 1_700_000_000;
+        let st = TimeseriesStation::new(32, Some(300));
+
+        // 5 quan sát 60s một, giống nến phút mà clock sinh ra.
+        let batch: Vec<Observation> = (0..5)
+            .map(|i| obs(NEWEST - (4 - i) * 60, i as f64))
+            .collect();
+        st.update_range(&batch, NEWEST - 240, NEWEST, NEWEST);
+
+        for (label, to) in [("kết thúc đúng mốc mới nhất", NEWEST), ("kết thúc sau mốc mới nhất 15s", NEWEST + 15)] {
+            let from = to - 120;
+            let got = st
+                .query_recent(from, to)
+                .await
+                .unwrap_or_default();
+            assert!(
+                !got.is_empty(),
+                "cửa sổ [{from}, {to}] ({label}) phải trả dữ liệu đang có, thực tế rỗng"
+            );
+            // Và chỉ trả phần **nằm trong cửa sổ** — không lọc thì trả cả nến cũ.
+            assert!(
+                got.iter().all(|o| (from..=to).contains(&o.ts)),
+                "cửa sổ [{from}, {to}] ({label}) trả observation ngoài cửa sổ: {got:?}"
+            );
+            assert!(
+                got.iter().any(|o| o.ts == NEWEST),
+                "phải có mốc mới nhất {NEWEST} ({label})"
+            );
+        }
+    }
+
     /// `query_range` trả None khi bất kỳ block nào trong cửa sổ chưa cover
     /// trọn; `query_recent` trả vùng dữ liệu gần nhất dù cửa sổ hổng.
     #[tokio::test]
