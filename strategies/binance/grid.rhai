@@ -96,9 +96,18 @@ fn trade(hist_src, own, symbol, resolution, hw) {
     let closed = last_closed(series, now, step);
     if type_of(closed) == "()" { return []; }
 
-    // Lệnh/cursor đều nằm ở own station.
-    let state = station_query(own, from, now);
-    if type_of(state) == "()" { return []; }
+    // Lệnh/cursor đều nằm ở own station — nhưng **phải lọc**, không kéo cả
+    // station. Own station lấp đầy tick aggTrade (5 obs/tick, vài nghìn
+    // tick/phút); `station_query` không lọc dựng map cho từng observation và
+    // `max_map_size` của Rhai là trần *engine-wide* (100_000) nên vài chục
+    // nghìn obs là đủ vượt ⇒ cả batch script bị bỏ với
+    // "Size of object map too large", node im bặt, không đặt được lệnh nào.
+    // Đo thật: 26_680 obs trong 1 giờ đã vỡ. Kernel chỉ cần lệnh + cursor.
+    // `station_query` trả `()` khi station chưa tồn tại (node vừa dựng) — nên
+    // gộp qua `empty_if_missing` thay vì cộng thẳng, nếu không sẽ lỗi script.
+    let state = [];
+    state += empty_if_missing(station_query(own, from, now, "order"));
+    state += empty_if_missing(station_query(own, from, now, "summary", "trading_step"));
     if already_traded(state, closed["t"].to_int()) { return []; }
 
     portfolio_feed(series, state, closed, trading_cfg(), symbol)
