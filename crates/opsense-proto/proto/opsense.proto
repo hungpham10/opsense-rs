@@ -47,19 +47,20 @@ message HealthStatus {
 
 message SessionParams {
   string session_id = 1;
-  // Extra environment for local kernels (ignored by the runner unless the
-  // kernel definition allows it).
-  map<string, string> env = 2;
-  bool allow_fs = 3;
-  bool allow_net = 4;
-  uint64 max_memory_mb = 5;
-  // Packages to probe and report in HealthStatus.
-  repeated string packages = 6;
   // Ask the runner to issue a challenge before granting any elevated role.
   bool require_challenge = 7;
   // Role the caller wants to be granted after a successful challenge
   // (e.g. "admin", "pipeline-controller"). Empty = no upgrade requested.
   string requested_role = 8;
+  //
+  // **Số hiệu field 2-6 đã bị gỡ** (`env`, `allow_fs`, `allow_net`,
+  // `max_memory_mb`, `packages`): không ai đọc chúng ở phía nhận — runner và
+  // cả `opsense-kernel-python` đều bỏ qua. Số hiệu cũ giữ lại chỗ trống có
+  // chủ ý, **không** đánh số lại, để một binary kernel build từ bản cũ không bị
+  // hiểu sai wire format.
+  //
+  // Cần sandbox (chặn đĩa/mạng, trần RAM) thì khai lại ở đây — và lần này phải
+  // có phía nhận thật sự ép, nếu không thì lại là một knob giả.
 }
 
 message SessionHandle {

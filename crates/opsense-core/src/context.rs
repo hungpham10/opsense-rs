@@ -68,6 +68,13 @@ impl Context {
             .collect()
     }
 
+    /// Station `id` đã đăng ký chưa — dùng để **chờ** node tương ứng khởi động
+    /// xong. `stations()` phải dựng cả `Vec` mới chỉ để kiểm tra một tên, nên
+    /// cổng riêng cho việc chờ (xem `AppState::wait_for_station`).
+    pub async fn has_station(&self, id: &str) -> bool {
+        self.stations.read().await.contains_key(id)
+    }
+
     /// `[storage]` config — components đọc để dựng station theo backend.
     pub fn storage(&self) -> &StorageConfig {
         &self.storage

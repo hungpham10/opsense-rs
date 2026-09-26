@@ -61,13 +61,6 @@ pub struct EngineConfig {
     pub poll_interval_seconds: u64,
     pub cache_block_seconds: u64,
     pub cache_max_blocks: usize,
-
-    /// Python interpreter used by analysis sessions (`opsense serve --repl`).
-    /// Empty/absent = auto-detect `python3` on PATH.
-    pub python_path: String,
-    /// Packages probed at session start; missing ones warn but do not block
-    /// (they only fail when a specific analysis actually imports them).
-    pub python_packages: Vec<String>,
 }
 
 impl Default for EngineConfig {
@@ -76,70 +69,6 @@ impl Default for EngineConfig {
             poll_interval_seconds: 60,
             cache_block_seconds: 300,
             cache_max_blocks: 288,
-            python_path: String::new(),
-            python_packages: [
-                "numpy",
-                "pandas",
-                "pyarrow",
-                "scipy",
-                "sklearn",
-                "statsmodels",
-                "matplotlib",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        }
-    }
-}
-
-/// Interactive session limits (`[session]`). Applied to every new session;
-/// Python sandboxes additionally enforce the memory cap at runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SessionConfig {
-    pub max_memory_mb: u64,
-    pub max_cpu_time_secs: u64,
-    pub max_result_rows: u64,
-    pub max_execution_time_secs: u64,
-    /// Sessions idle longer than this are closed automatically.
-    pub idle_timeout_secs: u64,
-    pub allow_fs: bool,
-    pub allow_net: bool,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            max_memory_mb: 2048,
-            max_cpu_time_secs: 300,
-            max_result_rows: 1_000_000,
-            max_execution_time_secs: 60,
-            idle_timeout_secs: 1800,
-            allow_fs: false,
-            allow_net: false,
-        }
-    }
-}
-
-/// REPL shell settings (`[repl]`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ReplConfig {
-    pub history_file: String,
-    pub max_history: usize,
-    pub completion: bool,
-    /// Station pre-selected as "current" when the REPL starts (empty = none).
-    pub default_station: String,
-}
-
-impl Default for ReplConfig {
-    fn default() -> Self {
-        Self {
-            history_file: "~/.opsense/history.txt".to_string(),
-            max_history: 10_000,
-            completion: true,
-            default_station: String::new(),
         }
     }
 }
@@ -399,14 +328,6 @@ pub struct Config {
     /// `engine.poll_interval_seconds`.
     #[serde(default)]
     pub pipeline: Option<PipelineConfig>,
-
-    /// Interactive analysis sessions (`[session]`).
-    #[serde(default)]
-    pub session: SessionConfig,
-
-    /// REPL shell settings (`[repl]`), used by `opsense serve --repl`.
-    #[serde(default)]
-    pub repl: ReplConfig,
 
     /// Mesh membership settings (`[gossip]`) — **quan sát**: node này là ai, ai
     /// khác, và thời gian chờ bao lâu thì coi node khác là chết.

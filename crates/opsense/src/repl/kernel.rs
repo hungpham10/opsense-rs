@@ -193,19 +193,12 @@ impl KernelRepl {
         self.buffer.clear();
 
         let session_id = format!("repl-{}", uuid_v4_simple());
-        // Forward OPSENSE_* env cho kernel (S3 creds/base, serve URL,
-        // block_secs...) — opsense.store đọc từ đây.
-        let env: std::collections::HashMap<String, String> = std::env::vars()
-            .filter(|(k, _)| k.starts_with("OPSENSE_"))
-            .collect();
+        // Không còn env/allow_fs/allow_net/max_memory_mb trong `SessionParams`:
+        // kernel là process riêng nên nó thừa hưởng env của process cha
+        // (`OPSENSE_*` đi qua được không cần khai), và phía runner không ép
+        // sandbox nào — xem `SessionParams` trong `opsense.proto`.
         let params = SessionParams {
             session_id,
-            env,
-            allow_fs: false,
-            // Python kernel cần network để đọc parquet từ S3 / gọi serve.
-            allow_net: kind == "python",
-            max_memory_mb: 0,
-            packages: vec![],
             require_challenge: false,
             requested_role: String::new(),
         };

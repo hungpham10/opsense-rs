@@ -15,37 +15,6 @@
 poll_interval_seconds = 3600
 cache_block_seconds = 300
 cache_max_blocks = 288
-# Interpreter used by analysis sessions (`opsense serve --repl`).
-# Empty = auto-detect `python3`. Packages missing at startup warn only —
-# they fail when a specific analysis actually imports them.
-python_path = ""
-python_packages = [
-    "numpy",
-    "pandas",
-    "pyarrow",
-    "scipy",
-    "sklearn",
-    "statsmodels",
-    "matplotlib",
-]
-
-# Interactive analysis sessions (`opsense serve --repl`, MCP session tools).
-[session]
-max_memory_mb = 2048              # RLIMIT_AS cap for the Python sandbox
-max_cpu_time_secs = 300
-max_execution_time_secs = 60      # per-command budget
-max_result_rows = 1000000         # query results above this are refused
-idle_timeout_secs = 1800          # sessions idle this long are closed
-allow_fs = false                  # Python: filesystem access off by default
-allow_net = false                 # Python: network access off by default
-
-# REPL shell behaviour (`opsense serve --repl`).
-[repl]
-history_file = "~/.opsense/history.txt"
-max_history = 10000
-completion = true
-default_station = ""              # station pre-selected on startup
-
 # Template variables usable as {{name}} inside http_source
 # url/headers/body. Override per environment WITHOUT editing this
 # file: OPSENSE_ATTR_<NAME> (uppercase) wins, env-only entries are picked
