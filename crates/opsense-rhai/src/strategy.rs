@@ -359,10 +359,9 @@ mod tests {
                     >,
                 >
         };
+        session.next_ts = 7_200;
         pf.forward(
             &mut session,
-            7_200,
-            7_260,
             &|i| [0.25, 100_000.0, 3.0, 0.008, 3_600.0][i],
             &mut fetch(candles(300)),
             &mut fetch(candles(300)),

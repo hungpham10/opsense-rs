@@ -318,10 +318,9 @@ async fn rebuild_on_live_binance_data_yields_usable_plan() {
             >
     };
     let mut session = Session::new();
+    session.next_ts = from;
     pf.forward(
         &mut session,
-        from,
-        from + 60,
         &params,
         &mut slice_fetch(data.clone()),
         &mut slice_fetch(data),

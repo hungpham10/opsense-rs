@@ -265,10 +265,6 @@ impl Settings {
         ]
     }
 
-    fn step_secs(&self) -> u64 {
-        to_step(&self.resolution)
-    }
-
     fn portfolio(&self) -> Result<Portfolio, std::io::Error> {
         let strategy: Arc<dyn Strategy + Sync + Send> = match self.strategy.as_str() {
             // DAG model: `params.dag` là genome (ops + nodes + weights) build
@@ -464,10 +460,13 @@ async fn feed(
     series.dedup_by_key(|c| c.t);
 
     let from = u64::try_from(incoming.t).unwrap_or_default();
-    let to = from + settings.step_secs();
     let params = settings.params();
 
     let mut session = state.session.clone();
+    // Con trỏ `forward` nằm trong `Session`, nên live phải đặt trước khi gọi:
+    // nến `incoming` chính là nến kế tiếp cần xử lý.
+    session.next_ts = from;
+
     let events: Arc<Mutex<Vec<OrderEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
     let mut notify = move |e: OrderEvent| {
@@ -481,6 +480,9 @@ async fn feed(
     let mut trade = slice_fetch(series.clone());
     let mut analysis = slice_fetch(series.clone());
 
+    // Một nến đóng = một lượt `forward`. `fetch` đóng trên `series` nên `forward`
+    // tự tìm nến đầu tiên có `t > candle_ts`, tức đúng nến mới.
+    //
     // Rebuild fail (thiếu data) → kernel giữ plan cũ, không đặt lệnh; lần sau
     // thử lại. Không phải lỗi của script nên không ném — nhưng **phải log**:
     // nuốt im lặng (`let _ =`) khiến "kernel chạy mà không đặt lệnh" trông
@@ -489,8 +491,6 @@ async fn feed(
     if let Err(e) = portfolio
         .forward(
             &mut session,
-            from,
-            to,
             &|id| params.get(id).copied().unwrap_or(0.0),
             &mut *trade,
             &mut *analysis,
@@ -551,19 +551,6 @@ fn slice_fetch(
             .collect();
         Box::pin(async move { Ok(out) })
     })
-}
-
-fn to_step(resolution: &str) -> u64 {
-    match resolution {
-        "1" | "1m" => 60,
-        "5" | "5m" => 300,
-        "15" | "15m" => 900,
-        "30" | "30m" => 1_800,
-        "1H" | "60" => 3_600,
-        "4H" => 14_400,
-        "1D" => 86_400,
-        _ => 60,
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -781,7 +768,6 @@ mod tests {
         assert_eq!(s.grid_levels, 5);
         let s = Settings::from_map(&cfg_map());
         assert_eq!(s.grid_levels, 5);
-        assert_eq!(s.step_secs(), 60);
         assert_eq!(s.params().len(), 5, "params theo layout strategy.init()");
     }
 
