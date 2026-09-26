@@ -37,7 +37,7 @@ use opsense_model::events::{Signal, TelemetryKind};
 use opsense_qlib::{
     Calendar, CandleStick, CryptoCalendar, DataLoader, Fee, ForexCalendar, Graph, Order,
     OrderEvent, OrderType, Portfolio, PortfolioConfig, Score, Session, SharpeScore,
-    SimpleFixedFee, StockCalendar, Strategy,
+    SimpleFixedFee, StockCalendar, Strategy, TradingGrid,
 };
 use rhai::{Array, Dynamic, Map};
 
@@ -59,6 +59,17 @@ const L_UNLOCK: &str = "unlock_seq";
 const L_KIND: &str = "kind";
 const KIND_STEP: &str = "trading_step";
 const L_CANDLE_SEQ: &str = "candle_seq";
+/// Mốc rebuild kế tiếp (epoch giây) — mang `Session::review_at` qua lời gọi.
+const L_NEXT_REVIEW: &str = "next_review";
+/// Chỉ số nến trong review window — mang `Session::candle_id` qua lời gọi.
+const L_CANDLE_ID: &str = "candle_id";
+
+/// `signal` của observation chứa plan grid.
+///
+/// Plan **không** nhét vào cursor: cursor là trạng thái nhỏ (vài số), còn plan
+/// là dữ liệu lớn (levels + ma trận weight + tỉ lệ thắng mỗi ô). Trộn chung
+/// một chỗ thì khó lọc và khó đọc.
+const SIGNAL_PLAN: &str = "plan";
 
 const STATUS_OPEN: &str = "open";
 const STATUS_CLOSED: &str = "closed";
@@ -366,6 +377,10 @@ impl State {
         let mut candle_seq = 0u64;
         let mut candle_ts = 0i64;
         let mut next_id = 1u64;
+        let mut review_at = 0u64;
+        let mut candle_id = 0usize;
+        let mut plan: Vec<TradingGrid> = Vec::new();
+        let mut plan_ts = i64::MIN;
 
         for item in obs.iter() {
             let Some(observation) = observation_of(item.clone()) else {
@@ -375,6 +390,18 @@ impl State {
             if observation.labels.get(L_KIND).map(String::as_str) == Some(KIND_STEP) {
                 candle_seq = candle_seq.max(parse_u64(&observation, L_CANDLE_SEQ));
                 candle_ts = candle_ts.max(observation.ts);
+                // `review_at` / `candle_id` mang qua lời gọi. `max` theo `ts`:
+                // station append-only, cursor cũ hơn thì giữ bản mới hơn.
+                review_at = review_at.max(parse_u64(&observation, L_NEXT_REVIEW));
+                candle_id = candle_id.max(parse_u64(&observation, L_CANDLE_ID) as usize);
+                continue;
+            }
+            // Plan: dùng bản ghi **mới nhất** (ts lớn nhất) làm chính.
+            if let Some(grids) = plan_of_observation(&observation) {
+                if plan.is_empty() || observation.ts >= plan_ts {
+                    plan = grids;
+                    plan_ts = observation.ts;
+                }
                 continue;
             }
             if observation.signal != Signal::Order {
@@ -406,10 +433,13 @@ impl State {
             .collect();
         session.candle_seq = candle_seq;
         session.candle_ts = candle_ts;
-        // `review_at = 0` → kernel rebuild lại plan mỗi lời gọi từ series nến +
-        // lịch sử đóng. Plan là dữ liệu phái sinh; lưu vào station chỉ tốn blob.
-        session.review_at = 0;
-        session.candle_id = 0;
+        // `review_at` / `candle_id` / `plan` mang từ cursor + observation plan.
+        // Trước đây cả ba bị đặt 0 / để rỗng ở đây ⇒ kernel rebuild **mỗi
+        // nến**, `candle_id` luôn 0 (chỉ dùng cột 0 của ma trận weight), và
+        // thống kê thắng/thua mỗi mốc bị xoá mỗi phút vì plan dựng lại từ đầu.
+        session.review_at = review_at;
+        session.candle_id = candle_id;
+        session.plan = plan;
 
         let open_ids = open
             .iter()
@@ -441,7 +471,13 @@ async fn feed(
     }
     // AnalysisGrid cần ≥ 10 nến; thiếu thì plan rỗng, không đặt được lệnh.
     if candles.len() < 10 {
-        return vec![step_cursor(incoming.t, state.session.candle_seq, symbol)];
+        return vec![step_cursor(
+            incoming.t,
+            state.session.candle_seq,
+            state.session.review_at,
+            state.session.candle_id,
+            symbol,
+        )];
     }
     let mut settings = settings.clone();
     // Script của node đang chạy thắng. Ngoài pipeline (unit test gọi `feed`
@@ -508,6 +544,7 @@ async fn feed(
     let events = events.lock().map(|g| g.clone()).unwrap_or_default();
     let mut out = Vec::new();
     let mut next_id = state.next_id;
+    let mut rebuilt = false;
     for event in events {
         match event {
             OrderEvent::Placed { ts, order } => {
@@ -524,15 +561,28 @@ async fn feed(
                     .unwrap_or_else(|| format!("o{ts}-{next_id}"));
                 out.push(closed_observation(ts, &id, &order, symbol));
             }
-            // `Rebuilt` là plan nội bộ, `Rejected` là chẩn đoán — không ghi obs.
-            OrderEvent::Rebuilt { .. } | OrderEvent::Rejected { .. } => {}
+            // `Rebuilt` mang `GridSnapshot` (chỉ levels) — không đủ để dựng lại
+            // lưới, nên dùng nó làm **cờ** rồi ghi `session.plan` (đầy đủ) bên
+            // dưới. `Rejected` là chẩn đoán, không ghi obs.
+            OrderEvent::Rebuilt { .. } => rebuilt = true,
+            OrderEvent::Rejected { .. } => {}
         }
     }
 
-    // Cursor để lời gọi sau khôi phục `candle_seq` (T+N) + `candle_ts` (idempotent).
+    // Plan mới → ghi observation riêng. Chỉ ghi khi **vừa rebuild**, không ghi
+    // mỗi nến: station append-only, ghi lại mỗi phút sẽ phình vô ích.
+    if rebuilt && let Some(obs) = plan_observation(incoming.t as u64, &session.plan, symbol) {
+        out.push(obs);
+    }
+
+    // Cursor để lời gọi sau khôi phục `candle_seq` (T+N) + `candle_ts` (idempotent),
+    // cùng `review_at` / `candle_id` để giữ đúng nhịp rebuild và đúng cột
+    // weight matrix giữa hai lần rebuild.
     out.push(step_cursor(
         incoming.t,
         session.candle_seq.max(state.session.candle_seq),
+        session.review_at,
+        session.candle_id,
         symbol,
     ));
     out
@@ -584,6 +634,108 @@ fn closed_observation(ts: u64, id: &str, order: &Order, symbol: &str) -> Observa
     o
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Plan ⇄ observation
+//
+// `Session::plan` phải sống sót giữa các lần gọi, nếu không `review_at` tới hạn
+// thì kernel giữ plan cũ — mà plan rỗng thì **không đặt lệnh nào**. Ba thứ đi
+// cùng nhau, không tách được:
+//
+//   1. `plan`            — không có thì lưới rỗng ⇒ không vào lệnh
+//   2. `candle_id`       — cột của ma trận weight; mất thì luôn dùng cột 0
+//   3. thống kê mỗi mốc — `TradingGrid` cộng dồn khi lệnh đóng
+//
+// (3) **không** serialize: suy ra lại được từ `session.history`, vốn đã nằm
+// trong station dưới dạng `signal = "order"` + `status = "closed"`.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Một ô lưới đủ để dựng lại: levels + sl + ma trận weight + tỉ lệ thắng +
+/// 4 bộ đếm thắng/thua.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PlanCell {
+    levels: Vec<f64>,
+    sl_pct: f64,
+    max_candles: usize,
+    weights: Vec<Vec<f64>>,
+    long_win_p: Vec<f64>,
+    short_win_p: Vec<f64>,
+    long_win_cnt: Vec<usize>,
+    long_lost_cnt: Vec<usize>,
+    short_win_cnt: Vec<usize>,
+    short_lost_cnt: Vec<usize>,
+}
+
+impl PlanCell {
+    fn of(grid: &TradingGrid) -> Self {
+        let n = grid.num_levels();
+        let cols = grid.weight_cols();
+        let counts = |f: fn(&TradingGrid, usize) -> usize| -> Vec<usize> {
+            (0..n).map(|j| f(grid, j)).collect()
+        };
+        Self {
+            levels: grid.levels().to_vec(),
+            sl_pct: grid.stoploss_pct(),
+            max_candles: grid.max_candles(),
+            weights: (0..n)
+                .map(|j| (0..cols).map(|t| grid.weight(j, t)).collect())
+                .collect(),
+            long_win_p: (0..n).map(|j| grid.long_win_pct(j)).collect(),
+            short_win_p: (0..n).map(|j| grid.short_win_pct(j)).collect(),
+            long_win_cnt: counts(TradingGrid::long_win_count),
+            long_lost_cnt: counts(TradingGrid::long_lost_count),
+            short_win_cnt: counts(TradingGrid::short_win_count),
+            short_lost_cnt: counts(TradingGrid::short_lost_count),
+        }
+    }
+
+    /// Dựng lại `TradingGrid`. `None` nếu levels không hợp lệ.
+    fn to_grid(&self) -> Option<TradingGrid> {
+        let g = TradingGrid::from_levels(self.levels.clone())?
+            .with_sl_pct(self.sl_pct)
+            .with_max_candles(self.max_candles)
+            .with_weight_matrix(self.weights.clone())
+            .with_long_win_p(self.long_win_p.clone())
+            .with_short_win_p(self.short_win_p.clone())
+            .with_outcome_counts(
+                self.long_win_cnt.clone(),
+                self.long_lost_cnt.clone(),
+                self.short_win_cnt.clone(),
+                self.short_lost_cnt.clone(),
+            );
+        Some(g)
+    }
+}
+
+fn plan_observation(ts: u64, plan: &[TradingGrid], symbol: &str) -> Option<Observation> {
+    if plan.is_empty() {
+        return None;
+    }
+    let cells: Vec<PlanCell> = plan.iter().map(PlanCell::of).collect();
+    let json = serde_json::to_string(&cells).ok()?;
+    let mut o = Observation::new(
+        ts as i64,
+        symbol.to_string(),
+        TelemetryKind::Metric,
+        Signal::Summary,
+        plan.len() as f64,
+    );
+    o.labels.insert(L_KIND.to_string(), SIGNAL_PLAN.to_string());
+    o.labels.insert("cells".to_string(), json);
+    Some(o)
+}
+
+fn plan_of_observation(obs: &Observation) -> Option<Vec<TradingGrid>> {
+    if obs.signal != Signal::Summary
+        || obs.labels.get(L_KIND).map(String::as_str) != Some(SIGNAL_PLAN)
+    {
+        return None;
+    }
+    let json = obs.labels.get("cells")?;
+    let cells: Vec<PlanCell> = serde_json::from_str(json).ok()?;
+    let grids: Vec<TradingGrid> = cells.iter().filter_map(PlanCell::to_grid).collect();
+    (!grids.is_empty()).then_some(grids)
+}
+
 fn order_labels(id: &str, order: &Order, status: &str) -> HashMap<String, String> {
     let mut labels = HashMap::new();
     labels.insert(L_ORDER_ID.to_string(), id.to_string());
@@ -609,8 +761,9 @@ fn order_labels(id: &str, order: &Order, status: &str) -> HashMap<String, String
     labels
 }
 
-/// Cursor: nến cuối đã chạy trading step + seq toàn cục tới đó.
-fn step_cursor(ts: i64, candle_seq: u64, symbol: &str) -> Observation {
+/// Cursor: nến cuối đã chạy trading step + seq toàn cục tới đó, cộng trạng
+/// thái review để lời gọi sau khôi phục đúng nhịp rebuild và đúng cột weight.
+fn step_cursor(ts: i64, candle_seq: u64, review_at: u64, candle_id: usize, symbol: &str) -> Observation {
     let mut o = Observation::new(
         ts,
         symbol.to_string(),
@@ -621,6 +774,10 @@ fn step_cursor(ts: i64, candle_seq: u64, symbol: &str) -> Observation {
     o.labels.insert(L_KIND.to_string(), KIND_STEP.to_string());
     o.labels
         .insert(L_CANDLE_SEQ.to_string(), candle_seq.to_string());
+    o.labels
+        .insert(L_NEXT_REVIEW.to_string(), review_at.to_string());
+    o.labels
+        .insert(L_CANDLE_ID.to_string(), candle_id.to_string());
     o
 }
 
@@ -962,6 +1119,76 @@ mod tests {
             "lệnh đã đóng không được giữ trong orders"
         );
         assert_eq!(state.session.history.len(), opens.len(), "lịch sử giữ lệnh đóng");
+    }
+
+    /// `review_at` / `candle_id` / `plan` phải sống sót qua lời gọi.
+    ///
+    /// Trước đây `from_observations` đặt cứng `review_at = 0` / `candle_id = 0`
+    /// và không khôi phục plan ⇒ kernel rebuild **mỗi nến** (config nói 900s),
+    /// `candle_id` luôn 0 nên chỉ dùng cột 0 của ma trận weight, và thống kê
+    /// thắng/thua mỗi mốc bị xoá mỗi phút.
+    #[test]
+    fn session_state_survives_station_round_trip() {
+        // Lưới thật: 3 mốc, ma trận weight 2 cột, có thống kê thắng/thua.
+        let grid = TradingGrid::from_levels(vec![100.0, 110.0, 120.0])
+            .expect("levels hợp lệ")
+            .with_sl_pct(0.008)
+            .with_max_candles(2)
+            .with_weight_matrix(vec![vec![0.3, 0.6], vec![0.5, 0.5], vec![0.7, 0.4]])
+            .with_long_win_p(vec![0.55, 0.6, 0.65])
+            .with_short_win_p(vec![0.45, 0.4, 0.35])
+            .with_outcome_counts(vec![2, 1, 0], vec![0, 1, 2], vec![1, 0, 1], vec![1, 1, 0]);
+        let plan = vec![grid];
+
+        let mut obs: Array = vec![rhai::serde::to_dynamic(
+            &plan_observation(1_000, &plan, "BTCUSDT").expect("plan obs"),
+        )
+        .expect("serialize")];
+        obs.push(
+            rhai::serde::to_dynamic(&step_cursor(1_000, 42, 1_900, 7, "BTCUSDT"))
+                .expect("serialize"),
+        );
+
+        let state = State::from_observations(&obs);
+
+        assert_eq!(state.session.review_at, 1_900, "review_at phải sống qua station");
+        assert_eq!(state.session.candle_id, 7, "candle_id phải sống qua station");
+        assert_eq!(state.session.plan.len(), 1, "plan phải được khôi phục");
+
+        let g = &state.session.plan[0];
+        assert_eq!(g.num_levels(), 3, "số mốc phải khớp");
+        assert_eq!(g.levels(), &[100.0, 110.0, 120.0], "giá mốc phải khớp");
+        assert!((g.stoploss_pct() - 0.008).abs() < 1e-12, "sl_pct phải khớp");
+        assert_eq!(g.max_candles(), 2, "max_candles phải khớp");
+
+        // Ma trận weight: mất nó thì cỡ lệnh sai — đây là thứ quyết định.
+        for (j, row) in [[0.3, 0.6], [0.5, 0.5], [0.7, 0.4]].iter().enumerate() {
+            for (t, want) in row.iter().enumerate() {
+                assert!(
+                    (g.weight(j, t) - want).abs() < 1e-12,
+                    "weight[{j}][{t}] = {} ≠ {want}",
+                    g.weight(j, t)
+                );
+            }
+        }
+        assert!((g.long_win_pct(0) - 0.55).abs() < 1e-12, "tỉ lệ thắng phải khớp");
+
+        // Bộ đếm thắng/thua: đây là thứ KHÔNG serialize được mà phải suy ra từ
+        // history — ở đây plan đã lưu kèm nên khôi phục thẳng.
+        assert_eq!(g.long_win_count(0), 2, "số lần thắng phải khớp");
+        assert_eq!(g.long_lost_count(2), 2, "số lần thua phải khớp");
+        assert_eq!(g.short_win_count(2), 1, "số lần thắng short phải khớp");
+    }
+
+    /// Plan phải ghi ra **khi vừa rebuild**, không ghi mỗi nến.
+    ///
+    /// Station append-only: ghi plan mỗi phút sẽ phình vô ích.
+    #[test]
+    fn plan_observation_is_absent_for_empty_plan() {
+        assert!(
+            plan_observation(1_000, &[], "BTCUSDT").is_none(),
+            "plan rỗng ⇒ không ghi obs, để lần sau rebuild"
+        );
     }
 
     #[tokio::test]
