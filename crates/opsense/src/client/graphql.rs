@@ -3,13 +3,39 @@
 //! Every method is one HTTP call — no local state, no diffing, no
 //! generation tracking. The server serialises writes internally via
 //! `RwLock`, so the client doesn't need to worry about races.
+//!
+//! Kiểu ở đây là **DTO của riêng client**, không dùng lại kiểu lõi: `Observation`
+//! vừa derive `Serialize/Deserialize` (tên field snake_case) vừa derive
+//! `SimpleObject` (async-graphql đổi tên field sang camelCase). serde và
+//! GraphQL của cùng một struct không thể cùng đúng, nên phải tách.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
+use opsense_core::TelemetryKind;
+use opsense_core::{LogLevel, Signal};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-pub use opsense_core::Observation;
+/// Một observation trả về từ `queryTimeseries`.
+///
+/// `metric_id` phải rename `metricId`: đây là **tên field trong JSON do GraphQL
+/// trả về** (async-graphql camelCase hoá `SimpleObject`), không phải tên field
+/// serde của `opsense_core::Observation` (`metric_id`). Dùng chung struct ⇒
+/// decode hỏng với `missing field metric_id`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Observation {
+    pub ts: i64,
+    #[serde(rename = "metricId")]
+    pub metric_id: String,
+    pub kind: TelemetryKind,
+    pub signal: Signal,
+    pub value: f64,
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub severity: Option<LogLevel>,
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Response types (mirror of the GraphQL schema in api/repl/v1.rs)
@@ -23,8 +49,9 @@ pub struct NodeSummary {
     pub kind: String,
     pub inputs: Vec<String>,
     /// Có mặt ở đây là bắt buộc: selection set của `status()` ghi **tường minh**
-    /// (`nodes { id type inputs }`), nên quên field là MCP không thấy, chứ không
-    /// phải lỗi schema.
+    /// (`nodes { id type inputs description }`), nên quên field là MCP không thấy,
+    /// chứ không phải lỗi schema. `default` vì `reload`/`patchComponent` cũng dùng
+    /// `NodeSummary` và server có thể không gửi field này.
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -51,6 +78,10 @@ pub struct EditResult {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SetAttributeResult {
     pub ok: bool,
+    /// `rename` bắt buộc: đây là tên field **trong JSON do GraphQL trả về**
+    /// (async-graphql camelCase hoá), không phải tên field serde — cùng lớp lỗi
+    /// với `Observation.metric_id`.
+    #[serde(rename = "envOverrideActive")]
     pub env_override_active: bool,
 }
 
@@ -171,7 +202,14 @@ impl OpsenseClient {
         self.bearer = None;
     }
 
-    async fn gql<Q, V>(&self, query: &str, variables: V) -> anyhow::Result<Q>
+    /// `root` là tên field gốc của operation (`status`, `components`, …).
+    ///
+    /// GraphQL trả `{"data": {"<root>": <giá trị>}}`, còn call site muốn chính
+    /// `<giá trị>` đó. Deserialize thẳng `data` vào kiểu của call site ⇒ serde đi
+    /// tìm field của kiểu đó ngay ở cấp `data` rồi báo "missing field" **dù
+    /// response đúng** — lỗi này đã làm hỏng cả 7 query của client. Bóc `root` ở
+    /// đây, một chỗ, thay vì bắt từng call site khai wrapper struct.
+    async fn gql<Q, V>(&self, root: &str, query: &str, variables: V) -> anyhow::Result<Q>
     where
         for<'de> Q: serde::de::Deserialize<'de>,
         V: Serialize,
@@ -188,8 +226,16 @@ impl OpsenseClient {
         if let Some(token) = &self.bearer {
             req = req.bearer_auth(token);
         }
-        let request: GqlResponse<Q> = req.send().await?.error_for_status()?.json().await?;
-        request.into_result()
+        // Deserialize `data` thành `Value` trước: vừa bóc được root field, vừa
+        // để lỗi schema hiện dạng "thiếu field `X`" kèm vị trí, thay vì báo
+        // "error decoding response body" trừng trơi.
+        let request: GqlResponse<serde_json::Value> =
+            req.send().await?.error_for_status()?.json().await?;
+        let data = request.into_result()?;
+        let value = data
+            .get(root)
+            .ok_or_else(|| anyhow::anyhow!("response không có field gốc `{root}`: {data}"))?;
+        Ok(serde_json::from_value(value.clone())?)
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -205,12 +251,12 @@ impl OpsenseClient {
                 }
             }
         "#;
-        self.gql(QUERY, ()).await
+        self.gql("status", QUERY, ()).await
     }
 
     pub async fn attributes(&self) -> anyhow::Result<BTreeMap<String, String>> {
         const QUERY: &str = r#"query { attributes }"#;
-        self.gql(QUERY, ()).await
+        self.gql("attributes", QUERY, ()).await
     }
 
     /// Cấu hình đang chạy. Bỏ `id` → tất cả component.
@@ -227,7 +273,7 @@ impl OpsenseClient {
         struct Vars<'a> {
             id: Option<&'a str>,
         }
-        self.gql(QUERY, Vars { id }).await
+        self.gql("components", QUERY, Vars { id }).await
     }
 
     /// Truy vấn observation của một `timeseries` station, có guard + filter.
@@ -235,7 +281,11 @@ impl OpsenseClient {
     /// Server từ chối `limit`/cửa sổ vượt trần và lọc server-side theo `signal`
     /// (`"order"`, `"summary"`…) + `label_kind` (`"trading_step"`, `"snapshot"`…).
     /// `truncated = true` nghĩa là còn dữ liệu ngoài `limit`.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// Selection set phải ghi **đúng tên serde** của `opsense_core::Observation`
+    /// (`metricId`, không phải `metric` — `metric_id` được rename camelCase) và
+    /// phải có `kind`: field đó không `#[serde(default)]` nên thiếu là decode
+    /// hỏng. `severity` có default nên bỏ được.
     #[allow(clippy::too_many_arguments)]
     pub async fn query_station(
         &self,
@@ -253,13 +303,22 @@ impl OpsenseClient {
                 queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs,
                                 limit: $limit, signal: $signal, labelKind: $labelKind,
                                 status: $status) {
-                    observations { ts metric signal value labels }
+                    observations { ts metricId kind signal value labels }
                     truncated
                     scanned
                 }
             }
         "#;
+        // `rename_all` là **bắt buộc**: query khai biến `$fromTs`/`$toTs`/
+        // `$labelKind` (camelCase, theo quy ước GraphQL) nhưng `derive(Serialize)`
+        // mặc định dùng đúng tên field Rust (`from_ts`, …). Không rename thì các
+        // biến đó không hề tới server, mà async-graphql coi biến không được cấp
+        // là `None` chứ không báo lỗi — nên `opsense query` và MCP
+        // `opsense_query_timeseries` **im lặng** bỏ qua cửa sổ thời gian và bộ lọc
+        // `labelKind`, còn guard cửa sổ 30 ngày thì không bao giờ thấy cửa sổ
+        // người dùng yêu cầu.
         #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
         struct Vars<'a> {
             node: &'a str,
             from_ts: Option<i64>,
@@ -270,6 +329,7 @@ impl OpsenseClient {
             status: Option<&'a str>,
         }
         self.gql(
+            "queryTimeseries",
             QUERY,
             Vars {
                 node,
@@ -293,14 +353,14 @@ impl OpsenseClient {
     pub async fn reload(&self, components: Vec<ComponentInput>) -> anyhow::Result<EditResult> {
         const MUTATION: &str = r#"
             mutation($components: [ComponentInput!]!) {
-                reload(components: $components) { reloaded nodes { id type inputs } }
+                reload(components: $components) { reloaded nodes { id type inputs description } }
             }
         "#;
         #[derive(Serialize)]
         struct Vars {
             components: Vec<ComponentInput>,
         }
-        self.gql(MUTATION, Vars { components }).await
+        self.gql("reload", MUTATION, Vars { components }).await
     }
 
     /// Sửa **một** thành phần của một node (vd `/params/sl_pct` → `0.02`).
@@ -316,7 +376,7 @@ impl OpsenseClient {
     ) -> anyhow::Result<EditResult> {
         const MUTATION: &str = r#"
             mutation($id: String!, $path: String!, $value: String!) {
-                patchComponent(id: $id, path: $path, value: $value) { reloaded nodes { id type inputs } }
+                patchComponent(id: $id, path: $path, value: $value) { reloaded nodes { id type inputs description } }
             }
         "#;
         #[derive(Serialize)]
@@ -325,7 +385,7 @@ impl OpsenseClient {
             path: &'a str,
             value: &'a str,
         }
-        self.gql(MUTATION, Vars { id, path, value }).await
+        self.gql("patchComponent", MUTATION, Vars { id, path, value }).await
     }
 
     pub async fn set_attribute(        &self,
@@ -342,7 +402,7 @@ impl OpsenseClient {
             name: &'a str,
             value: &'a str,
         }
-        self.gql(MUTATION, Vars { name, value }).await
+        self.gql("setAttribute", MUTATION, Vars { name, value }).await
     }
 
     pub async fn remove_attribute(&self, name: &str) -> anyhow::Result<bool> {
@@ -353,7 +413,7 @@ impl OpsenseClient {
         struct Vars<'a> {
             name: &'a str,
         }
-        self.gql(MUTATION, Vars { name }).await
+        self.gql("removeAttribute", MUTATION, Vars { name }).await
     }
 }
 
@@ -404,21 +464,47 @@ mod tests {
     }
 
     /// `load_bearer_from_env` đọc từ `OPSENSE_ACCESS_TOKEN` nếu có.
+    ///
+    /// Không xoá `~/.config/opsense/token`: env var được ưu tiên trước file nên
+    /// xoá là thừa, và nó **xoá mất token thật của người dùng** mỗi lần chạy
+    /// `cargo test --lib` — phải đăng nhập lại Dex sau đó. Test cũ còn dựa vào việc
+    /// xoá file để "không bị pollute", nhưng file không ảnh hưởng kết quả assert.
     #[test]
     fn test_load_bearer_from_env() {
-        // Clear any existing token file that could pollute this test.
-        if let Some(home) = std::env::var_os("HOME") {
-            let token_path = std::path::PathBuf::from(home)
-                .join(".config")
-                .join("opsense")
-                .join("token");
-            let _ = std::fs::remove_file(&token_path);
-        }
         // SAFETY: Test chạy đơn luồng, không race với threads khác.
         unsafe { std::env::set_var("OPSENSE_ACCESS_TOKEN", "test-token-abc") };
         let loaded = load_bearer_from_env();
         unsafe { std::env::remove_var("OPSENSE_ACCESS_TOKEN") };
         assert_eq!(loaded.as_deref(), Some("test-token-abc"));
+    }
+
+    /// File fallback vẫn đọc được (không env var) — và phải **không** ghi file.
+    ///
+    /// Dùng `HOME` trỏ vào thư mục tạm để không đụng `~/.config/opsense/token` thật.
+    #[test]
+    fn test_load_bearer_from_token_file() {
+        let dir = std::env::temp_dir().join(format!("opsense-token-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".config/opsense")).unwrap();
+        std::fs::write(dir.join(".config/opsense/token"), "file-token-xyz\n").unwrap();
+        let path = dir.join(".config/opsense/token");
+        let before = std::fs::metadata(&path).unwrap().len();
+
+        // SAFETY: các test trong crate này chạy đơn luồng về biến môi trường.
+        unsafe {
+            std::env::remove_var("OPSENSE_ACCESS_TOKEN");
+            std::env::set_var("HOME", &dir);
+        }
+        let loaded = load_bearer_from_env();
+        let home = std::env::var("HOME").unwrap();
+        unsafe { std::env::set_var("HOME", home) };
+
+        assert_eq!(loaded.as_deref(), Some("file-token-xyz"), "phải trim newline");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            before,
+            "đọc token không được ghi lại file"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Empty env var trả về None (trừ khi file fallback có giá trị).
@@ -428,5 +514,232 @@ mod tests {
         // Trừ khi dev có sẵn `~/.config/opsense/token` thì kết quả không None;
         // chỉ assert rằng hàm không panic và trả String rỗng được coi là None.
         let _ = load_bearer_from_env();
+    }
+
+    /// Hồi quy: `data` của GraphQL bọc root field, `gql` phải bóc ra.
+    ///
+    /// Trước khi có `root`, `gql` deserialize thẳng `data` vào kiểu call site nên
+    /// **cả 8 query** của client trả `error decoding response body` dù server trả
+    /// response đúng — `opsense mcp` không gọi được tool nào. Test này đóng vai
+    /// server: body là của thật, chỉ thiếu bước bóc.
+    #[test]
+    fn gql_unwraps_root_field() {
+        use std::io::{Read, Write};
+        const BODY: &str = r#"{"data":{"status":{"nodes":[
+            {"id":"tsdb","type":"Sink","inputs":["clock"],"description":"ghi observation"}
+        ],"stations":[{"id":"tsdb","kind":"timeseries"}]},
+        "components":[{"id":"clock","type":"Source","inputs":[],"description":"nhịp",
+            "config":{"kind":"clock"}}]}}"#;
+
+        // Server nhận 2 request (status + components) trên cùng listener.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\n\r\n{BODY}",
+                    BODY.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let c = rt.block_on(async {
+            let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+            let st = c.status().await.expect("status phải bóc được root `status`");
+            assert_eq!(st.nodes.len(), 1);
+            assert_eq!(st.nodes[0].id, "tsdb");
+            assert_eq!(st.nodes[0].description.as_deref(), Some("ghi observation"));
+            assert_eq!(st.stations.len(), 1);
+
+            let comps = c.components(None).await.expect("components phải bóc root `components`");
+            assert_eq!(comps.len(), 1);
+            assert_eq!(comps[0].id, "clock");
+            assert_eq!(comps[0].kind, "Source", "`type` phải map vào `kind`");
+        });
+        let _ = c;
+    }
+
+    /// Hồi quy: tên field trong DTO phải là tên field **server thật trả về**.
+    ///
+    /// Không có `rename_all = "camelCase"` cho serde ở đây vì DTO phải giữ tên
+    /// field Rust để đọc được trong code; chỉ field nào GraphQL camelCase hoá thì
+    /// `rename` riêng. Hai chỗ đã sai theo kiểu này và cả hai đều làm tool chết
+    /// với `missing field` dù response đúng: `Observation.metric_id` (server trả
+    /// `metricId`) và `SetAttributeResult.env_override_active` (server trả
+    /// `envOverrideActive`).
+    ///
+    /// Body dưới đây chép **nguyên văn** từ `opsense-serve` thật, nên test đỏ
+    /// ngay nếu tên field lệch.
+    #[test]
+    fn dto_field_names_match_real_server_response() {
+        use std::io::{Read, Write};
+
+        // Ba body chép **nguyên văn** từ `opsense-serve` thật, theo đúng thứ tự
+        // method dưới đây gọi.
+        let bodies = [
+            // mutation{setAttribute(name:"p",value:"1"){ok envOverrideActive}}
+            r#"{"data":{"setAttribute":{"ok":true,"envOverrideActive":false}}}"#,
+            // queryTimeseries(limit:1) — `metricId` camelCase.
+            r#"{"data":{"queryTimeseries":{"observations":[
+                 {"ts":1790512260,"metricId":"BTCUSDT","kind":"metric","signal":"summary",
+                  "value":84970.58,"labels":{"grid_cell":"1"}}],
+                 "truncated":false,"scanned":1}}}"#,
+            // status — `type` -> `kind`, `description` optional.
+            r#"{"data":{"status":{
+                 "nodes":[{"id":"grid","type":"Transform","inputs":["tick-map"],
+                           "description":"Đọc nến, dựng lưới"}],
+                 "stations":[{"id":"grid","kind":"timeseries"}]}}}"#,
+        ];
+        let bodies: Vec<String> = bodies.iter().map(|s| s.to_string()).collect();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for body in bodies {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async {
+            let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+
+            let r = c.set_attribute("p", "1").await.expect("setAttribute phải decode được");
+            assert!(r.ok);
+            assert!(!r.env_override_active, "envOverrideActive phải map vào `env_override_active`");
+
+            let r = c.query_station("grid", None, None, Some(1), None, None, None).await
+                .expect("queryTimeseries phải decode được");
+            assert_eq!(r.observations.len(), 1);
+            assert_eq!(r.observations[0].metric_id, "BTCUSDT", "`metricId` phải map vào `metric_id`");
+            assert_eq!(r.observations[0].labels.get("grid_cell").map(String::as_str), Some("1"));
+            assert_eq!(r.scanned, 1);
+
+            let r = c.status().await.expect("status phải decode được");
+            assert_eq!(r.nodes[0].kind, "Transform", "`type` phải map vào `kind`");
+            assert_eq!(r.nodes[0].description.as_deref(), Some("Đọc nến, dựng lưới"));
+            assert_eq!(r.stations[0].kind, "timeseries");
+        });
+    }
+
+    /// Hồi quy: tên biến trong `variables` phải khớp `$…` khai trong query.
+    ///
+    /// `Vars` derive `Serialize` nên mặc định phát ra key `from_ts`/`to_ts`/
+    /// `label_kind`, trong khi query khai `$fromTs`/`$toTs`/`$labelKind`. Lệch đó
+    /// **không** báo lỗi: async-graphql coi biến không được cấp là `None`, nên
+    /// `opsense query` và MCP `opsense_query_timeseries` âm thầm bỏ qua cửa sổ
+    /// thời gian và bộ lọc `labelKind`, còn guard 30 ngày không bao giờ thấy cửa
+    /// sổ người dùng yêu cầu. Test bắt request thật nên không để lệch này quay
+    /// lại ở bất kỳ biến nào.
+    #[test]
+    fn query_variables_are_camel_case() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 8192];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            const BODY: &str =
+                r#"{"data":{"queryTimeseries":{"observations":[],"truncated":false,"scanned":0}}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{BODY}",
+                BODY.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async {
+            let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+            c.query_station("grid", Some(111), Some(222), Some(9), None, Some("order"), None)
+                .await
+                .expect("query");
+        });
+        let req = rx.recv().expect("request body");
+
+        // Mọi biến query khai đều phải có mặt trong `variables` của request.
+        for name in ["node", "fromTs", "toTs", "limit", "labelKind"] {
+            assert!(
+                req.contains(&format!("\"{name}\":")),
+                "request phải có biến `{name}` — sai tên thì server âm thầm coi là None:\n{req}"
+            );
+        }
+        // và không được dùng tên snake_case
+        for name in ["from_ts", "to_ts", "label_kind"] {
+            assert!(
+                !req.contains(&format!("\"{name}\":")),
+                "request vẫn còn key snake_case `{name}`:\n{req}"
+            );
+        }
+        // giá trị phải đi kèm đúng chỗ
+        assert!(req.contains("\"fromTs\":111"), "{req}");
+        assert!(req.contains("\"toTs\":222"), "{req}");
+        assert!(req.contains("\"labelKind\":\"order\""), "{req}");
+    }
+
+    /// Root field sai phải báo đúng tên, không báo "missing field" mơ hồ.
+    #[test]
+    fn gql_reports_missing_root_by_name() {
+        use std::io::{Read, Write};
+        // Body không có `queryTimeseries` — mô phỏng gõ sai tên root ở call site.
+        const BODY: &str = r#"{"data":{"somethingElse":{}}}"#;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\n\r\n{BODY}",
+                BODY.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let err = rt.block_on(async {
+            let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+            c.query_station("tsdb", None, None, Some(10), None, None, None)
+                .await
+                .expect_err("thiếu root phải báo lỗi")
+        });
+        let msg = err.to_string();
+        assert!(
+            msg.contains("queryTimeseries"),
+            "lỗi phải nêu đúng tên root thiếu: {msg}"
+        );
     }
 }

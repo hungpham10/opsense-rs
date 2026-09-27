@@ -219,6 +219,18 @@ fn parse_component_json(value: serde_json::Value) -> async_graphql::Result<Arc<d
         .map_err(|e| async_graphql::Error::new(format!("component '{id}': {e}")))
 }
 
+/// Đọc một field theo JSON pointer, trả `Null` nếu không có.
+///
+/// Tách ra khỏi `patch_component` vì đây chỗ **đã sai một lần rồi**: truyền
+/// `path.trim_start_matches('/')` vào `pointer()` là RFC 6901 sai — pointer phải
+/// giữ dấu `/` đầu, nên kết quả luôn `None` và audit ghi `from/to = null` cho
+/// mọi patch. Có hàm riêng + test thì sai lần nữa sẽ đỏ ngay.
+fn json_pointer_value(root: &serde_json::Value, path: &str) -> serde_json::Value {
+    root.pointer(path)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// Ghi `new_value` vào `path` (JSON pointer, vd `params.sl_pct`).
 ///
 /// - Đường dẫn phải bắt đầu bằng `/` và có ít nhất 1 segment.
@@ -526,14 +538,8 @@ impl MutationRoot {
 
         // Validate TRƯỚC khi chạm runtime: ghép node vừa patch với các node còn
         // lại (lấy lại toàn bộ để không mất node nào) rồi deserialize hết.
-        let old_value = target
-            .pointer(path.trim_start_matches('/'))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let new_value = patched
-            .pointer(path.trim_start_matches('/'))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
+        let old_value = json_pointer_value(&target, &path);
+        let new_value = json_pointer_value(&patched, &path);
         let mut all = s.components(None).await;
         let slot = all
             .iter_mut()
@@ -820,6 +826,48 @@ mod tests {
         assert!(err.message.contains(">= 1"), "{}", err.message);
     }
 
+    /// Hồi quy: `json_pointer_value` phải đọc **đúng** field mà `patch_json_pointer`
+    /// vừa ghi, và giá trị đó phải đi vào audit.
+    ///
+    /// Trước đây `patch_component` gọi `pointer(path.trim_start_matches('/'))` ⇒
+    /// `None` cho **mọi** path ⇒ `old_value`/`new_value` luôn `Null` ⇒ audit ghi
+    /// `from: null, to: null` cho mọi patch. Test cũ ở trên vẫn xanh vì nó chỉ
+    /// kiểm tra `config_edit_observation` với giá trị truyền vào, không kiểm tra
+    /// hai giá trị đó lấy từ đâu — và `integration_mcp_config` chết sớm ở
+    /// "Station not found" nên không ai thấy.
+    #[test]
+    fn json_pointer_reads_what_patch_wrote() {
+        let target = serde_json::json!({
+            "id": "grid",
+            "kind": "rhai_transform",
+            "params": {"sl_pct": 0.008, "strategy": "grid"},
+        });
+        let patched =
+            patch_json_pointer(target.clone(), "/params/sl_pct", serde_json::json!(0.02)).unwrap();
+
+        // Giá trị cũ lấy từ node **trước** khi patch.
+        let old = json_pointer_value(&target, "/params/sl_pct");
+        assert_eq!(old, serde_json::json!(0.008), "old phải là 0.008, không phải null");
+
+        // Giá trị mới lấy từ node **sau** khi patch.
+        let new = json_pointer_value(&patched, "/params/sl_pct");
+        assert_eq!(new, serde_json::json!(0.02), "new phải là 0.02, không phải null");
+
+        // Và hai giá trị đó phải ra đúng label audit.
+        let obs = config_edit_observation("grid", "params/sl_pct", &old, &new, 1_800_000_000);
+        assert_eq!(obs.labels.get("from").map(String::as_str), Some("0.008"));
+        assert_eq!(obs.labels.get("to").map(String::as_str), Some("0.02"));
+
+        // Knob chưa tồn tại: `old` là null (thêm knob mới là hợp lệ), `new` có giá trị.
+        let added =
+            patch_json_pointer(target.clone(), "/params/new_knob", serde_json::json!(7)).unwrap();
+        assert_eq!(
+            json_pointer_value(&target, "/params/new_knob"),
+            serde_json::Value::Null
+        );
+        assert_eq!(json_pointer_value(&added, "/params/new_knob"), serde_json::json!(7));
+    }
+
     /// Audit phải đủ để trả lời "đổi gì, từ giá trị nào sang nào, ở node nào,
     /// lúc nào" — và phải lọc được bằng `labels.kind` qua đúng đường query.
     #[test]
@@ -869,3 +917,4 @@ mod tests {
         .expect("clock hợp lệ phải parse được");
     }
 }
+
