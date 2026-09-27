@@ -3,8 +3,6 @@
 
 [engine]
 poll_interval_seconds = 10
-cache_block_seconds = 5
-cache_max_blocks = 12
 
 # Storage = Parquet time-partitioned → mirror S3 (RustFS).
 # Sau khi flush, file ts/blk=<id>/batch-*.parquet xuất hiện ở

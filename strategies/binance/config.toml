@@ -41,17 +41,17 @@
 
 [engine]
 poll_interval_seconds = 10
-# Sức chứa cache của station = `cache_block_seconds × cache_max_blocks`, và
-# station memory-only nên đây là **toàn bộ** lịch sử còn đọc được.
+# KHÔNG có khai cache ở đây, và cũng không có khai được: cache nóng của station
+# là hằng số `HOT_BLOCKS = 32` block (`crates/opsense-core/src/station.rs:44`).
+# Sức chứa thật = `32 × storage.block_secs`.
 #
-# Không được hạ nhỏ: cửa sổ phân tích của `grid` là `history_secs` (16h), mà
-# 5s × 12 block = **60 giây** ⇒ đọc cửa sổ 16h không còn block nào trong cache
-# ⇒ `station_candles` trả rỗng ⇒ không dựng được snapshot, không có lệnh, mà
-# log chỉ ra cảnh báo `update_range` chứ không báo lỗi.
+# `engine.cache_block_seconds` / `cache_max_blocks` từng có trong config nhưng
+# **không ai đọc** — chỉ được validate chặn giá trị 0. Đã gỡ khỏi `Config`.
+# Nếu sau này cần chỉnh sức chứa thì phải cho `HOT_BLOCKS` đọc được từ config,
+# không phải thêm lại hai field chết.
 #
-# 288 × 300s = 24 giờ, gấp 1.5 lần cửa sổ 16h.
-cache_block_seconds = 300
-cache_max_blocks = 288
+# Cửa sổ phân tích của `grid` là `history_secs` (16h). Với `backend = "memory"`
+# và `block_secs` mặc định 3600 thì cache giữ 32 × 1h = 32 giờ, đủ cho 16h.
 
 [storage]
 backend = "memory"
@@ -200,7 +200,6 @@ station = true
    # Nhịp dựng lại plan. Cần `Session` mang `review_at` qua lời gọi, nếu không
    # kernel rebuild mỗi nến và mốc trôi liên tục.
    review_interval_secs = 900
-   trading_candle_secs = 60
    # Phí sàn **mỗi phía** — Binance **USDⓈ-M Futures**, VIP 0:
    #
    #   maker (limit đặt xuống sổ, chờ khớp)  = 0.02% -> 0.0002

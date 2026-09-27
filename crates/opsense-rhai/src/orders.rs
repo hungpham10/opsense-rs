@@ -134,7 +134,6 @@ struct Settings {
     sl_pct: f64,
     lookback_secs: u64,
     review_interval_secs: u64,
-    trading_candle_secs: u64,
     fee_rate: f64,
     kelly_fraction: f64,
     base_capital: f64,
@@ -167,7 +166,6 @@ impl Default for Settings {
             sl_pct: 0.008,
             lookback_secs: 2 * 24 * 3600,
             review_interval_secs: 900,
-            trading_candle_secs: 60,
             fee_rate: 0.0005,
             kelly_fraction: 0.25,
             base_capital: 100_000.0,
@@ -224,9 +222,6 @@ impl Settings {
         }
         if let Some(v) = int("review_interval_secs") {
             s.review_interval_secs = v.max(0) as u64;
-        }
-        if let Some(v) = int("trading_candle_secs") {
-            s.trading_candle_secs = v.max(1) as u64;
         }
         if let Some(v) = num("fee_rate") {
             s.fee_rate = v;

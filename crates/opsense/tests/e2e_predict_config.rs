@@ -333,8 +333,6 @@ fn config_file_contract() {
         .expect("strategies/predict/config.toml phải parse + validate");
 
     assert_eq!(cfg.engine.poll_interval_seconds, 10);
-    assert_eq!(cfg.engine.cache_block_seconds, 5);
-    assert_eq!(cfg.engine.cache_max_blocks, 12);
     assert_eq!(cfg.storage.backend, "parquet");
     assert_eq!(cfg.storage.block_secs, 5);
     assert_eq!(cfg.storage.retention_secs, 300);

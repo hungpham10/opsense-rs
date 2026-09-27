@@ -13,8 +13,6 @@
 
 [engine]
 poll_interval_seconds = 3600
-cache_block_seconds = 300
-cache_max_blocks = 288
 # Template variables usable as {{name}} inside http_source
 # url/headers/body. Override per environment WITHOUT editing this
 # file: OPSENSE_ATTR_<NAME> (uppercase) wins, env-only entries are picked

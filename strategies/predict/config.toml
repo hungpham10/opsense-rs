@@ -37,8 +37,6 @@
 
 [engine]
 poll_interval_seconds = 10
-cache_block_seconds = 5
-cache_max_blocks = 12
 
 [storage]
 backend = "parquet"

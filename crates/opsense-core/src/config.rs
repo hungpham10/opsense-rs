@@ -4,8 +4,6 @@
 //! ```toml
 //! [engine]
 //! poll_interval_seconds = 60
-//! cache_block_seconds = 300
-//! cache_max_blocks = 288
 //!
 //! [sources.vector]
 //! url = "http://vector:8686"
@@ -59,16 +57,12 @@ impl From<config_crate::ConfigError> for ConfigError {
 #[serde(default)]
 pub struct EngineConfig {
     pub poll_interval_seconds: u64,
-    pub cache_block_seconds: u64,
-    pub cache_max_blocks: usize,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: 60,
-            cache_block_seconds: 300,
-            cache_max_blocks: 288,
         }
     }
 }
@@ -361,16 +355,6 @@ impl Config {
                 "engine.poll_interval_seconds must be > 0".into(),
             ));
         }
-        if self.engine.cache_block_seconds == 0 {
-            return Err(ConfigError::Invalid(
-                "engine.cache_block_seconds must be > 0".into(),
-            ));
-        }
-        if self.engine.cache_max_blocks == 0 {
-            return Err(ConfigError::Invalid(
-                "engine.cache_max_blocks must be > 0".into(),
-            ));
-        }
         // S3 lake cần bucket — prefix (rỗng = gốc bucket) là tuỳ chọn.
         if let Some(s3) = &self.storage.s3
             && s3.bucket.is_empty()
@@ -417,8 +401,6 @@ mod tests {
     const SAMPLE: &str = r#"
 [engine]
 poll_interval_seconds = 60
-cache_block_seconds = 300
-cache_max_blocks = 288
 
 [sources.vector]
 url = "http://vector:8686"

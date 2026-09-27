@@ -476,9 +476,8 @@ impl TimeseriesStation {
         // Chặn trần số block một query được duyệt. Không có trần này, cửa sổ
         // mặc định của `Query.queryTimeseries` (30 ngày) với block nhỏ là một
         // vòng lặp khổng lồ: `block_secs = 5` ⇒ ~518.400 block, mỗi block một
-        // lần `caches.get` (miss) + `load_cold_block` ⇒ tới storage. Đo trên
-        // `strategies/binance` với `cache_block_seconds = 5` đó là hàng trăm
-        // nghìn lượt đọc cho **một** lệnh query.
+        // lần `caches.get` (miss) + `load_cold_block` ⇒ tới storage. Đo với
+        // `block_secs = 5` đó là hàng trăm nghìn lượt đọc cho **một** lệnh query.
         //
         // Cắt cửa sổ về `MAX_BLOCKS_PER_QUERY` block gần nhất thay vì quét hết:
         // dữ liệu "gần nhất" mới là thứ mọi reader thực sự hỏi, và việc bỏ
@@ -549,9 +548,8 @@ impl TimeseriesStation {
         //
         // Thành thật trong `strategies/binance`: `history` fetch 500 nến mỗi 10s.
         // Với `[storage] block_secs = 3600` (mặc định) đó ~9 block/lần nên an
-        // toàn; nhưng nếu ai đó hạ `block_secs` xuống 5 cho khớp
-        // `cache_block_seconds`, 500 nến = hàng nghìn block ⇒ mất ~99% mỗi
-        // lần fetch mà không có dấu vết.
+        // toàn; nhưng nếu ai đó hạ `block_secs` xuống 5, 500 nến = hàng nghìn
+        // block ⇒ mất ~99% mỗi lần fetch mà không có dấu vết.
         let span = end_block - start_block + 1;
         if span > HOT_BLOCKS as i64 && self.storage.is_none() {
             tracing::warn!(
@@ -560,8 +558,9 @@ impl TimeseriesStation {
                 from_ts = query_from,
                 to_ts = query_to,
                 "update_range: batch trải {} block > sức chứa cache {} và station \
-                 không có storage ⇒ block cũ bị mất. Hoặc tăng cache_max_blocks, \
-                 hoặc tăng [storage] block_secs, hoặc bật backend có persist.",
+                 không có storage ⇒ block cũ bị mất. Hoặc tăng [storage] block_secs, \
+                 hoặc bật backend có persist (HOT_BLOCKS là hằng số, không cấu \
+                 hình được).",
                 span,
                 HOT_BLOCKS
             );

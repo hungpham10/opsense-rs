@@ -212,11 +212,9 @@ fn trading_cfg() {
     if is_def_var("param_review_interval_secs") && type_of(param_review_interval_secs) != "()" {
         review_interval_secs = param_review_interval_secs.to_int();
     }
-    let trading_candle_secs = 60;
-    if is_def_var("param_trading_candle_secs") && type_of(param_trading_candle_secs) != "()" {
-        trading_candle_secs = param_trading_candle_secs.to_int();
-    }
-    let fee_rate = 0.0005;
+    // Chỉ là fallback khi thiếu `param_fee_rate`; giá trị thật do config khai.
+    // Binance USDⓈ-M Futures VIP 0: maker 0.0002, taker 0.0005.
+    let fee_rate = 0.0002;
     if is_def_var("param_fee_rate") && type_of(param_fee_rate) != "()" {
         fee_rate = param_fee_rate.to_float();
     }
@@ -244,7 +242,6 @@ fn trading_cfg() {
         grid_max_bit: grid_max_bit,
         lookback_secs: lookback_secs,
         review_interval_secs: review_interval_secs,
-        trading_candle_secs: trading_candle_secs,
         fee_rate: fee_rate,
         kelly_fraction: kelly_fraction,
         base_capital: base_capital,
