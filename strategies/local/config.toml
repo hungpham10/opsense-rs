@@ -3,15 +3,12 @@
 
 [engine]
 poll_interval_seconds = 10
-cache_block_seconds = 5
-cache_max_blocks = 12
 
 [storage]
 backend = "parquet"
 data_dir = "/app/.opsense/parquet"
 block_secs = 5
 retention_secs = 300
-# parquet_compression = "zstd"
 
 [[pipeline.components]]
 type = "clock"

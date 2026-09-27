@@ -13,8 +13,6 @@
 
 [engine]
 poll_interval_seconds = 3600
-cache_block_seconds = 300
-cache_max_blocks = 288
 # Template variables usable as {{name}} inside http_source
 # url/headers/body. Override per environment WITHOUT editing this
 # file: OPSENSE_ATTR_<NAME> (uppercase) wins, env-only entries are picked
@@ -48,14 +46,18 @@ data_dir = ".opsense/parquet"        # local cache root (data vẫn nằm trong
                                      # <data_dir>/<id>-timeseries/ts/...)
 # block_secs = 3600
 # retention_secs = 7776000           # ví dụ: chỉ giữ 90 ngày (0/bỏ = giữ mãi)
-# parquet_compression = "zstd"
 # [storage.s3]                        # (tùy chọn) mirror parquet lên S3 → nơi
 # bucket = "opsense-lake"            # Spark/DuckDB/Polars query trực tiếp qua
 # prefix = "prod"                    # s3://opsense-lake/prod/<id>/ts/**/*.parquet
 # endpoint = "http://rustfs:9000"     # bỏ trống = AWS public; /region, /access_key_id,
 # url_style = "path"                 # /secret_access_key nhận env OPSENSE_S3_*.
-# s3_flush_interval_secs = 60        # flush timeseries ra S3 theo lịch
-# s3_snapshot_interval_secs = 600    # checkpoint + mirror state lên S3 theo lịch
+#
+# KHÔNG đặt `s3_flush_interval_secs` / `s3_snapshot_interval_secs` ở đây —
+# chúng thuộc [storage] cấp ngoài. Đặt sai cấp sẽ bị serde từ chối lúc parse
+# (`S3Config` có `deny_unknown_fields`), đã có 2 file config lỗi này bị bỏ qua
+# âm thầm trước đó.
+# s3_flush_interval_secs = 60        # đặt ở [storage]: flush timeseries ra S3
+# s3_snapshot_interval_secs = 600    # đặt ở [storage]: checkpoint + state lên S3
 
 # Cursor pipeline tự lưu <data_dir>/watermarks.json để restart tiếp tục chỗ cũ.
 

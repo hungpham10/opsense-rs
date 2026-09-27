@@ -9,6 +9,7 @@
 //! **danh sách đầy đủ**, nên client phải đọc cấu hình hiện tại trước
 //! (`Query.components`) — đọc rồi sửa thì không đoán. `Mutation.patchComponent`
 //! là cách sửa một phần (thêm ở G2).
+use opsense_model::events::Signal;
 
 use std::sync::Arc;
 
@@ -125,12 +126,25 @@ pub struct ComponentConfig {
 
     pub inputs: Vec<String>,
 
+    /// Mô tả do pipeline khai. Lọc ở đây, không đọc trong `config`, vì `config`
+    /// là JSON của **typed struct** — mà struct không có field này (xem
+    /// [`crate::api::node_descriptions`]).
+    pub description: Option<String>,
+
     /// Toàn bộ field của component dạng JSON (`script_path`, `params`, …).
     pub config: serde_json::Value,
 }
 
 /// Bọc JSON thô của `Runtime::components()` thành `ComponentConfig`.
-fn component_config(value: serde_json::Value) -> Option<ComponentConfig> {
+///
+/// `descriptions` lấy từ `Context`, không đọc được trong `value`: JSON này là
+/// ảnh chụp của typed struct, mà struct cố tình **không** mang `description`
+/// (`deny_unknown_fields` + `reload` đi vòng qua struct — xem
+/// [`crate::api::node_descriptions`]).
+fn component_config(
+    value: serde_json::Value,
+    descriptions: &std::collections::BTreeMap<String, String>,
+) -> Option<ComponentConfig> {
     let obj = value.as_object()?;
     let id = obj.get("id")?.as_str()?.to_string();
     // `type` do typetag sinh khi serialize; `id` do runtime nhét thêm.
@@ -149,6 +163,7 @@ fn component_config(value: serde_json::Value) -> Option<ComponentConfig> {
         })
         .unwrap_or_default();
     Some(ComponentConfig {
+        description: descriptions.get(&id).cloned(),
         id,
         kind,
         inputs,
@@ -285,11 +300,12 @@ impl QueryRoot {
         id: Option<String>,
     ) -> async_graphql::Result<Vec<ComponentConfig>> {
         let s = state(ctx);
+        let descriptions = s.context.node_descriptions().await;
         Ok(s
             .components(id.as_deref())
             .await
             .into_iter()
-            .filter_map(component_config)
+            .filter_map(|value| component_config(value, &descriptions))
             .collect())
     }
 
@@ -298,9 +314,13 @@ impl QueryRoot {
     /// - `limit` (mặc định 1000, tối đa [`MAX_QUERY_ROWS`]) và cửa sổ
     ///   (`from`/`to`, tối đa [`MAX_QUERY_WINDOW_SECS`]) bị từ chối nếu vượt trần,
     ///   kèm gợi ý cụ thể.
-    /// - `signal` / `label_kind` lọc **server-side** (vd `signal = "order"`,
-    ///   `label_kind = "trading_step"`): agent không phải kéo 10k dòng về rồi tự
-    ///   lọc.
+    /// - `signal` / `label_kind` / `status` lọc **server-side** (vd
+    ///   `signal = "order"`, `label_kind = "trading_step"`): agent không phải
+    ///   kéo 10k dòng về rồi tự lọc.
+    /// - `label_kind` lọc `labels.kind`, còn `status` lọc `labels.status` — hai
+    ///   label khác nhau. Lệnh giao dịch mang `status` (`open` / `closed`) và
+    ///   **không** có `kind`, nên `labelKind: "closed"` luôn rỗng; muốn lệnh đã
+    ///   đóng thì phải dùng `status: "closed"`.
     /// - `truncated` nói rõ còn dữ liệu ngoài `limit`.
     async fn query_timeseries(
         &self,
@@ -311,6 +331,7 @@ impl QueryRoot {
         limit: Option<i64>,
         signal: Option<String>,
         label_kind: Option<String>,
+        status: Option<String>,
     ) -> async_graphql::Result<QueryResult> {
         let s = state(ctx);
 
@@ -366,11 +387,7 @@ impl QueryRoot {
         };
         let matched: Vec<&Observation> = rows
             .iter()
-            .filter(|o| want_signal.is_none_or(|want| o.signal == want))
-            .filter(|o| match &label_kind {
-                None => true,
-                Some(k) => o.labels.get("kind").map(String::as_str) == Some(k.as_str()),
-            })
+            .filter(|o| matches_filters(o, want_signal.as_ref(), label_kind.as_deref(), status.as_deref()))
             .collect();
         let truncated = matched.len() > limit;
         Ok(QueryResult {
@@ -379,6 +396,36 @@ impl QueryRoot {
             observations: matched.into_iter().take(limit).cloned().collect(),
         })
     }
+}
+
+/// Ba bộ lọc server-side của `queryTimeseries`, tách ra thành hàm thuần để test
+/// được — và để **tên tham số nói đúng điều nó lọc**.
+///
+/// `label_kind` lọc `labels.kind` còn `status` lọc `labels.status`: đây là hai
+/// label khác nhau, và trước khi có tham số `status` thì cách duy nhất lấy lệnh
+/// đã đóng là kéo hết về lọc tay. Lệnh giao dịch mang `status`
+/// (`open`/`closed`) và **không** có `kind`, nên `labelKind: "closed"` luôn rỗng
+/// — đã đo trên strategy binance.
+fn matches_filters(
+    o: &Observation,
+    signal: Option<&Signal>,
+    label_kind: Option<&str>,
+    status: Option<&str>,
+) -> bool {
+    if !signal.is_none_or(|want| o.signal == *want) {
+        return false;
+    }
+    if let Some(k) = label_kind
+        && o.labels.get("kind").map(String::as_str) != Some(k)
+    {
+        return false;
+    }
+    if let Some(want) = status
+        && o.labels.get("status").map(String::as_str) != Some(want)
+    {
+        return false;
+    }
+    true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -559,6 +606,10 @@ pub async fn graphql(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use opsense_model::events::TelemetryKind;
+
     use super::*;
 
     fn schema() -> Schema<QueryRoot, MutationRoot, EmptySubscription> {
@@ -598,8 +649,12 @@ mod tests {
             "script_path": "strategies/binance/grid.rhai",
             "params": { "strategy": "rhai", "mode": "analysis" },
         });
-        let cfg = component_config(raw.clone()).expect("map được");
+        let descriptions =
+            BTreeMap::from([("grid".to_string(), "Lệnh + snapshot + plan".to_string())]);
+        let cfg = component_config(raw.clone(), &descriptions).expect("map được");
         assert_eq!(cfg.id, "grid");
+        // Mô tả đến từ `Context`, **không** phải từ JSON của typed struct.
+        assert_eq!(cfg.description.as_deref(), Some("Lệnh + snapshot + plan"));
         assert_eq!(cfg.kind, "rhai_transform");
         assert_eq!(cfg.inputs, vec!["clock", "history"]);
         assert_eq!(cfg.config, raw, "config phải giữ nguyên JSON gốc");
@@ -607,13 +662,72 @@ mod tests {
         assert_eq!(cfg.config["params"]["strategy"], "rhai");
     }
 
+    /// `status` và `label_kind` lọc **hai label khác nhau** — đây là bẫy đã
+    /// đo thật: lệnh giao dịch mang `labels.status` (`open`/`closed`) và không
+    /// có `labels.kind`, nên `labelKind: "closed"` rỗng trong khi `status:
+    /// "closed"` ra lệnh. Trước khi có tham số `status`, cách duy nhất là kéo
+    /// hết về lọc tay — và `limit` cắt cụt **trước** khi lọc.
+    #[test]
+    fn status_and_label_kind_filter_different_labels() {
+        let mut open = Observation::new(1, "BTCUSDT".into(), TelemetryKind::Metric, Signal::Order, 100.0);
+        open.labels.insert("order_id".into(), "o1".into());
+        open.labels.insert("status".into(), "open".into());
+
+        let mut closed = open.clone();
+        closed.ts = 2;
+        closed.labels.insert("order_id".into(), "o1".into());
+        closed.labels.insert("status".into(), "closed".into());
+
+        let mut step = Observation::new(3, "BTCUSDT".into(), TelemetryKind::Metric, Signal::Summary, 3.0);
+        step.labels.insert("kind".into(), "trading_step".into());
+
+        // `status` lấy đúng lệnh đã đóng, và **không** lấy cursor.
+        let hit: Vec<_> = [&open, &closed, &step]
+            .into_iter()
+            .filter(|o| super::matches_filters(o, Some(&Signal::Order), None, Some("closed")))
+            .collect();
+        assert_eq!(hit.len(), 1, "phải ra đúng 1 lệnh đóng");
+        assert_eq!(hit[0].labels.get("status").map(String::as_str), Some("closed"));
+
+        // `labelKind: "closed"` rỗng — vì lệnh không có label `kind`.
+        let miss: Vec<_> = [&open, &closed]
+            .into_iter()
+            .filter(|o| super::matches_filters(o, Some(&Signal::Order), Some("closed"), None))
+            .collect();
+        assert!(miss.is_empty(), "labelKind không được thấy lệnh");
+
+        // `labelKind` vẫn lấy được cursor như trước.
+        let cursor: Vec<_> = [&step]
+            .into_iter()
+            .filter(|o| super::matches_filters(o, None, Some("trading_step"), None))
+            .collect();
+        assert_eq!(cursor.len(), 1);
+
+        // Không truyền bộ lọc nào thì giữ tất cả.
+        assert!(super::matches_filters(&open, None, None, None));
+    }
+
+    /// Node không khai `description` → `None`, **không** phải chuỗi rỗng: MCP
+    /// cần phân biệt "không ai mô tả" với "mô tả rỗng".
+    #[test]
+    fn component_config_description_absent_is_none() {
+        let empty = BTreeMap::new();
+        let cfg = component_config(
+            serde_json::json!({ "id": "clock", "type": "clock" }),
+            &empty,
+        )
+        .expect("map được");
+        assert_eq!(cfg.description, None);
+    }
+
     /// JSON thiếu `id` (component lỗi) → bỏ qua chứ không làm hỏng cả query.
     #[test]
     fn component_config_skips_malformed_entries() {
-        assert!(component_config(serde_json::json!({})).is_none());
-        assert!(component_config(serde_json::json!({ "id": 7 })).is_none());
+        let empty = BTreeMap::new();
+        assert!(component_config(serde_json::json!({}), &empty).is_none());
+        assert!(component_config(serde_json::json!({ "id": 7 }), &empty).is_none());
         // Không có `inputs` → rỗng, không panic.
-        let cfg = component_config(serde_json::json!({ "id": "x", "type": "clock" }))
+        let cfg = component_config(serde_json::json!({ "id": "x", "type": "clock" }), &empty)
             .expect("map được");
         assert!(cfg.inputs.is_empty());
     }

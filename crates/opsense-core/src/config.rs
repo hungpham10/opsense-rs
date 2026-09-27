@@ -4,8 +4,6 @@
 //! ```toml
 //! [engine]
 //! poll_interval_seconds = 60
-//! cache_block_seconds = 300
-//! cache_max_blocks = 288
 //!
 //! [sources.vector]
 //! url = "http://vector:8686"
@@ -59,16 +57,12 @@ impl From<config_crate::ConfigError> for ConfigError {
 #[serde(default)]
 pub struct EngineConfig {
     pub poll_interval_seconds: u64,
-    pub cache_block_seconds: u64,
-    pub cache_max_blocks: usize,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             poll_interval_seconds: 60,
-            cache_block_seconds: 300,
-            cache_max_blocks: 288,
         }
     }
 }
@@ -119,7 +113,6 @@ pub struct PipelineConfig {
 /// `backend` selects the main store: `"memory"` (LRU, default — easiest for
 /// tests), `"parquet"` (Parquet storage — canonical; local filesystem hoặc
 /// object store khi `data_dir` là `s3://…`) hoặc `"sqlite"` (local file).
-/// `mirror` optionally double-writes to a second backend.
 /// Tên backend cũ `"duckdb"`/`"s3"`/`"lakehouse"` vẫn được chấp nhận trong code
 /// như alias deprecated (tất cả mở cùng Parquet storage) nhưng không nên dùng
 /// trong config mới.
@@ -141,13 +134,6 @@ pub struct StorageConfig {
     /// Larger blocks mean fewer files (cheaper S3 listing) but coarser
     /// retention granularity. Default 3600 (one hour).
     pub block_secs: u64,
-
-    pub mirror: Option<StorageBackendConfig>,
-
-    /// Nén Parquet cho parquet writes: `zstd` (mặc định) | `snappy` |
-    /// `gzip` | `uncompressed`. ZSTD giảm đáng kể dung lượng/chi phí S3.
-    #[serde(default = "default_parquet_compression")]
-    pub parquet_compression: String,
 
     /// Kết nối S3 cho Parquet storage khi `data_dir` là `s3://`.
     /// Mỗi field thiếu trong TOML sẽ được bù bằng env `OPSENSE_S3_*`.
@@ -180,8 +166,14 @@ fn default_s3_snapshot_interval_secs() -> u64 {
 /// Spark/Polars/DuckDB) và `…/{station}/state/…` (checkpoint để mở lại). Các
 /// field đều Option để cho phép dùng biến môi trường AWS chuẩn khi không khai
 /// báo gì.
+///
+/// `deny_unknown_fields` là cố ý: `s3_flush_interval_secs` /
+/// `s3_snapshot_interval_secs` thuộc `[storage]` **cấp ngoài**, không phải đây.
+/// Không có deny thì serde bỏ qua key lạ **im lặng** — đã xảy ra thật ở
+/// `strategies/s3` + `conf/opsense-test.conf.toml`: config khai 15s/60s trong
+/// `[storage.s3]`, thực tế chạy 60s/600s, không ai báo gì.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct S3Config {
     /// Bucket chứa lake (bắt buộc khi dùng S3). Bù bằng env `OPSENSE_S3_BUCKET`.
     pub bucket: String,
@@ -198,10 +190,6 @@ pub struct S3Config {
     pub url_style: Option<String>,
 }
 
-fn default_parquet_compression() -> String {
-    "zstd".to_string()
-}
-
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -209,27 +197,9 @@ impl Default for StorageConfig {
             data_dir: ".opsense/parquet".to_string(),
             retention_secs: 0,
             block_secs: 3600,
-            mirror: None,
-            parquet_compression: default_parquet_compression(),
             s3: None,
             s3_flush_interval_secs: default_s3_flush_interval_secs(),
             s3_snapshot_interval_secs: default_s3_snapshot_interval_secs(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct StorageBackendConfig {
-    pub backend: String,
-    pub data_dir: String,
-}
-
-impl Default for StorageBackendConfig {
-    fn default() -> Self {
-        Self {
-            backend: "parquet".to_string(),
-            data_dir: ".opsense/parquet".to_string(),
         }
     }
 }
@@ -361,16 +331,6 @@ impl Config {
                 "engine.poll_interval_seconds must be > 0".into(),
             ));
         }
-        if self.engine.cache_block_seconds == 0 {
-            return Err(ConfigError::Invalid(
-                "engine.cache_block_seconds must be > 0".into(),
-            ));
-        }
-        if self.engine.cache_max_blocks == 0 {
-            return Err(ConfigError::Invalid(
-                "engine.cache_max_blocks must be > 0".into(),
-            ));
-        }
         // S3 lake cần bucket — prefix (rỗng = gốc bucket) là tuỳ chọn.
         if let Some(s3) = &self.storage.s3
             && s3.bucket.is_empty()
@@ -417,8 +377,6 @@ mod tests {
     const SAMPLE: &str = r#"
 [engine]
 poll_interval_seconds = 60
-cache_block_seconds = 300
-cache_max_blocks = 288
 
 [sources.vector]
 url = "http://vector:8686"
@@ -461,6 +419,61 @@ env_name = "prod"
         assert_eq!(cfg.engine.poll_interval_seconds, 60);
         // Sources are optional now — pipeline HTTP nodes fetch on their own.
         assert!(cfg.validate().is_ok());
+    }
+
+    /// Regression: key đặt **sai cấp** phải nổi lên lúc parse, không bị bỏ âm thầm.
+    ///
+    /// `s3_flush_interval_secs` / `s3_snapshot_interval_secs` thuộc `[storage]`
+    /// cấp ngoài. Đã có 2 file khai chúng trong `[storage.s3]` và **không ai
+    /// báo gì** — flush chạy 60s thay vì 15s, snapshot 600s thay vì 60s. Test
+    /// integration vẫn xanh vì chỉ chờ đủ lâu.
+    #[test]
+    fn rejects_s3_keys_placed_under_storage_s3() {
+        let toml = r#"
+[storage]
+backend = "parquet"
+
+[storage.s3]
+bucket = "b"
+s3_flush_interval_secs = 15
+"#;
+        let raw = config_crate::Config::builder()
+            .add_source(config_crate::File::from_str(toml, FileFormat::Toml))
+            .build()
+            .unwrap();
+        let err = raw.try_deserialize::<Config>().expect_err(
+            "key sai cấp phải bị từ chối, không được bỏ qua im lặng",
+        );
+        assert!(
+            err.to_string().contains("s3_flush_interval_secs"),
+            "lỗi phải nêu đúng tên key, thực tế: {err}"
+        );
+    }
+
+    /// Đặt đúng cấp thì parse được và **giữ đúng giá trị** — chứng minh deny
+    /// không phá đường hợp đệ.
+    #[test]
+    fn keeps_s3_schedule_when_placed_under_storage() {
+        let toml = r#"
+[storage]
+backend = "parquet"
+s3_flush_interval_secs = 15
+s3_snapshot_interval_secs = 60
+
+[storage.s3]
+bucket = "b"
+prefix = "p"
+"#;
+        let raw = config_crate::Config::builder()
+            .add_source(config_crate::File::from_str(toml, FileFormat::Toml))
+            .build()
+            .unwrap();
+        let cfg: Config = raw
+            .try_deserialize()
+            .expect("đặt đúng cấp phải parse được");
+        assert_eq!(cfg.storage.s3_flush_interval_secs, 15);
+        assert_eq!(cfg.storage.s3_snapshot_interval_secs, 60);
+        assert_eq!(cfg.storage.s3.as_ref().map(|s| s.bucket.as_str()), Some("b"));
     }
 
     #[test]

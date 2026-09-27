@@ -107,6 +107,7 @@ pub async fn query(
     limit: Option<i64>,
     signal: Option<String>,
     label_kind: Option<String>,
+    status: Option<String>,
 ) -> Result<()> {
     let out = client(endpoint)?
         .query_station(
@@ -116,6 +117,7 @@ pub async fn query(
             limit,
             signal.as_deref(),
             label_kind.as_deref(),
+            status.as_deref(),
         )
         .await
         .context("Query.queryTimeseries")?;

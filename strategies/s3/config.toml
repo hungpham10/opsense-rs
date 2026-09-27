@@ -5,23 +5,23 @@
 
 [engine]
 poll_interval_seconds = 10
-cache_block_seconds = 5
-cache_max_blocks = 12
 
 [storage]
 backend = "parquet"
 data_dir = "/app/.opsense/parquet"
 block_secs = 5
 retention_secs = 300
-# parquet_compression = "zstd"
+# s3_flush_interval_secs / s3_snapshot_interval_secs là lịch sync của
+# [storage] (KHÔNG nằm trong [storage.s3] — config cũ để lệch schema thì bị
+# serde bỏ qua âm thầm, flush rơi về default 60s/600s).
+s3_flush_interval_secs = 15
+s3_snapshot_interval_secs = 60
 
 [storage.s3]
 bucket = "opsense-lake"
 prefix = "test-case-s3"
 endpoint = "http://rustfs:9000"
 url_style = "path"
-s3_flush_interval_secs = 15
-s3_snapshot_interval_secs = 60
 
 [[pipeline.components]]
 type = "clock"

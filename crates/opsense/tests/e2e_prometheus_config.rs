@@ -266,8 +266,6 @@ fn config_file_contract() {
 
     // Engine / storage mà file khai báo.
     assert_eq!(cfg.engine.poll_interval_seconds, 10);
-    assert_eq!(cfg.engine.cache_block_seconds, 5);
-    assert_eq!(cfg.engine.cache_max_blocks, 12);
     assert_eq!(cfg.storage.backend, "parquet");
     assert_eq!(cfg.storage.block_secs, 5);
     assert_eq!(cfg.storage.retention_secs, 300);

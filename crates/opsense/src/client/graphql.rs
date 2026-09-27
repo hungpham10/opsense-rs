@@ -22,6 +22,11 @@ pub struct NodeSummary {
     #[serde(rename = "type")]
     pub kind: String,
     pub inputs: Vec<String>,
+    /// Có mặt ở đây là bắt buộc: selection set của `status()` ghi **tường minh**
+    /// (`nodes { id type inputs }`), nên quên field là MCP không thấy, chứ không
+    /// phải lỗi schema.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -64,6 +69,8 @@ pub struct ComponentConfig {
     #[serde(rename = "type")]
     pub kind: String,
     pub inputs: Vec<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     /// JSON của typetag: `script_path`, `params`, … (cùng shape `ComponentInput`).
     pub config: serde_json::Value,
 }
@@ -193,7 +200,7 @@ impl OpsenseClient {
         const QUERY: &str = r#"
             query {
                 status {
-                    nodes { id type inputs }
+                    nodes { id type inputs description }
                     stations { id kind }
                 }
             }
@@ -213,7 +220,7 @@ impl OpsenseClient {
     pub async fn components(&self, id: Option<&str>) -> anyhow::Result<Vec<ComponentConfig>> {
         const QUERY: &str = r#"
             query($id: String) {
-                components(id: $id) { id type inputs config }
+                components(id: $id) { id type inputs description config }
             }
         "#;
         #[derive(Serialize)]
@@ -229,6 +236,7 @@ impl OpsenseClient {
     /// (`"order"`, `"summary"`…) + `label_kind` (`"trading_step"`, `"snapshot"`…).
     /// `truncated = true` nghĩa là còn dữ liệu ngoài `limit`.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn query_station(
         &self,
         node: &str,
@@ -237,12 +245,14 @@ impl OpsenseClient {
         limit: Option<i64>,
         signal: Option<&str>,
         label_kind: Option<&str>,
+        status: Option<&str>,
     ) -> anyhow::Result<QueryResult> {
         const QUERY: &str = r#"
             query($node: String!, $fromTs: Int, $toTs: Int, $limit: Int,
-                  $signal: String, $labelKind: String) {
+                  $signal: String, $labelKind: String, $status: String) {
                 queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs,
-                                limit: $limit, signal: $signal, labelKind: $labelKind) {
+                                limit: $limit, signal: $signal, labelKind: $labelKind,
+                                status: $status) {
                     observations { ts metric signal value labels }
                     truncated
                     scanned
@@ -257,6 +267,7 @@ impl OpsenseClient {
             limit: Option<i64>,
             signal: Option<&'a str>,
             label_kind: Option<&'a str>,
+            status: Option<&'a str>,
         }
         self.gql(
             QUERY,
@@ -267,6 +278,7 @@ impl OpsenseClient {
                 limit,
                 signal,
                 label_kind,
+                status,
             },
         )
         .await

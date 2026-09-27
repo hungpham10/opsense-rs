@@ -127,6 +127,16 @@ fn trade(hist_src, live_src, own, symbol, resolution, hw) {
     let state = [];
     state += empty_if_missing(station_query(own, from, now, "order"));
     state += empty_if_missing(station_query(own, from, now, "summary", "trading_step"));
+    // Plan (`kind = "plan"`) cũng là `signal = "summary"` nhưng **khác kind**,
+    // nên hai lệnh trên không lấy được nó. Mà plan là thứ `portfolio_feed`
+    // cần để dựng lưới: `State::from_observations` đọc `session.plan` từ
+    // đúng `state` này, thiếu nó thì plan rỗng ở **mọi** lời gọi.
+    //
+    // Đo được trước khi sửa: `rebuild xong grids=2` ⇒ nến ngay sau đó
+    // `plan_grids=2`, nhưng từ nến kế tiếp `plan_grids=0` và giữ nguyên 0
+    // cho tới lần rebuild sau (+`review_interval_secs` = 15 nến). Tức chỉ
+    // 1 nến trên 15 nến có lưới để đặt lệnh.
+    state += empty_if_missing(station_query(own, from, now, "summary", "plan"));
     if already_traded(state, closed["t"].to_int()) { return []; }
 
     portfolio_feed(series, state, closed, trading_cfg(), symbol)
@@ -212,11 +222,9 @@ fn trading_cfg() {
     if is_def_var("param_review_interval_secs") && type_of(param_review_interval_secs) != "()" {
         review_interval_secs = param_review_interval_secs.to_int();
     }
-    let trading_candle_secs = 60;
-    if is_def_var("param_trading_candle_secs") && type_of(param_trading_candle_secs) != "()" {
-        trading_candle_secs = param_trading_candle_secs.to_int();
-    }
-    let fee_rate = 0.0005;
+    // Chỉ là fallback khi thiếu `param_fee_rate`; giá trị thật do config khai.
+    // Binance USDⓈ-M Futures VIP 0: maker 0.0002, taker 0.0005.
+    let fee_rate = 0.0002;
     if is_def_var("param_fee_rate") && type_of(param_fee_rate) != "()" {
         fee_rate = param_fee_rate.to_float();
     }
@@ -244,7 +252,6 @@ fn trading_cfg() {
         grid_max_bit: grid_max_bit,
         lookback_secs: lookback_secs,
         review_interval_secs: review_interval_secs,
-        trading_candle_secs: trading_candle_secs,
         fee_rate: fee_rate,
         kelly_fraction: kelly_fraction,
         base_capital: base_capital,

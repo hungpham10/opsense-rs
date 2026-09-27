@@ -209,9 +209,11 @@ async fn cmd_query(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<
     let limit = parts.get(3).and_then(|s| s.parse::<i64>().ok());
     let signal = parts.get(4).copied();
     let label_kind = parts.get(5).copied();
+    // `status` lọc `labels.status` — khác `label_kind` (lọc `labels.kind`).
+    let status = parts.get(6).copied();
     // Server tự chặn `limit`/cửa sổ vượt trần và lọc server-side.
     let out = client
-        .query_station(node, from_ts, to_ts, limit, signal, label_kind)
+        .query_station(node, from_ts, to_ts, limit, signal, label_kind, status)
         .await?;
     if out.observations.is_empty() {
         Ok(Some(format!(

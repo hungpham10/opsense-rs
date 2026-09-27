@@ -3,8 +3,6 @@
 
 [engine]
 poll_interval_seconds = 60
-cache_block_seconds = 300
-cache_max_blocks = 288
 
 # Minimal pipeline: clock source → timeseries station sink. Required so the
 # bare `opsense serve` container (which mounts this file) has an explicit
@@ -17,11 +15,17 @@ cache_max_blocks = 288
 [[pipeline.components]]
 type = "clock"
 id = "clock"
+# `description` là metadata cho MCP/GraphQL: nói node này chứa dữ liệu gì.
+# KHÔNG phải field của component — mọi component struct có
+# `#[serde(deny_unknown_fields)]` nên key này phải được bóc ra trước khi
+# deserialize (xem `node_descriptions` trong crates/opsense/src/api/mod.rs).
+description = "Chỉ nhịp thời gian. **Tick là control signal, không mang observation** — station `tsdb` nối từ đây vì vậy không bao giờ có dữ liệu."
 interval_secs = 60
 
 [[pipeline.components]]
 type = "timeseries_station_sink"
 id = "tsdb"
+description = "Ghi observation từ message vào station `tsdb`. Với nguồn là `clock` thì không gì được ghi — xem mô tả node `clock`."
 inputs = ["clock"]
 
 # Vector/Alloy metrics source. Disabled by default in dev — there is no
