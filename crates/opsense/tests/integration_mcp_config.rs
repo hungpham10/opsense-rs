@@ -80,6 +80,11 @@ async fn config_edit_is_audited_in_station() {
         .find(|o| {
             o.labels.get("node").map(String::as_str) == Some(target.id.as_str())
                 && o.labels.get("path").map(String::as_str) == Some("params/audit_probe")
+                // Station audit **giữ lại lịch sử**, nên record của lần chạy trước
+                // cùng `node`+`path` vẫn còn và `.find()` sẽ ra record cũ. `value`
+                // là `now_secs()` nên duy nhất mỗi lần chạy — lọc theo nó mới
+                // tìm đúng record vừa ghi.
+                && o.labels.get("to").map(String::as_str) == Some(value.as_str())
         })
         .expect("phải có audit cho patch vừa rồi");
     assert_eq!(mine.labels.get("to").map(String::as_str), Some(value.as_str()));
@@ -89,11 +94,17 @@ async fn config_edit_is_audited_in_station() {
 async fn query_station_rejects_unbounded_window() {
     let Some(c) = connect().await else { return };
 
+    // Station phải **tồn tại**: test này kiểm tra guard cửa sổ, không phải kiểm tra
+    // station. Trước đây hardcode `binance-tsdb` — tên này không xuất hiện ở bất kỳ
+    // config nào trong repo, nên cả 3 assertion đều chết ở "Station not found"
+    // và guard cửa sổ chưa từng được kiểm tra.
+    let station = common::any_timeseries_station(&c).await;
+
     // Cửa sổ vô hạn (kiểu `from=0, to=MAX`) là cách chắc chắn nhất để treo
     // server: phải bị chặn kèm gợi ý, không clamp im lặng.
     let err = c
         .query_station(
-            "binance-tsdb",
+            &station,
             Some(0),
             Some(i64::MAX),
             None,
@@ -111,7 +122,7 @@ async fn query_station_rejects_unbounded_window() {
 
     // `limit` vô hạn cũng vậy.
     let err = c
-        .query_station("binance-tsdb", None, None, Some(1_000_000), None, None, None)
+        .query_station(&station, None, None, Some(1_000_000), None, None, None)
         .await
         .expect_err("limit vượt trần phải bị từ chối")
         .to_string();
@@ -120,9 +131,9 @@ async fn query_station_rejects_unbounded_window() {
     // `from=i64::MIN, to=i64::MAX` làm phép trừ tràn: debug panic, release wrap
     // thành số âm khiến guard im lặng BỎ QUA — đúng truy vấn vô hạn cần chặn.
     let err = c
-        .query_station("binance-tsdb", Some(i64::MIN), Some(i64::MAX), None, None, None, None)
+        .query_station(&station, Some(i64::MIN), Some(i64::MAX), None, None, None, None)
         .await
-        .expect_err("cửa sổ tràn số phải bị từ chối")
+        .expect_err("cửa sổ tràn số phải bị chặn")
         .to_string();
     assert!(
         err.contains("quá rộng để tính") || err.contains("vượt trần"),

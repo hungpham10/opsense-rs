@@ -4,7 +4,7 @@
 //!
 //! | Biến                     | Mặc định                       |
 //! |--------------------------|---------------------------------|
-//! | `OPSENSE_SERVE_URL`      | `http://127.0.0.1:8080`         |
+//! | `OPSENSE_SERVE_URL`      | `http://localhost:8080`        |
 //! | `OPSENSE_RUNNER_ECHO`    | `opsense-runner:50051`          |
 //! | `OPSENSE_RUNNER_PYTHON`  | `opsense-runner-python:50051`   |
 //! | `OPSENSE_RUNNER_JULIA`   | `opsense-runner-julia:50051`    |
@@ -178,4 +178,23 @@ pub async fn wait_for_stations(
         tokio::time::sleep(Duration::from_millis(1000)).await;
     }
     anyhow::bail!("no stations registered at {url} after {timeout_secs}s")
+}
+
+/// Station `timeseries` bất kỳ đang tồn tại, hoặc `AUDIT_STATION`.
+///
+/// Test về guard của `queryTimeseries` cần một station **thật** — tên station do
+/// config quyết định (`conf/opsense.conf.toml` khác `strategies/binance/config.toml`),
+/// nên hardcode tên sẽ chết ở "Station not found" và guard không bao giờ được kiểm.
+#[allow(dead_code)]
+pub async fn any_timeseries_station(c: &opsense::client::OpsenseClient) -> String {
+    c.status()
+        .await
+        .ok()
+        .and_then(|st| {
+            st.stations
+                .into_iter()
+                .find(|s| s.kind == "timeseries")
+                .map(|s| s.id)
+        })
+        .unwrap_or_else(|| opsense::api::AUDIT_STATION.to_string())
 }
