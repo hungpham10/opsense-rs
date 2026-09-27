@@ -3969,6 +3969,7 @@ dependencies = [
  "opsense-proto",
  "rand 0.8.8",
  "reqwest",
+ "rustls 0.23.45",
  "serde",
  "serde_json",
  "subtle",
