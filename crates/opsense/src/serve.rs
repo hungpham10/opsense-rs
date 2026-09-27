@@ -208,6 +208,27 @@ pub async fn validate_config(opt_path: Option<PathBuf>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Dọn đường dẫn socket trước khi `UnixListener::bind`.
+///
+/// Phải xoá được **cả hai** dạng: socket cũ (file) và thư mục baked sẵn vào image.
+/// `remove_dir_all` chỉ xoá thư mục — gặp socket nó trả `ENOTDIR`, và lỗi đó bị
+/// `let _ =` bỏ qua nên `bind` sau đó **luôn** `EADDRINUSE`.
+///
+/// Đây là lý do `docker restart opsense-serve` làm app crash-loop rồi supervisor
+/// bỏ (`FATAL` sau `startretries`), trong khi nginx vẫn sống và trả 500/502 nên
+/// trông như server hỏng chứ không phải app chết. Đo được: restart lần đầu ra
+/// `Address already in use (os error 98)`, `supervisorctl status` báo
+/// `app FATAL`; recreate container mới lên.
+async fn clear_socket_path(path: &std::path::Path) -> std::io::Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(md) if md.is_dir() => tokio::fs::remove_dir_all(path).await,
+        Ok(_) => tokio::fs::remove_file(path).await,
+        // Không có gì để dọn — đúng như mong muốn.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub async fn run() -> std::io::Result<()> {
     let telemetry_guard = init_telemetry();
 
@@ -228,9 +249,7 @@ pub async fn run() -> std::io::Result<()> {
         _ => {
             // Default: Unix socket mode
             let path = PathBuf::from("/var/run/axum");
-            // Path may be a stale file OR directory (e.g. baked into the
-            // Docker image); either way, clear it before binding.
-            let _ = tokio::fs::remove_dir_all(&path).await;
+            clear_socket_path(&path).await?;
             tokio::fs::create_dir_all(path.parent().unwrap()).await?;
 
             let make_service = router.into_make_service_with_connect_info::<UdsConnectInfo>();
@@ -279,5 +298,78 @@ async fn shutdown_signal() {
         },
         _ = terminate => {
         },
+    }
+}
+
+#[cfg(test)]
+mod socket_path_tests {
+    use super::clear_socket_path;
+
+    /// Socket **cũ** (file) phải bị xoá — `remove_dir_all` trả `ENOTDIR` nên
+    /// nếu chỉ dùng nó thì `bind` sau đó luôn `EADDRINUSE`.
+    #[test]
+    fn clears_stale_socket_file() {
+        let dir = std::env::temp_dir().join(format!("opsense-sock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("axum");
+
+        // Tạo socket rồi drop listener: file socket còn lại trên đĩa, đúng trạng
+        // thái sau khi container restart.
+        {
+            let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            drop(l);
+        }
+        assert!(path.exists(), "socket cũ phải còn trên đĩa trước khi dọn");
+
+        // Chứng minh luôn **vì sao** cần `remove_file`: `remove_dir_all` trả
+        // `ENOTDIR` trên socket, tức là code cũ bỏ sót socket rồi `bind` EADDRINUSE.
+        let rt_probe = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt_probe.block_on(tokio::fs::remove_dir_all(&path)).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotADirectory,
+            "remove_dir_all phải thất bại trên socket — nếu test này đổi thì \
+             `clear_socket_path` có thể gọn hơn, nhưng đừng bỏ nhánh socket"
+        );
+        assert!(path.exists(), "remove_dir_all phải để lại socket");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(clear_socket_path(&path)).expect("dọn socket cũ");
+        assert!(!path.exists(), "socket cũ phải bị xoá");
+
+        // Và bind lại được — đây mới là điều thực sự cần.
+        std::os::unix::net::UnixListener::bind(&path).expect("bind lại phải được");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Socket cũ nằm trong thư mục **đã bị xoá** thì không phải lỗi.
+    #[test]
+    fn missing_path_is_ok() {
+        let path = std::env::temp_dir().join("opsense-khong-ton-tai-abc/axum");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(clear_socket_path(&path)).expect("path không có là Ok");
+    }
+
+    /// Thư mục thật ở đúng vị trí socket (trường hợp baked vào image) vẫn phải xoá
+    /// được, không thì `bind` cũng EADDRINUSE.
+    #[test]
+    fn clears_stale_directory() {
+        let dir = std::env::temp_dir().join(format!("opsense-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(clear_socket_path(&dir)).expect("dọn thư mục cũ");
+        assert!(!dir.exists(), "thư mục cũ phải bị xoá");
     }
 }
