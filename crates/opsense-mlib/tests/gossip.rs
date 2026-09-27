@@ -25,13 +25,13 @@ fn join_registers_the_newcomer_and_roster_includes_the_seed() {
     assert_eq!(roster[0].node_id, "node-a");
     assert_eq!(roster[1].node_id, "node-z");
 
-    // Node mới dùng roster đó để biết cần ping ai.
+    // Node mới dùng roster đó để biết cần ping ai — nhưng không tự ping mình,
+    // nên danh sách ping của nó chỉ có seed.
     let mut z = gossip("node-z");
     for peer in seed.roster() {
         z.add_peer(&peer.url, &peer.node_id, T0);
     }
-    assert!(z.probe_targets().contains(&"http://node-a".to_string()));
-    assert!(z.probe_targets().contains(&"http://node-z".to_string()) || !z.probe_targets().contains(&"http://node-z".to_string()));
+    assert_eq!(z.probe_targets(), vec!["http://node-a".to_string()]);
 }
 
 /// Nghe thấy nhau thì view ổn định, chờ đủ settle thì mới coi là yên.
