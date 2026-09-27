@@ -201,13 +201,46 @@ station = true
    # kernel rebuild mỗi nến và mốc trôi liên tục.
    review_interval_secs = 900
    trading_candle_secs = 60
-   # Phí sàn **mỗi phía** (Binance spot taker = 0.001; chỉ 0.0005 nếu chiết khấu
-   # BNB/VIP). Lệnh limit vào rồi đóng ở TP trả 2 lần phí, nên bước giữa hai mốc
-   # lưới phải > 2 × fee_rate × giá — ở 0.001 và BTC ~84000 là > $168. Kernel
-   # lo mọi entry vi phạm (`portfolio.rs`), nên đặt nhỏ hơn thực tế ⇒ không lệnh
-   # nào được đặt mà nhìn từ ngoài chỉ thấy "chiến lược không vào lệnh".
-   fee_rate = 0.0005
+   # Phí sàn **mỗi phía** — Binance **USDⓈ-M Futures**, VIP 0:
+   #
+   #   maker (limit đặt xuống sổ, chờ khớp)  = 0.02% -> 0.0002
+   #   taker (lệnh khớp ngay)                 = 0.05% -> 0.0005  (+BNB -10% -> 0.00045)
+   #
+   # Đặt `0.0002` vì chiến lược này **chỉ đăng lệnh limit** ở mốc lưới, nên cả
+   # chân vào lẫn chân ra đều là maker. Đo được: lệnh `o1790478180-1` nằm sổ
+   # 22 phút mới khớp (mở 1790478180, đóng 1790479500) — đúng dấu hiệu limit
+   # được người khác khớp chứ không tự khớp ngay.
+   #
+   # `0.0005` là **taker**, tức xấu nhất: đặt vậy thì những lệnh khớp ngay bị
+   # tính phí cao hơn thực trả, và kernel lo cả những lệnh lẽ ra vẫn lãi
+   # (`expected_profit_pct <= roundtrip_fee_pct` ở `portfolio.rs`).
+   #
+   # Hệ quả trực tiếp, đo trên lệnh thật (entry 84481.77, TP 84392.41,
+   # notional 2341.50): gross 0.10578% —
+   #   fee 0.0005 (taker) -> pnl 0.00578% -> $0.135
+   #   fee 0.0002 (maker) -> pnl 0.06578% -> $1.54
+   #
+   # **Không có** funding fee trong mô hình: perpetual tính funding mỗi 8 giờ.
+   # Lệnh giữ 22 phút thì không đáng kể, nhưng lệnh nằm qua kỳ funding sẽ lệch
+   # khỏi PnL thật — và không có chỗ nào tính cái đó.
+   fee_rate = 0.0002
+   # Kelly fraction. Cảnh báo: với `sl_pct = 0.008` và tỉ lệ thắng **mô hình**
+   # 0.75 (dùng khi chưa đủ `grid_min_trades` lệnh đóng), Kelly ra 0.244 ->
+   # cược 6% vốn mỗi lệnh. Tỉ lệ 0.75 là **mô hình đoán**, không phải thống kê
+   # đo được — xem `grid.rhai` (`grid_min_trades`).
    kelly_fraction = 0.25
+   # Vốn cơ sở để định cỡ lệnh. `size` là **giá trị vị thế (notional) USD**, KHÔNG
+   # phải margin: qlib không có khái niệm leverage/margin nào, và PnL tính thẳng
+   # `size × pnl_pct` (`portfolio.rs`). Nên **đòn bẩy trên sàn không đổi PnL mà
+   # strategy tính** — nó chỉ quyết định giá thanh lýc:
+   #
+   #   cách thanh lýc ~ 1/leverage - mmr   (mmr BTCUSDT ~ 0.4%)
+   #     20x  -> 4.6%   => SL 0.8% về trước, an toàn
+   #    100x  -> 0.6%   => THANH LY TRUOC SL
+   #
+   # Nên ký <= 20x. Và đừng đọc `size` là "số tiền ký quỹ": đặt 20x với
+   # `size = 2341` nghĩa là đang cầm notional $46.830, PnL thật 20x con số
+   # trên — theo CẢ HAI chiều, lãi lẫn lỗ.
    base_capital = 100000.0
    # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.
    settlement_candles = 0
