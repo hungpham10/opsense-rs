@@ -297,6 +297,11 @@ fn rebuild(candles, prev, params) {
     let min_trades = knob(params, "min_trades", 3.0).to_int();
     let amp = knob(params, "level_edge_amp", 0.10).to_float();
     let sharpness = knob(params, "weight_sharpness", 4.0).to_float();
+    // `fee` đọc MỘT lần ở đây và dùng lại cho cả sàn sieve lẫn `spacing_floor`.
+    // Trước đây có hai chỗ đọc với default khác nhau (0.001 ở `spacing_floor`),
+    // nên đổi phí ở config mà quên một chỗ thì hai bên lệch nhau im lặng.
+    // Default 0.0002 = maker của Binance USDⓈ-M Futures VIP 0.
+    let fee = knob(params, "fee_rate", 0.0002).to_float();
 
     // Khoảng giá quan sát + interval trung vị (transition cần step thời gian).
     let lo = candles[0].l;
@@ -313,14 +318,47 @@ fn rebuild(candles, prev, params) {
 
     let interval = median_gap(candles);
 
-    let g = grid_fit_values(closes, lo, hi, max_bit);
+    // Sàn kích thước ô cho sieve, theo tỉ lệ giá: `step >= sàn × giá`.
+    //
+    // Vì sao: sieve **không biết phí**, nên nó ra lưới mịn nhất dữ liệu chịu
+    // được. Đo được trên chính strategy này (cửa sổ 1h, `grid_levels = 4`):
+    // sieve ra `step = $125.93` ⇒ mốc cách nhau $31.48, trong khi phí trọn vòng
+    // đòi $33.87 ⇒ **8/8 entry bị lo** mà không có log gì cả. Cùng code đó với
+    // cửa sổ 16h thì ra 4 ô rộng và vào được lệnh.
+    //
+    // Công thức `2 × fee_rate × levels`: mốc cách nhau `step / levels`, nên
+    // muốn mốc ≥ `min_profitable_step = 2 × fee × giá` thì `step` phải ≥
+    // `2 × fee × levels × giá`. Đúng bằng ngưỡng cũng không chắc (biên an toàn
+    // của `spacing_floor` bên dưới là ×1.2) nên lấy ×1.2 cho chắc.
+    let levels_f = levels.to_float();
+    let min_step_frac = 2.0 * fee * levels_f * 1.2;
+    let min_step_frac = if is_def_var("param_grid_min_step_frac")
+        && type_of(param_grid_min_step_frac) != "()" {
+        param_grid_min_step_frac.to_float()
+    } else {
+        min_step_frac
+    };
+
+    let g = grid_fit_values_cfg(closes, lo, hi, max_bit, min_step_frac);
     if type_of(g) == "()" { return []; }
+
+    // Cửa sổ hẹp hơn cả sàn thì sieve dừng ngay ở level 0 và trả lỏi 1 ô —
+    // mọi mốc vẫn quá gần để bù phí. Nói ra, đừng trả `[]` im lặng: "không có
+    // lệnh" và "không dựng được lưới có lãi" là hai chuyện khác nhau.
+    let step = grid_step(g);
+    let floor_usd = min_step_frac * (lo + hi) / 2.0;
+    if step < floor_usd - 0.0000001 {
+        print("grid: cửa sổ hẹp hơn phí — step " + step + " < sàn " + floor_usd
+            + " (biên độ " + (hi - lo) + ", giá " + ((lo + hi) / 2.0)
+            + ", fee " + fee + ", levels " + levels_f
+            + "). Không dựng được lưới nào đủ rộng để bù phí ⇒ không đặt được lệnh.");
+        return [];
+    }
     let t = transition_analysis(g, points, interval);
     if type_of(t) == "()" { return []; }
 
     let ups = up_probabilities(t);
     let downs = down_probabilities(t);
-    let step = grid_step(g);
     let n_cells = num_cells(g);
 
     // Bỏ ô nào không đủ rộng để mọi mốc trong ô còn lãi sau phí sàn.
@@ -335,7 +373,6 @@ fn rebuild(candles, prev, params) {
     // Bề rộng ô là `step`; `levels` mốc ⇒ `levels − 1` khoảng. Đo thật trên
     // Binance: `step` ~ $25, mốc cách nhau $6.28, còn phí đòi ≥ $168 ở
     // `fee_rate = 0.001` ⇒ mọi entry của mọi ô đều bị kernel lo (`placed=0`).
-    let fee = knob(params, "fee_rate", 0.001).to_float();
     // Biên an toàn 1.2: kernel so **nghiêm** (`expected_profit_pct > 2 × fee`),
     // nên bước đúng bằng ngưỡng cũng bị lo.
     let spacing_floor = min_profitable_step(fee, (lo + hi) / 2.0) * 1.2;

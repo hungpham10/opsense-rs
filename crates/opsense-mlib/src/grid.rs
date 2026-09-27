@@ -1,7 +1,8 @@
 /// Cấu hình cho thuật toán sàng phân cấp ([`AnalysisGrid::with_config`]).
 ///
 /// Điều khiển điều kiện dừng: vòng lặp sieve sẽ dừng khi mức tăng
-/// crossings đột biến vượt quá ngưỡng, báo hiệu overfitting.
+/// crossings đột biến vượt quá ngưỡng, báo hiệu overfitting — **hoặc** khi ô
+/// đã mịn tới mức không dùng được nữa ( [`Self::min_step_frac`]).
 #[derive(Debug, Clone, Copy)]
 pub struct SieveConfig {
     /// Hệ số nhân: dừng khi `delta > prev_delta * delta_multiplier`.
@@ -10,6 +11,26 @@ pub struct SieveConfig {
     /// Delta tuyệt đối tối thiểu để kích hoạt điều kiện dừng.
     /// Mặc định `0.02` (tỉ lệ crossings mới ≥2% tổng segments).
     pub min_abs_delta: f64,
+    /// Sàn kích thước ô, tính theo **tỉ lệ của giá**:
+    /// `step >= min_step_frac × (min + max) / 2`.
+    ///
+    /// Không có sàn (`None`, mặc định) thì sieve chọn ô mịn nhất mà dữ liệu
+    /// chịu được — và đó là chỗ hỏng của nó: sieve **không biết phí**, nên nó
+    /// ra một lưới mà mọi mốc đều quá gần để bù phí, rồi lớp trên lo sạch
+    /// lệnh mà không nói lý do.
+    ///
+    /// Đo được trên strategy binance, cửa sổ 1h, 4 mốc:
+    /// sieve ra `step = $125.93` ⇒ mốc cách nhau $31.48, trong khi phí trọn
+    /// vòng đòi $33.87 ⇒ **8/8 entry bị lo**. Đặt sàn
+    /// `min_step_frac = 2 × fee × levels` thì sieve dừng ở `step = $252`,
+    /// mốc cách nhau $63 > $33.87 ⇒ đặt được.
+    ///
+    /// **Tỉ lệ chứ không phải số USD tuyệt đối** vì phí là tỉ lệ theo giá: sàn
+    /// `$135` ở giá $84k thành vô nghĩa khi BTC lên $100k. Tỉ lệ thì tự bám.
+    ///
+    /// `None` vẫn hợp lệ: dùng cho phân tích thuần (`grid_fit`), nơi "ô mịn
+    /// nhất" mới đúng.
+    pub min_step_frac: Option<f64>,
 }
 
 impl Default for SieveConfig {
@@ -17,6 +38,10 @@ impl Default for SieveConfig {
         Self {
             delta_multiplier: 1.3,
             min_abs_delta: 0.02,
+            // Không sàn mặc định: `grid_fit` (phân tích thuần) cần "ô mịn
+            // nhất", đặt sàn ở đây sẽ đổi hành vi của nó. Chỗ dùng lưới để
+            // **đặt lệnh** thì caller truyền sàn tường minh.
+            min_step_frac: None,
         }
     }
 }
@@ -68,6 +93,21 @@ impl Default for SieveConfig {
                 let pts: Vec<f64> = values.iter().filter_map(|v| v.clone().try_cast::<f64>()).collect();
                 if pts.is_empty() { return rhai::Dynamic::UNIT; }
                 let grid = AnalysisGrid::new(&pts, min, max, max_bit as usize);
+                rhai::Dynamic::from(grid)
+            },
+            // Như `grid_fit_values` nhưng có **sàn kích thước ô** theo tỉ lệ
+            // giá (`min_step_frac`). Dùng khi lưới đó để **đặt lệnh**: sieve không
+            // biết phí, nên không có sàn thì nó ra một lưới mà mọi mốc đều quá
+            // gần để bù phí và lớp trên lo sạch lệnh im lặng. Xem
+            // `SieveConfig::min_step_frac`.
+            "grid_fit_values_cfg" -> |values: rhai::Array, min: f64, max: f64, max_bit: i64, min_step_frac: f64| -> rhai::Dynamic {
+                let pts: Vec<f64> = values.iter().filter_map(|v| v.clone().try_cast::<f64>()).collect();
+                if pts.is_empty() { return rhai::Dynamic::UNIT; }
+                let grid = AnalysisGrid::with_config(&pts, min, max, max_bit as usize, &SieveConfig {
+                    delta_multiplier: SieveConfig::default().delta_multiplier,
+                    min_abs_delta: SieveConfig::default().min_abs_delta,
+                    min_step_frac: Some(min_step_frac),
+                });
                 rhai::Dynamic::from(grid)
             }
         )
@@ -218,6 +258,18 @@ impl AnalysisGrid {
                 continue;
             }
 
+            // Sàn kích thước ô. `step` **giảm dần** khi `level` tăng, nên hợp
+            // đồng một lần là `break` chứ không phải `continue` — các level mịn
+            // hơn cũng dưới sàn. `break` ở level 0 (biên độ cửa sổ nhỏ hơn sàn
+            // ngay từ đầu) thì `best` giữ `step = capacity` khởi tạo: lưới 1 ô,
+            // và caller tự phát hiện bằng cách so `step` với sàn.
+            if let Some(frac) = config.min_step_frac {
+                let ref_price = (min + max) / 2.0;
+                if step < frac * ref_price {
+                    break;
+                }
+            }
+
             let shift = max_bit - level;
             let crossings = {
                 let mut c = 0;
@@ -348,6 +400,7 @@ mod tests {
             &SieveConfig {
                 delta_multiplier: 1.05,
                 min_abs_delta: 0.001,
+                min_step_frac: None,
             },
         );
         assert!(
@@ -356,6 +409,107 @@ mod tests {
             coarse.num_cells()
         );
         assert!(coarse.step > 100.0 / 4096.0);
+    }
+
+    #[test]
+    fn min_step_frac_stops_sieve_before_cells_get_unusable() {
+        // Đúng tình huống đo được trên strategy binance (cửa sổ 1h, giá ~84.7k):
+        // không có sàn thì sieve ra ô quá mịn, mà mọi mốc đều quá gần để bù phí.
+        let values: Vec<f64> = (0..60)
+            .map(|i| 84_600.0 + (i % 7) as f64 * 40.0) // biên độ ~240
+            .collect();
+        let (lo, hi) = (84_600.0, 84_840.0);
+
+        let loose = AnalysisGrid::with_config(
+            &values,
+            lo,
+            hi,
+            20,
+            &SieveConfig {
+                delta_multiplier: 1.3,
+                min_abs_delta: 0.02,
+                min_step_frac: None,
+            },
+        );
+        // 4 mốc ⇒ mốc cách nhau step/4. Phí trọn vòng 2×0.0002×84.7k ≈ $33.9.
+        let fee_floor = 2.0 * 0.0002 * (lo + hi) / 2.0;
+        assert!(
+            loose.step / 4.0 < fee_floor,
+            "không sàn thì phải ra lưới KHÔNG đủ rộng — nếu không thì test này \
+             không còn kiểm gì (step/4 = {} vs sàn phí {fee_floor})",
+            loose.step / 4.0
+        );
+
+        let floored = AnalysisGrid::with_config(
+            &values,
+            lo,
+            hi,
+            20,
+            &SieveConfig {
+                delta_multiplier: 1.3,
+                min_abs_delta: 0.02,
+                // 2 × fee × levels: sàn cho **step**, mốc cách nhau step/levels
+                // nên đây là điều kiện đúng để mốc đủ rộng.
+                min_step_frac: Some(2.0 * 0.0002 * 4.0),
+            },
+        );
+        assert!(
+            floored.step >= 2.0 * 0.0002 * 4.0 * (lo + hi) / 2.0,
+            "có sàn thì step phải ≥ ngưỡng, thực tế {}",
+            floored.step
+        );
+        assert!(
+            floored.step / 4.0 > fee_floor,
+            "hệ quả cần đạt: mốc cách nhau phải VƯỢT phí, thực tế {} vs {fee_floor}",
+            floored.step / 4.0
+        );
+        assert!(
+            floored.step >= loose.step,
+            "sàn không được làm lưới mịn hơn: {} < {}",
+            floored.step,
+            loose.step
+        );
+    }
+
+    /// Biên độ cửa sổ nhỏ hơn sàn ngay từ đầu: không level nào thoả, sieve dừng
+    /// ngay và trả lưới 1 ô. **Không** được sập, và caller vẫn đọc được `step`
+    /// để tự so với sàn rồi cảnh báo.
+    #[test]
+    fn min_step_frac_unreachable_returns_single_cell_not_panic() {
+        let values = vec![100.0, 100.5, 101.0, 100.2];
+        let grid = AnalysisGrid::with_config(
+            &values,
+            100.0,
+            101.0,
+            20,
+            &SieveConfig {
+                delta_multiplier: 1.3,
+                min_abs_delta: 0.02,
+                min_step_frac: Some(0.5), // sàn $50 trong khi cả cửa sổ chỉ $1
+            },
+        );
+        assert_eq!(grid.num_cells(), 1, "phải là 1 ô, không phải sập");
+        assert!(grid.step.is_finite() && grid.step > 0.0);
+    }
+
+    /// Không sàn thì hành vi **phải y hệt trước đây** — `min_step_frac: None`
+    /// là mặc định và `grid_fit` dùng cho phân tích thuần.
+    #[test]
+    fn no_min_step_frac_keeps_old_behaviour() {
+        let values: Vec<f64> = (0..60)
+            .map(|i| 84_600.0 + (i % 7) as f64 * 40.0)
+            .collect();
+        let (lo, hi) = (84_600.0, 84_840.0);
+        let with_default = AnalysisGrid::with_config(
+            &values,
+            lo,
+            hi,
+            20,
+            &SieveConfig::default(),
+        );
+        let without = AnalysisGrid::new(&values, lo, hi, 20);
+        assert_eq!(with_default.step, without.step);
+        assert_eq!(with_default.num_cells(), without.num_cells());
     }
 
     #[test]
