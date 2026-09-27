@@ -86,6 +86,7 @@ backend = "memory"
 [[pipeline.components]]
 type = "http_origin"
 id = "history"
+description = "Nến 1m lịch sử từ Binance /klines (1000 nến ≈ 16.6h), tự quét mỗi 60s. Mỗi nến = 5 obs, `labels.field` ∈ o/h/l/c/v, `metric_id` = symbol. Chỉ đọc, không phải nguồn sinh lệnh."
 url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1000"
 # Nhịp quét — đồng thời là **độ trễ tối đa** cho một lần đọc. Nhịp phải nhỏ hơn
 # `resolution` của nến để dữ liệu không tụt nhiều hơn một nến; 60s khớp nến 1m.
@@ -101,11 +102,13 @@ interval_secs = 60
 [[pipeline.components]]
 type = "websocket_2_json"
 id = "tick-feed"
+description = "Stream aggTrade realtime từ Binance. Pass-through, không giữ gì. `trigger` của nó là `tick` — grid bỏ qua để không đè nến do tick_2_candle gom."
 uri = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
 
 [[pipeline.components]]
 type = "json_2_json"
 id = "tick-map"
+description = "Đổi mỗi tick thành observation: `ts` = E (ms), `metric_id` = s (symbol), `value` = p (f64). Không có station riêng — chỉ là bước chuyển đổi cho tick-candle."
 inputs = ["tick-feed"]
 
    [pipeline.components.constants]
@@ -138,6 +141,7 @@ inputs = ["tick-feed"]
 [[pipeline.components]]
 type = "tick_2_candle"
 id = "tick-candle"
+description = "Gom tick thành nến bucket 1m, **chỉ ghi khi nến đã đóng** (thấy tick ở bucket kế tiếp). 5 obs mỗi nến, `labels.field` ∈ o/h/l/c/v với `v` = SỐ TICK đã gộp (không phải volume thật). Tick chết ⇒ không nến nào đóng."
 inputs = ["tick-map"]
 resolution = "1m"
 symbol = "BTCUSDT"
@@ -149,6 +153,7 @@ station = true
 [[pipeline.components]]
 type = "rhai_transform"
 id = "grid"
+description = "Đọc nến, dựng lưới, đặt lệnh. **Đây là station cần query.** Lọc server-side theo `signal`: `order` = lệnh (`labels.status` open/closed, `labels.dtype` long/short, `labels.tp`/`sl`/`size`); `summary` + `labelKind=trading_step` = cursor T+N; `summary` + `labelKind=plan` = lưới đang dùng (`labels.cells` = JSON); `summary` + `labelKind=snapshot` = ảnh chụp grid mỗi nến."
 script_path = "strategies/binance/grid.rhai"
 inputs = ["tick-map", "tick-candle"]
 # Terminal — station của node này (lệnh, snapshot, plan, cursor) là nơi duy

@@ -68,9 +68,10 @@ pub async fn query_timeseries(
     limit: Option<i64>,
     signal: Option<&str>,
     label_kind: Option<&str>,
+    status: Option<&str>,
 ) -> Result<String, String> {
     client
-        .query_station(node, from_ts, to_ts, limit, signal, label_kind)
+        .query_station(node, from_ts, to_ts, limit, signal, label_kind, status)
         .await
         .map_err(|e| format!("{e:#}"))
         .and_then(|c| json_dump(&c).map_err(|e| format!("{e}")))
@@ -82,7 +83,9 @@ pub async fn query_timeseries(
 /// Cursor cố ý **không** lọc theo `signal` được: nó là `signal = "summary"`, nên
 /// lọc `signal = "order"` sẽ âm thầm rơi mất cursor — tức mất đúng thứ agent
 /// cần để biết "T+N đã chạy tới nến nào". Vì vậy lấy cả hai loại rồi lọc ở đây.
-/// `status` chỉ áp cho lệnh (cursor không có status).
+/// `status` chỉ áp cho lệnh (cursor không có status) và **đã** lọc server-side
+/// qua tham số `status` của `queryTimeseries` — trước đây phải kéo hết về mới
+/// lọc được, nên `limit` cắt cụt trước khi lọc.
 pub async fn orders(
     client: &OpsenseClient,
     node: &str,
@@ -90,31 +93,22 @@ pub async fn orders(
     from_ts: Option<i64>,
     to_ts: Option<i64>,
 ) -> Result<String, String> {
-    let raw = query_timeseries(client, node, from_ts, to_ts, Some(2000), None, None).await?;
+    let raw = query_timeseries(client, node, from_ts, to_ts, Some(2000), None, None, status).await?;
     let mut v: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| format!("query result: {e}"))?;
     if let Some(obs) = v
         .get_mut("observations")
         .and_then(|o| o.as_array_mut())
     {
+        // `status` đã lọc **server-side** (tham số `status` của `queryTimeseries`).
+        // Ở đây chỉ còn: giữ cursor T+N và bỏ quan sát không phải lệnh.
         obs.retain(|o| {
             let kind = o.get("labels").and_then(|l| l.get("kind")).and_then(|k| k.as_str());
             let signal = o.get("signal").and_then(|s| s.as_str());
             if kind == Some("trading_step") {
                 return true; // cursor T+N — không có `status`
             }
-            if signal != Some("order") {
-                return false;
-            }
-            match status {
-                None => true,
-                // Chỉ lệnh mới mang `labels.status`.
-                Some(want) => o
-                    .get("labels")
-                    .and_then(|l| l.get("status"))
-                    .and_then(|s| s.as_str())
-                    == Some(want),
-            }
+            signal == Some("order")
         });
     }
     json_dump(&v).map_err(|e| format!("{e}"))

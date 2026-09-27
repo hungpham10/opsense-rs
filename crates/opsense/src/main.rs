@@ -105,6 +105,11 @@ enum Commands {
         /// Lọc theo `labels.kind`: `trading_step`, `snapshot`, …
         #[arg(long)]
         label_kind: Option<String>,
+        /// Lọc theo `labels.status` — KHÁC `label_kind` (lọc `labels.kind`).
+        /// Lệnh giao dịch mang `status` (`open`/`closed`) và không có `kind`,
+        /// nên muốn lệnh đã đóng thì dùng cờ này, không phải `--label-kind`.
+        #[arg(long)]
+        status: Option<String>,
         #[arg(long)]
         endpoint: Option<String>,
     },
@@ -282,9 +287,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {    dotenvy::dotenv().ok();
                     limit,
                     signal,
                     label_kind,
+                    status,
                     endpoint,
                 }) => {
-                    if let Err(e) = opsense::cli::query(endpoint, &node, from, to, limit, signal, label_kind).await {
+                    if let Err(e) = opsense::cli::query(endpoint, &node, from, to, limit, signal, label_kind, status).await {
                         eprintln!("query error: {e}");
                         std::process::exit(1);
                     }

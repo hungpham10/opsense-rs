@@ -121,6 +121,10 @@ internal-runner-tests = []
 opsense-mlib = { path = "../opsense-mlib", features = ["json", "parquet"] }
 object_store = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# Test parse `[[pipeline.components]]` tu TOML that. `opsense-core` co
+# `config` nhung crate nay thi khong, ma `Config` o day chi deserialize
+# duoc tu TOML thuan.
+toml = "1"
 tempfile = "3"
 futures-util = { workspace = true }
 rexpect = "0.5"

@@ -105,6 +105,11 @@ impl AppState {
         {
             let mut runtime = runtime.write().await;
 
+            // Mô tả node phải có mặt **trước** lần `status()` đầu tiên, và
+            // `runtime.reload` có thể chạy script đọc context ngay trong
+            // `prepare` — nên đặt trước cả `set_context`.
+            context.set_node_descriptions(node_descriptions(config)).await;
+
             runtime.set_context(context.clone());
             runtime
                 .reload(
@@ -226,7 +231,7 @@ pub fn pipeline_from_config(cfg: &Config) -> Result<Vec<Arc<dyn Component>>, Err
             .components
             .iter()
             .map(|value| {
-                serde_json::from_value::<Box<dyn Component>>(value.clone())
+                serde_json::from_value::<Box<dyn Component>>(strip_description(value.clone()))
                     .map(Arc::from)
                     .map_err(|e| {
                         Error::new(
@@ -238,6 +243,55 @@ pub fn pipeline_from_config(cfg: &Config) -> Result<Vec<Arc<dyn Component>>, Err
             .collect(),
         _ => Ok(AppState::default_pipeline(cfg)),
     }
+}
+
+/// Bỏ `description` khỏi JSON của component **trước** khi typetag deserialize.
+///
+/// Không bắt buộc — serde mặc định bỏ qua field lạ — nhưng macro đặt
+/// `#[serde(deny_unknown_fields)]` lên mọi component struct
+/// (`opsense-macros/src/configurable_component.rs:218`), nên `description` còn
+/// trong JSON sẽ làm hỏng **mọi** node chứ không chỉ node đó. Bóc ở đây thay
+/// vì sửa macro, vì `description` là metadata của deployment chứ không phải
+/// field của code.
+fn strip_description(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("description");
+    }
+    value
+}
+
+/// `id` → `description` từ `[[pipeline.components]]`.
+///
+/// Hàm thuần trên mảng JSON thay vì trên `Config`, để test được không cần
+/// parser TOML — và để `pipeline_from_config` / `node_descriptions` chắc chắn
+/// đọc **cùng một** nguồn, không lệch nhau.
+#[must_use]
+pub fn node_descriptions_from(components: &[serde_json::Value]) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for value in components {
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
+        let (Some(id), Some(desc)) = (
+            obj.get("id").and_then(serde_json::Value::as_str),
+            obj.get("description").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let desc = desc.trim();
+        if !desc.is_empty() {
+            out.insert(id.to_string(), desc.to_string());
+        }
+    }
+    out
+}
+
+/// `id` → `description` của pipeline trong config.
+#[must_use]
+pub fn node_descriptions(cfg: &Config) -> BTreeMap<String, String> {
+    cfg.pipeline
+        .as_ref()
+        .map_or_else(BTreeMap::new, |p| node_descriptions_from(&p.components))
 }
 
 pub async fn health_check(State(_): State<AppState>) -> Json<serde_json::Value> {
@@ -256,6 +310,14 @@ pub struct Node {
     pub kind: String,
 
     pub inputs: Vec<String>,
+
+    /// Mô tả do người viết pipeline khai (`description` trong
+    /// `[[pipeline.components]]`), nói node này **chứa dữ liệu gì** — thứ mà
+    /// `type` không nói được. `None` khi node không khai mô tả.
+    ///
+    /// Đây là đường để LLM (qua MCP `opsense_status`) biết nên query station
+    /// nào, hỏi `signal`/`labels` nào, thay vì đoán tên node.
+    pub description: Option<String>,
 }
 
 #[derive(SimpleObject, Clone, Debug)]
@@ -276,10 +338,15 @@ impl AppState {
     pub async fn status(&self) -> Status {
         let runtime = self.runtime.read().await;
         let topology = runtime.topology();
+        // Mô tả đọc **ngoài** khoá runtime: nó nằm ở `Context`, không phải ở
+        // node. Nếu đọc trong khoá này thì `Context` (lock riêng) sẽ bị khoá
+        // runtime giữ suốt lúc await.
+        let descriptions = self.context.node_descriptions().await;
 
         let nodes = topology
             .into_iter()
             .map(|n| Node {
+                description: descriptions.get(&n.id).cloned(),
                 id: n.id,
                 kind: n.component_type,
                 inputs: n.inputs,
@@ -371,5 +438,103 @@ impl AppState {
         let ts = obs.ts;
         let st = station.read().await;
         st.update_range(std::slice::from_ref(&obs), ts, ts, ts);
+    }
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::{node_descriptions, node_descriptions_from, pipeline_from_config, strip_description};
+    use opsense_core::Config;
+    use serde_json::json;
+
+    fn parse(toml: &str) -> Config {
+        toml::from_str(toml).expect("config phải parse")
+    }
+
+    /// `description` phải **không** làm hỏng deserialize.
+    ///
+    /// Đây là test khoá cho cả tính năng lẫn lý do nó phải là metadata chứ không
+    /// phải field của struct: macro `#[source]/#[transform]/#[sink]` đặt
+    /// `#[serde(deny_unknown_fields)]` lên **mọi** component struct
+    /// (`opsense-macros/src/configurable_component.rs:218`), nên nếu ai đó xoá
+    /// `strip_description` thì **mọi** node trong **mọi** config chết — chứ
+    /// không chỉ node nào có mô tả. Test đi từ TOML thật cho tới
+    /// `Runtime::reload`, tức đúng đường lúc boot.
+    #[test]
+    fn description_does_not_break_component_deserialize() {
+        let cfg = parse(
+            r#"
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 10
+description = "nhịp thời gian"
+"#,
+        );
+        let comps = pipeline_from_config(&cfg).expect("pipeline phải build được");
+        assert_eq!(comps.len(), 1, "node có description vẫn phải build được");
+    }
+
+    /// Mô tả phải lấy được từ TOML, còn node không khai thì không có entry.
+    #[test]
+    fn reads_description_from_config() {
+        let cfg = parse(
+            r#"
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+description = "nhịp thời gian"
+
+[[pipeline.components]]
+type = "null"
+id = "sink"
+inputs = ["clock"]
+"#,
+        );
+        let map = node_descriptions(&cfg);
+        assert_eq!(map.get("clock").map(String::as_str), Some("nhịp thời gian"));
+        assert!(
+            !map.contains_key("sink"),
+            "node không khai description thì không có entry, không được điền rỗng"
+        );
+    }
+
+    /// Mô tả trắng coi như không khai — nếu giữ chuỗi rỗng thì client phân biệt
+    /// không được "chưa ai mô tả" với "mô tả rỗng".
+    #[test]
+    fn blank_description_is_treated_as_absent() {
+        let map = node_descriptions_from(&[
+            json!({ "id": "a", "description": "   " }),
+            json!({ "id": "b", "description": "" }),
+            json!({ "id": "c", "description": 7 }),
+            json!({ "description": "không có id" }),
+            json!("không phải object"),
+        ]);
+        assert!(map.is_empty(), "mô tả trắng/sai kiểu phải bị bỏ: {map:?}");
+    }
+
+    /// `description` phải bị bóc khỏi JSON, **không** lọt vào component.
+    #[test]
+    fn strip_description_removes_only_that_key() {
+        let out = strip_description(json!({
+            "type": "clock", "id": "clock", "interval_secs": 10, "description": "x",
+        }));
+        assert!(out.get("description").is_none());
+        assert_eq!(out["id"], "clock");
+        assert_eq!(out["interval_secs"], 10);
+    }
+
+    /// Không có `[pipeline]` thì không vỡ — `AppState` có pipeline mặc định
+    /// (`clock → null`) và cũng không có mô tả nào.
+    #[test]
+    fn no_pipeline_yields_no_descriptions() {
+        let cfg = parse("[engine]
+poll_interval_seconds = 10
+");
+        assert!(node_descriptions(&cfg).is_empty());
+        assert_eq!(
+            pipeline_from_config(&cfg).expect("default build được").len(),
+            2
+        );
     }
 }

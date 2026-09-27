@@ -60,6 +60,11 @@ pub struct QueryTimeseriesParams {
     /// Lọc server-side theo `labels.kind`, vd `"trading_step"`, `"snapshot"`.
     #[schemars(description = "Filter by labels.kind, e.g. trading_step")]
     pub label_kind: Option<String>,
+    /// Lọc server-side theo `labels.status` — khác `label_kind` (lọc `labels.kind`).
+    /// Lệnh giao dịch mang `status` (`open`/`closed`) và **không** có `kind`, nên
+    /// muốn lệnh đã đóng thì dùng tham số này, không phải `label_kind`.
+    #[schemars(description = "Filter by labels.status, e.g. open|closed (orders only)")]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -121,7 +126,14 @@ impl OpsenseMcpServer {
         }
     }
 
-    #[tool(description = "Snapshot of the current pipeline (nodes + stations).")]
+    /// **Gọi cái này trước khi query bất cứ thứ gì.**
+    ///
+    /// Mỗi node trả về `description` — do người viết pipeline khai, nói node đó
+    /// **chứa dữ liệu gì** và ở đâu. Đó là cách duy nhất biết nên hỏi station
+    /// nào, với `signal`/`labels` nào, thay vì đoán theo tên.
+    #[tool(
+        description = "Snapshot of the current pipeline: nodes (id, type, inputs, description of what data each node holds) + stations. Call this FIRST to decide which station to query and with which filters — a node's `description` says what it actually contains in THIS deployment."
+    )]
     async fn opsense_status(&self) -> Result<String, String> {
         tools::status(&self.client).await
     }
@@ -161,7 +173,7 @@ impl OpsenseMcpServer {
     }
 
     #[tool(
-        description = "Query observations from a TimeseriesStation. Bounded server-side (limit cap 10000, window cap 30 days) and reports `truncated`. Filter server-side with `signal` / `label_kind` instead of pulling everything and filtering yourself."
+        description = "Query observations from a TimeseriesStation. Bounded server-side (limit cap 10000, window cap 30 days) and reports `truncated`. Filter server-side with `signal` / `label_kind` / `status` instead of pulling everything and filtering yourself. NOTE `label_kind` filters `labels.kind` while `status` filters `labels.status` — trade orders carry `status` (open/closed) and have no `kind`, so use `status` for closed orders. Call opsense_status first to see which node holds what."
     )]
     async fn opsense_query_timeseries(
         &self,
@@ -175,6 +187,7 @@ impl OpsenseMcpServer {
             p.limit,
             p.signal.as_deref(),
             p.label_kind.as_deref(),
+            p.status.as_deref(),
         )
         .await
     }
@@ -183,7 +196,7 @@ impl OpsenseMcpServer {
     /// `signal = "order"` (`labels.status = open|closed`) và cursor T+N
     /// (`labels.kind = "trading_step"`).
     #[tool(
-        description = "Trading state in a station: orders (labels.status open/closed) with optional status filter. One call instead of pulling the station and filtering by hand."
+        description = "Trading state in a station: orders (labels.status open/closed) plus the T+N cursor (labels.kind trading_step), with optional status filter applied server-side. One call instead of pulling the station and filtering by hand."
     )]
     async fn opsense_orders(
         &self,
