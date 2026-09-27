@@ -59,13 +59,6 @@ rustls = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 
-# Test mesh cần feature `cluster`; khai `required-features` để build không bật
-# feature vẫn xanh thay vì hỏng vì không tìm thấy module.
-
-
-
-
-
 # Test cluster cần feature tương ứng; `required-features` để build không bật
 # feature vẫn xanh thay vì hỏng vì không tìm thấy module.
 [[test]]
