@@ -464,21 +464,47 @@ mod tests {
     }
 
     /// `load_bearer_from_env` đọc từ `OPSENSE_ACCESS_TOKEN` nếu có.
+    ///
+    /// Không xoá `~/.config/opsense/token`: env var được ưu tiên trước file nên
+    /// xoá là thừa, và nó **xoá mất token thật của người dùng** mỗi lần chạy
+    /// `cargo test --lib` — phải đăng nhập lại Dex sau đó. Test cũ còn dựa vào việc
+    /// xoá file để "không bị pollute", nhưng file không ảnh hưởng kết quả assert.
     #[test]
     fn test_load_bearer_from_env() {
-        // Clear any existing token file that could pollute this test.
-        if let Some(home) = std::env::var_os("HOME") {
-            let token_path = std::path::PathBuf::from(home)
-                .join(".config")
-                .join("opsense")
-                .join("token");
-            let _ = std::fs::remove_file(&token_path);
-        }
         // SAFETY: Test chạy đơn luồng, không race với threads khác.
         unsafe { std::env::set_var("OPSENSE_ACCESS_TOKEN", "test-token-abc") };
         let loaded = load_bearer_from_env();
         unsafe { std::env::remove_var("OPSENSE_ACCESS_TOKEN") };
         assert_eq!(loaded.as_deref(), Some("test-token-abc"));
+    }
+
+    /// File fallback vẫn đọc được (không env var) — và phải **không** ghi file.
+    ///
+    /// Dùng `HOME` trỏ vào thư mục tạm để không đụng `~/.config/opsense/token` thật.
+    #[test]
+    fn test_load_bearer_from_token_file() {
+        let dir = std::env::temp_dir().join(format!("opsense-token-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".config/opsense")).unwrap();
+        std::fs::write(dir.join(".config/opsense/token"), "file-token-xyz\n").unwrap();
+        let path = dir.join(".config/opsense/token");
+        let before = std::fs::metadata(&path).unwrap().len();
+
+        // SAFETY: các test trong crate này chạy đơn luồng về biến môi trường.
+        unsafe {
+            std::env::remove_var("OPSENSE_ACCESS_TOKEN");
+            std::env::set_var("HOME", &dir);
+        }
+        let loaded = load_bearer_from_env();
+        let home = std::env::var("HOME").unwrap();
+        unsafe { std::env::set_var("HOME", home) };
+
+        assert_eq!(loaded.as_deref(), Some("file-token-xyz"), "phải trim newline");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            before,
+            "đọc token không được ghi lại file"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Empty env var trả về None (trừ khi file fallback có giá trị).
