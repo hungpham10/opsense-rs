@@ -77,6 +77,10 @@ pub struct EditResult {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SetAttributeResult {
     pub ok: bool,
+    /// `rename` bắt buộc: đây là tên field **trong JSON do GraphQL trả về**
+    /// (async-graphql camelCase hoá), không phải tên field serde — cùng lớp lỗi
+    /// với `Observation.metric_id`.
+    #[serde(rename = "envOverrideActive")]
     pub env_override_active: bool,
 }
 
@@ -535,6 +539,80 @@ mod tests {
             assert_eq!(comps[0].kind, "Source", "`type` phải map vào `kind`");
         });
         let _ = c;
+    }
+
+    /// Hồi quy: tên field trong DTO phải là tên field **server thật trả về**.
+    ///
+    /// Không có `rename_all = "camelCase"` cho serde ở đây vì DTO phải giữ tên
+    /// field Rust để đọc được trong code; chỉ field nào GraphQL camelCase hoá thì
+    /// `rename` riêng. Hai chỗ đã sai theo kiểu này và cả hai đều làm tool chết
+    /// với `missing field` dù response đúng: `Observation.metric_id` (server trả
+    /// `metricId`) và `SetAttributeResult.env_override_active` (server trả
+    /// `envOverrideActive`).
+    ///
+    /// Body dưới đây chép **nguyên văn** từ `opsense-serve` thật, nên test đỏ
+    /// ngay nếu tên field lệch.
+    #[test]
+    fn dto_field_names_match_real_server_response() {
+        use std::io::{Read, Write};
+
+        // Ba body chép **nguyên văn** từ `opsense-serve` thật, theo đúng thứ tự
+        // method dưới đây gọi.
+        let bodies = [
+            // mutation{setAttribute(name:"p",value:"1"){ok envOverrideActive}}
+            r#"{"data":{"setAttribute":{"ok":true,"envOverrideActive":false}}}"#,
+            // queryTimeseries(limit:1) — `metricId` camelCase.
+            r#"{"data":{"queryTimeseries":{"observations":[
+                 {"ts":1790512260,"metricId":"BTCUSDT","kind":"metric","signal":"summary",
+                  "value":84970.58,"labels":{"grid_cell":"1"}}],
+                 "truncated":false,"scanned":1}}}"#,
+            // status — `type` -> `kind`, `description` optional.
+            r#"{"data":{"status":{
+                 "nodes":[{"id":"grid","type":"Transform","inputs":["tick-map"],
+                           "description":"Đọc nến, dựng lưới"}],
+                 "stations":[{"id":"grid","kind":"timeseries"}]}}}"#,
+        ];
+        let bodies: Vec<String> = bodies.iter().map(|s| s.to_string()).collect();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for body in bodies {
+                let Ok((mut sock, _)) = listener.accept() else { return };
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async {
+            let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+
+            let r = c.set_attribute("p", "1").await.expect("setAttribute phải decode được");
+            assert!(r.ok);
+            assert!(!r.env_override_active, "envOverrideActive phải map vào `env_override_active`");
+
+            let r = c.query_station("grid", None, None, Some(1), None, None, None).await
+                .expect("queryTimeseries phải decode được");
+            assert_eq!(r.observations.len(), 1);
+            assert_eq!(r.observations[0].metric_id, "BTCUSDT", "`metricId` phải map vào `metric_id`");
+            assert_eq!(r.observations[0].labels.get("grid_cell").map(String::as_str), Some("1"));
+            assert_eq!(r.scanned, 1);
+
+            let r = c.status().await.expect("status phải decode được");
+            assert_eq!(r.nodes[0].kind, "Transform", "`type` phải map vào `kind`");
+            assert_eq!(r.nodes[0].description.as_deref(), Some("Đọc nến, dựng lưới"));
+            assert_eq!(r.stations[0].kind, "timeseries");
+        });
     }
 
     /// Hồi quy: tên biến trong `variables` phải khớp `$…` khai trong query.
