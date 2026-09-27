@@ -49,8 +49,9 @@ pub struct NodeSummary {
     pub kind: String,
     pub inputs: Vec<String>,
     /// Có mặt ở đây là bắt buộc: selection set của `status()` ghi **tường minh**
-    /// (`nodes { id type inputs }`), nên quên field là MCP không thấy, chứ không
-    /// phải lỗi schema.
+    /// (`nodes { id type inputs description }`), nên quên field là MCP không thấy,
+    /// chứ không phải lỗi schema. `default` vì `reload`/`patchComponent` cũng dùng
+    /// `NodeSummary` và server có thể không gửi field này.
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -352,7 +353,7 @@ impl OpsenseClient {
     pub async fn reload(&self, components: Vec<ComponentInput>) -> anyhow::Result<EditResult> {
         const MUTATION: &str = r#"
             mutation($components: [ComponentInput!]!) {
-                reload(components: $components) { reloaded nodes { id type inputs } }
+                reload(components: $components) { reloaded nodes { id type inputs description } }
             }
         "#;
         #[derive(Serialize)]
@@ -375,7 +376,7 @@ impl OpsenseClient {
     ) -> anyhow::Result<EditResult> {
         const MUTATION: &str = r#"
             mutation($id: String!, $path: String!, $value: String!) {
-                patchComponent(id: $id, path: $path, value: $value) { reloaded nodes { id type inputs } }
+                patchComponent(id: $id, path: $path, value: $value) { reloaded nodes { id type inputs description } }
             }
         "#;
         #[derive(Serialize)]
