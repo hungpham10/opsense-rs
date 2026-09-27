@@ -62,13 +62,13 @@ enum Commands {
     /// Run the MCP stdio server (Model Context Protocol client tooling).
     ///
     /// Thin client that speaks to a running `opsense serve` over GraphQL at
-    /// `OPSENSE_GRAPHQL_URL` (default `http://127.0.0.1:8080/graphql`).
+    /// `OPSENSE_GRAPHQL_URL` (default `http://localhost:8080/api/repl/graphql`).
     Mcp {},
 
     /// Print pipeline topology + registered stations (1 GraphQL round-trip).
     Status {
         /// GraphQL endpoint (default `$OPSENSE_GRAPHQL_URL` hoặc
-        /// `http://127.0.0.1:8080/graphql`).
+        /// `http://localhost:8080/api/repl/graphql`).
         #[arg(long)]
         endpoint: Option<String>,
     },
@@ -162,12 +162,12 @@ enum Commands {
     /// Run the opsense REPL client.
     ///
     /// Without `--runner` this talks to a running gateway over GraphQL
-    /// (`$OPSENSE_GRAPHQL_URL`, default `http://127.0.0.1:8080/graphql`);
+    /// (`$OPSENSE_GRAPHQL_URL`, default `http://localhost:8080/api/repl/graphql`);
     /// with `--runner` it connects directly to a kernel-runner gRPC endpoint
     /// (kernel mode, commands `:echo`/`:py`/`:jl`, `:inline`/`:block`).
     Repl {
         /// GraphQL endpoint to talk to (default `$OPSENSE_GRAPHQL_URL` or
-        /// `http://127.0.0.1:8080/graphql`).
+        /// `http://localhost:8080/api/repl/graphql`).
         #[arg(long)]
         endpoint: Option<String>,
         /// Kernel-runner gRPC endpoint (e.g. `http://opsense-runner:50051`);

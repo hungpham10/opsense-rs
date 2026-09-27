@@ -14,8 +14,17 @@ use crate::client::OpsenseClient;
 
 /// Endpoint GraphQL: `--endpoint` > `$OPSENSE_GRAPHQL_URL` > default.
 pub fn default_endpoint() -> String {
+// Đường dẫn thật là `/api/repl/graphql`: `serve.rs` nest `repl::routes()` (route
+// `/graphql`) dưới `/api/repl`. Thiếu `/api/repl` thì nginx trả 500, không
+// phải 401 — dễ tưởng server chết. Xem `crates/opsense/tests/common/mod.rs:38`
+// (`serve_url` dùng `localhost` để khớp `host` trong seed tenant).
+// `localhost` chứ KHÔNG `127.0.0.1`: nginx tra tenant theo **Host header**
+// (`04-api.conf:20` -> `/api/admin/v1/tenant/{host}/id`) va seed tao
+// `host = 'localhost'` (`sql/postgres/dev/50-init-tenant.sql`). Gui
+// `127.0.0.1` thi khong ra tenant => **500**, trong nhu server chet chu
+// khong phai la thieu auth. Xem `crates/opsense/tests/common/mod.rs:38`.
     std::env::var("OPSENSE_GRAPHQL_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8080/graphql".to_string())
+        .unwrap_or_else(|_| "http://localhost:8080/api/repl/graphql".to_string())
 }
 
 pub fn client(endpoint: Option<String>) -> Result<OpsenseClient> {
@@ -152,6 +161,6 @@ mod tests {
     #[test]
     fn endpoint_prefers_flag_then_env_then_default() {
         // Chỉ test phần dựng chuỗi, không tạo client (cần network).
-        assert_eq!(default_endpoint(), "http://127.0.0.1:8080/graphql");
+        assert_eq!(default_endpoint(), "http://localhost:8080/api/repl/graphql");
     }
 }

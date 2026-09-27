@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use crate::client::session_api as api;
 use crate::session::store;
 
-const DEFAULT_HOST: &str = "http://127.0.0.1:8080";
+const DEFAULT_HOST: &str = "http://localhost:8080";
 
 #[derive(Debug, Clone)]
 pub struct SessionCmd {

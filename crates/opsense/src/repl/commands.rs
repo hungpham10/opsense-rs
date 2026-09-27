@@ -310,10 +310,12 @@ fn format_node(node: &NodeSummary) -> String {
 
 /// `:login [host]` — start OAuth2 device flow.
 /// `host` mặc định lấy từ `OPSENSE_HOST` env var; nếu không có sẽ dùng
-/// `http://127.0.0.1:8080` (UDS không phù hợp cho browser flow).
+/// `http://localhost:8080` (UDS không phù hợp cho browser flow).
 async fn cmd_login(rest: &str) -> anyhow::Result<Option<String>> {
     let host = if rest.trim().is_empty() {
-        std::env::var("OPSENSE_HOST").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+        // `localhost` chứ không `127.0.0.1`: nginx tra tenant theo Host header và
+        // seed đặt `host = 'localhost'`, nên `127.0.0.1` không resolve được tenant.
+        std::env::var("OPSENSE_HOST").unwrap_or_else(|_| "http://localhost:8080".to_string())
     } else {
         rest.trim().to_string()
     };

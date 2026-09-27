@@ -18,7 +18,15 @@ use std::io;
 
 use crate::client::OpsenseClient;
 
-const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8080/graphql";
+// Đường dẫn thật là `/api/repl/graphql` — `serve.rs` nest `repl::routes()`
+// (route `/graphql`) dưới `/api/repl`. Thiếu `/api/repl` thì nginx trả
+// **500**, không phải 401, nên trông như server chết thay vì thiếu auth.
+// `localhost` chứ KHÔNG `127.0.0.1`: nginx tra tenant theo **Host header**
+// (`04-api.conf:20` -> `/api/admin/v1/tenant/{host}/id`) va seed tao
+// `host = 'localhost'` (`sql/postgres/dev/50-init-tenant.sql`). Gui
+// `127.0.0.1` thi khong ra tenant => **500**, trong nhu server chet chu
+// khong phai la thieu auth. Xem `crates/opsense/tests/common/mod.rs:38`.
+const DEFAULT_ENDPOINT: &str = "http://localhost:8080/api/repl/graphql";
 
 /// Spin up the MCP server on stdio. Connects to `opsense serve` GraphQL
 /// at `endpoint` (env `OPSENSE_GRAPHQL_URL` overrides default).
