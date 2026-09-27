@@ -223,6 +223,16 @@ station = true
    # Lệnh giữ 22 phút thì không đáng kể, nhưng lệnh nằm qua kỳ funding sẽ lệch
    # khỏi PnL thật — và không có chỗ nào tính cái đó.
    fee_rate = 0.0002
+   # Sàn kích thước ô cho sieve, theo tỉ lệ giá. **Thiếu thì tự tính**
+   # `2 × fee_rate × grid_levels × 1.2` — đúng ngưỡng để mốc lưới (cách nhau
+   # `step / grid_levels`) vượt phí trọn vòng, nhân thêm 1.2 vì kernel so
+   # nghiêm. Khai ra đây chỉ để ép lưới thô hơn, không cần thiết.
+   #
+   # Vì sao cần: sieve **không biết phí** nên ra lưới mịn nhất dữ liệu chịu
+   # được. Đo trên chính strategy này (cửa sổ 1h): sieve ra step $125.93 ⇒
+   # mốc cách nhau $31.48 < phí $33.87 ⇒ 8/8 entry bị lo, không log gì. Cùng
+   # code, cửa sổ 16h thì ra 4 ô rộng và vào được lệnh.
+   # grid_min_step_frac = 0.00192
    # Kelly fraction. Cảnh báo: với `sl_pct = 0.008` và tỉ lệ thắng **mô hình**
    # 0.75 (dùng khi chưa đủ `grid_min_trades` lệnh đóng), Kelly ra 0.244 ->
    # cược 6% vốn mỗi lệnh. Tỉ lệ 0.75 là **mô hình đoán**, không phải thống kê
