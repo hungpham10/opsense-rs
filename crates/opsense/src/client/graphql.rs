@@ -446,6 +446,14 @@ fn load_bearer_from_env() -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Env là **process-wide** còn libtest chạy test **song song**, nên các test
+    /// đụng `OPSENSE_ACCESS_TOKEN`/`HOME` phải khoá lại. Không khoá thì chúng đọc
+    /// trúng env của nhau: `test_load_bearer_from_token_file` xoá
+    /// `OPSENSE_ACCESS_TOKEN` đúng lúc `test_load_bearer_from_env` đang assert,
+    /// và test đỏ theo lịch — chạy riêng module thì xanh, chạy cả crate thì đỏ
+    /// (đã gặp đúng một lần trong `cargo test --workspace`).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// `OpsenseClient::new` parse endpoint, không panic khi host lạ.
     #[test]
     fn test_new_client_parses_endpoint() {
@@ -471,7 +479,8 @@ mod tests {
     /// xoá file để "không bị pollute", nhưng file không ảnh hưởng kết quả assert.
     #[test]
     fn test_load_bearer_from_env() {
-        // SAFETY: Test chạy đơn luồng, không race với threads khác.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: mọi test đụng env trong crate này đều giữ `ENV_LOCK`.
         unsafe { std::env::set_var("OPSENSE_ACCESS_TOKEN", "test-token-abc") };
         let loaded = load_bearer_from_env();
         unsafe { std::env::remove_var("OPSENSE_ACCESS_TOKEN") };
@@ -483,13 +492,14 @@ mod tests {
     /// Dùng `HOME` trỏ vào thư mục tạm để không đụng `~/.config/opsense/token` thật.
     #[test]
     fn test_load_bearer_from_token_file() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("opsense-token-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".config/opsense")).unwrap();
         std::fs::write(dir.join(".config/opsense/token"), "file-token-xyz\n").unwrap();
         let path = dir.join(".config/opsense/token");
         let before = std::fs::metadata(&path).unwrap().len();
 
-        // SAFETY: các test trong crate này chạy đơn luồng về biến môi trường.
+        // SAFETY: mọi test đụng env trong crate này đều giữ `ENV_LOCK`.
         unsafe {
             std::env::remove_var("OPSENSE_ACCESS_TOKEN");
             std::env::set_var("HOME", &dir);
@@ -510,6 +520,7 @@ mod tests {
     /// Empty env var trả về None (trừ khi file fallback có giá trị).
     #[test]
     fn test_load_bearer_env_empty() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("OPSENSE_ACCESS_TOKEN") };
         // Trừ khi dev có sẵn `~/.config/opsense/token` thì kết quả không None;
         // chỉ assert rằng hàm không panic và trả String rỗng được coi là None.
