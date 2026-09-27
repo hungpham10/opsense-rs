@@ -9,7 +9,6 @@ backend = "parquet"
 data_dir = "/app/.opsense/parquet"
 block_secs = 5
 retention_secs = 300
-# parquet_compression = "zstd"
 
 [[pipeline.components]]
 type = "clock"

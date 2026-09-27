@@ -48,7 +48,6 @@ retention_secs = 300
 # serde bỏ qua âm thầm, flush rơi về default 60s/600s).
 s3_flush_interval_secs = 15
 s3_snapshot_interval_secs = 60
-# parquet_compression = "zstd"
 
 [storage.s3]
 bucket = "opsense-lake"
