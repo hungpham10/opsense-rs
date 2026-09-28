@@ -16,6 +16,12 @@ rhai = ["dep:rhai"]
 parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:object_store"]
 sqlite = ["dep:sqlx"]
 redis = ["dep:redis"]
+# Cluster cho nhiều node, hai feature tách ràng. Cả hai đều tắt mặc định để
+# crate nhẹ không bị kéo thêm; vận chuyển nằm ở `opsense::cluster`.
+#   gossip = quan sát (ai sống) — không quyết định gì
+#   raft   = quyết định (ai là master) — không suy đoán gì
+gossip = []
+raft = []
 
 [dependencies]
 arrow-array = { workspace = true, optional = true }
@@ -53,3 +59,12 @@ rustls = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 
+# Test cluster cần feature tương ứng; `required-features` để build không bật
+# feature vẫn xanh thay vì hỏng vì không tìm thấy module.
+[[test]]
+name = "gossip"
+required-features = ["gossip"]
+
+[[test]]
+name = "raft"
+required-features = ["raft"]
