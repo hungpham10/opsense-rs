@@ -172,6 +172,9 @@ fn parse_okx(body: &Value) -> Vec<CandleStick> {
 
 /// Nến đã đóng + tên sàn để in ra log (nguồn có thể là OKX hoặc Binance).
 async fn fetch_klines() -> (String, Vec<CandleStick>) {
+    // Cài crypto provider: test binary không có `main()` nên không ai cài hộ,
+    // và `Client::new()` sẽ panic `No provider set`.
+    opsense_mlib::tls::install_default_crypto_provider();
     let client = reqwest::Client::new();
     let mut seen = Vec::new();
     for ep in endpoints() {

@@ -22,6 +22,9 @@ pub const DEX_CLIENT_SECRET: &str = "opsense-dev-shared-secret-32-bytes-min!!";
 
 /// Client dùng cho Dex login flow (cookie store + auto redirect).
 pub fn login_client() -> reqwest::Client {
+    // Cài crypto provider: test binary không có `main()` nên không ai cài hộ,
+    // và `Client::new()` sẽ panic `No provider set`.
+    opsense_mlib::tls::install_default_crypto_provider();
     reqwest::Client::builder()
         .cookie_store(true)
         .redirect(Policy::limited(10))

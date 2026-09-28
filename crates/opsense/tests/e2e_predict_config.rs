@@ -153,6 +153,9 @@ async fn spawn_mock(body: String) -> (std::net::SocketAddr, Arc<std::sync::Mutex
 }
 
 async fn wait_rustfs(endpoint: &str) -> bool {
+    // Cài crypto provider: test binary không có `main()` nên không ai cài hộ,
+    // và `Client::new()` sẽ panic `No provider set`.
+    opsense_mlib::tls::install_default_crypto_provider();
     let client = reqwest::Client::new();
     for _ in 0..30 {
         if client

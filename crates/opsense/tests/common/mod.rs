@@ -120,6 +120,9 @@ pub async fn wait_for_dex(timeout_secs: u64) -> anyhow::Result<()> {
     let issuer =
         std::env::var("OPSENSE_DEX_ISSUER").unwrap_or_else(|_| "http://localhost:5556/dex".into());
     let url = format!("{}/.well-known/openid-configuration", issuer);
+    // Cài crypto provider: test binary không có `main()` nên không ai cài hộ,
+    // và `Client::new()` sẽ panic `No provider set`.
+    opsense_mlib::tls::install_default_crypto_provider();
     let client = Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
