@@ -1086,9 +1086,28 @@ async fn wait_grid_snapshot(
                 }
                 Err(e) => format!("station chưa đăng ký: {e}"),
             };
+            // DUMP NGUỒN NẾN. `grid` là node downstream: nó chỉ sinh snapshot từ
+            // nến. `grid` rỗng **không** nói lý do — phải phân biệt "nến không
+            // tới" (lỗi mạng/nguồn) với "nến tới rồi nhưng grid không ghi"
+            // (lỗi transform). Trước đây panic chỉ dump obs của `grid`, nên
+            // cả hai trường hợp đều ra cùng một message và phải đoán.
+            //
+            // `nextest` chỉ in stdout của test, còn `tracing` (WARN http_origin
+            // "fetch thất bại") bị capture rồi bỏ — nên chỗ đúng để ghi lại
+            // bằng chứng là message của panic này.
+            let n_candles = candles.len();
+            let n_candles_with_field = candles.iter().filter(|o| o.labels.contains_key("field")).count();
+            let last_candle = candles
+                .iter()
+                .max_by_key(|o| o.ts)
+                .map(|o| format!("ts={:?} field={:?}", o.ts, o.labels.get("field")))
+                .unwrap_or_else(|| "<không có nến nào>".into());
+
             panic!(
                 "`{STATION_TICK_CANDLE}` có candle={has_candle}, \
-                 `{STATION_GRID}` có snapshot={has_snapshot} sau {timeout_secs}s — grid: {dump}"
+                 `{STATION_GRID}` có snapshot={has_snapshot} sau {timeout_secs}s\n\
+                 nguồn: {n_candles} nến, {n_candles_with_field} có label `field`, nến mới nhất: {last_candle}\n\
+                 downstream: {STATION_GRID} → {dump}"
             );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
