@@ -225,8 +225,51 @@ impl Default for Block {
     }
 }
 
+/// Số shard của LRU station.
+///
+/// **Phải nhỏ hơn `HOT_BLOCKS`.** `LruCache::new(capacity)` chia đều cho từng
+/// shard: `capacity_per_shard = ceil(capacity / S)`. Với `S == capacity` thì
+/// `capacity_per_shard == 1` — mỗi shard chỉ chứa **đúng một** entry, nên chỉ
+/// cần **hai** `block_id` trùng shard là cái mới đẩy cái cũ ra, dù tổng cache
+/// còn trống hàng chục chỗ ở shard khác.
+///
+/// Đo được với node `history-1h` (`limit=1000`, `block_secs = 129600`): 29
+/// block trên 32 shard ⇒ 8 shard nhận 2–3 block ⇒ **11 block bị đẩy**, và
+/// `backend = "memory"` không có storage để read-through (`load_cold_block`)
+/// nên mất vĩnh viễn. `block_secs` **không** sửa được: nó chỉ đổi phân bố
+/// block chứ không đổi việc mỗi shard chỉ chứa 1. Cùng lý do `limit=100`
+/// (4 block) thì liền mạch — 4 block trên 32 shard dễ tránh trùng.
+///
+/// **1 = không shard.** Đo bằng `wide_batch_keeps_every_block` (29 block, đúng
+/// ca `history-1h` thật):
+///
+/// | S | slot/shard | 29 block rơi vào S shard | kết quả |
+/// |---|---|---|---|
+/// | 32 | 1 | trung bình 0.9, max 4 | evict |
+/// | 8 | 4 | trung bình 3.6, max ~6 | evict |
+/// | 4 | 8 | trung bình 7.3, max ~10 | evict |
+/// | 2 | 16 | trung bình 14.5, max ~17 | evict |
+/// | **1** | **32** | **29 ≤ 32** | **giữ hết** |
+///
+/// Chỉ `S = 1` mới khiến `capacity` là **tổng thật**. Lý do gốc nằm ở
+/// `opsense-mlib::lru`: `capacity_per_shard = ceil(capacity / S)`, nên
+/// `LruCache::new(32)` với `S = 32` cho mỗi shard **một** slot — hai `block_id`
+/// trùng shard thì cái mới đẩy cái cũ dù tổng cache còn trống. Test
+/// `lru::tests::spread_keys_keep_everything` (32 key liên tiếp, 32 shard) chỉ
+/// giữ được **21/32** — đó là bằng chứng trực tiếp.
+///
+/// Mỗi station có LRU riêng nên `S = 1` chỉ gộp lock **trong một station**,
+/// không gộp lock giữa các station. Đánh đổi: đọc/ghi cùng một station thì
+/// serialize — chấp nhận được, vì đường nóng là `query_recent` đã bị Nginx
+/// cache 60s và `query_recent` chỉ clone block trong RAM.
+///
+/// TODO: sửa gốc ở `opsense-mlib::lru` — arena cấp phát tĩnh theo shard, nên
+/// muốn "chỉ evict khi TỔNG đầy" thì phải chuyển sang free-list chung. Khi đó
+/// sharding trở lại an toàn và có thể nâng `S`.
+const STATION_SHARDS: usize = 1;
+
 pub struct TimeseriesStation {
-    caches: LruCache<i64, Block, 32>,
+    caches: LruCache<i64, Block, STATION_SHARDS>,
     block_duration: i64,
     storage: Option<Arc<dyn TimeseriesStorage>>,
     /// Background sync task (flush lake + snapshot + retention theo
@@ -944,6 +987,89 @@ mod tests {
             assert!(
                 got.iter().any(|o| o.ts == NEWEST),
                 "phải có mốc mới nhất {NEWEST} ({label})"
+            );
+        }
+    }
+
+    /// Batch trải **nhiều block** phải giữ lại hết — hồi quy cho bug LRU sharded.
+    ///
+    /// `LruCache::new(capacity)` chia đều `capacity_per_shard = ceil(capacity / S)`
+    /// cho từng shard. Với `S == capacity` (32/32) mỗi shard chỉ chứa **một**
+    /// entry, nên chỉ cần hai `block_id` trùng shard là cái mới đẩy cái cũ —
+    /// dù tổng cache còn trống. Với `backend = "memory"` (station thuần memory)
+    /// block bị đẩy là **mất vĩnh viễn**: `load_cold_block` đọc từ
+    /// `self.storage` mà nó là `None`.
+    ///
+    /// Đo trên stack thật, node `history-1h` (`limit=1000`, `block_secs=129600`):
+    /// 29 block ⇒ 8 shard nhận 2–3 block ⇒ 11 block mất. `block_secs` không sửa
+    /// được vì nó không đổi số slot mỗi shard.
+    ///
+    /// Test dùng `S = STATION_SHARDS` thật (không hard-code 8) nên đổi hằng số
+    /// sau này vẫn được kiểm.
+    #[tokio::test]
+    async fn wide_batch_keeps_every_block() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Số block nhiều hơn `HOT_BLOCKS` — đúng tình huống thật (29 > 32? không,
+        // nên dùng 2× để chắc chắm vượt trần) — nhưng vẫn ≤ `HOT_BLOCKS` để
+        // mô phỏng đúng ca đo được.
+        const N: usize = HOT_BLOCKS - 3;
+        let st = TimeseriesStation::new(HOT_BLOCKS, Some(115_200));
+
+        let base: i64 = 1_787_040_000;
+        let mut batch = Vec::with_capacity(N * 5);
+        for i in 0..N {
+            let block_start = base + (i as i64) * 115_200;
+            for f in 0..5 {
+                batch.push(obs(block_start + f as i64 * 60, (i * 5 + f) as f64));
+            }
+        }
+        st.update_range(
+            &batch,
+            batch.iter().map(|o| o.ts).min().unwrap(),
+            batch.iter().map(|o| o.ts).max().unwrap(),
+            base,
+        );
+
+        // Đếm block theo `get_block_id` — đúng cách station chia block.
+        let mut written: std::collections::BTreeSet<i64> = Default::default();
+        for o in &batch {
+            written.insert(st.get_block_id(o.ts));
+        }
+        assert_eq!(
+            written.len(),
+            N,
+            "batch {} nến phải trải trên {} block (không bị gộp)", N, written.len()
+        );
+
+        let got = st
+            .query_recent(base, base + (N as i64) * 115_200 - 1)
+            .await
+            .unwrap_or_default();
+        assert_eq!(
+            got.len(),
+            batch.len(),
+            "mất {} observation: block trùng shard bị đẩy khi capacity_per_shard = 1",
+            batch.len() - got.len()
+        );
+
+        // Chẩn đoán khi test đỏ: in ra block nào rơi vào shard nào.
+        if got.len() != batch.len() {
+            let mut per_shard: std::collections::BTreeMap<usize, Vec<i64>> = Default::default();
+            let mask = STATION_SHARDS - 1;
+            for id in &written {
+                let mut h = DefaultHasher::new();
+                id.hash(&mut h);
+                per_shard.entry((h.finish() as usize) & mask).or_default().push(*id);
+            }
+            let crowded: Vec<_> = per_shard.iter().filter(|(_, v)| v.len() > 1).collect();
+            panic!(
+                "{} block rơi vào shard đã đầy ({} shard, {} slot/shard): {:?}",
+                crowded.len(),
+                STATION_SHARDS,
+                HOT_BLOCKS.div_ceil(STATION_SHARDS),
+                crowded
             );
         }
     }
