@@ -124,11 +124,3 @@ data_dir = ".opsense/parquet"        # local cache root (data vẫn nằm trong
 #   from = "sub_secs(ts(), interval())",
 #   to   = "ts()",
 # }
-
-# ------------------------------------------------------------------
-# D) Legacy collector source (pull model, không còn ingest_source).
-# ------------------------------------------------------------------
-# [sources.vector]
-# url = "http://127.0.0.1:8686"
-# jq_filter = ".data[]"
-# metrics = ["cpu_usage", "mem_usage"]
