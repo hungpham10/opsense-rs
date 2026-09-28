@@ -27,19 +27,3 @@ type = "timeseries_station_sink"
 id = "tsdb"
 description = "Ghi observation từ message vào station `tsdb`. Với nguồn là `clock` thì không gì được ghi — xem mô tả node `clock`."
 inputs = ["clock"]
-
-# Vector/Alloy metrics source. Disabled by default in dev — there is no
-# Vector service in the docker-compose stack. Uncomment the block below
-# and point `url` at a real scrape endpoint to enable metric ingestion.
-#
-# [sources.vector]
-# url = "http://alloy:9080"
-# jq_filter is run through opsense_mlib::jq::JsonQuery, which supports field
-# access (`.field`), array iteration (`[]`) and field selection
-# (`select(a, b, ...)`). It does NOT support `|` pipes or `{...}` object
-# literals, so the upstream MUST already emit observation-shaped objects, e.g.
-#   [{"ts": 1, "metric_id": "cpu_usage", "kind": "metric", "signal": "raw",
-#     "value": 12.5, "labels": {"instance": "a"}}]
-# This filter simply iterates an array under `.data`.
-# jq_filter = ".data[]"
-# metrics = ["cpu_usage", "mem_usage"]
