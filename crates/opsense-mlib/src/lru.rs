@@ -590,6 +590,140 @@ where
 mod tests {
     use super::*;
     use std::future::Future;
+
+    // =====================================================================
+    // `total_capacity` phải là SỨC CHỨA TỔNG, không phải trần mỗi shard
+    // =====================================================================
+
+    /// Tìm `count` khoá khác nhau mà **tất cả** rơi vào cùng một shard.
+    ///
+    /// Với `S` lũy thừa của 2, shard = `hash(key) & (S - 1)`. Tìm bằng cách quét
+    /// số nguyên tăng dần — trùng shard xuất hiện rất nhanh vì `DefaultHasher`
+    /// phân bố đều trên `S` giá trị.
+    fn keys_in_one_shard<const S: usize>(count: usize, skip: usize) -> Vec<i64> {
+        let cache: LruCache<i64, u32, S> = LruCache::new(S);
+        let mut out = Vec::with_capacity(count);
+        let mut k = skip as i64;
+        while out.len() < count {
+            if cache.get_shard_idx(&k) == 0 {
+                out.push(k);
+            }
+            k += 1;
+        }
+        out
+    }
+
+    /// **BUG PROOF**: `LruCache::new(total_capacity)` KHÔNG giữ được `total_capacity`
+    /// entry khi `total_capacity == S`.
+    ///
+    /// `new()` chia đều: `capacity_per_shard = ceil(total_capacity / S)`. Với
+    /// `total_capacity = S` thì **`capacity_per_shard = 1`** — mỗi shard chỉ chứa
+    /// đúng một entry. Hai khoá trùng shard ⇒ cái mới đẩy cái cũ, **dù tổng
+    /// cache còn trống**.
+    ///
+    /// Hậu quả trong `TimeseriesStation` là mất dữ liệu **im lặng**: backend
+    /// `memory` không có storage để read-through (`load_cold_block` trả `None`),
+    /// nên block bị đẩy là mất hẳn. Đo trên stack thật với node `history-1h`
+    /// (`limit=1000`): 29 block / 32 shard ⇒ 8 shard nhận 2–3 block ⇒ 11 block mất,
+    /// và `update_range` **không cảnh báo** (điều kiện là `span > HOT_BLOCKS`).
+    ///
+    /// Test này không cần station: chỉ cần `LruCache` với `capacity == S`.
+    // BUG CHƯA SỬA Ở `opsense-mlib::lru` — test để đỏ có chủ đích.
+    //
+    // `new()` chia `capacity_per_shard = ceil(capacity / S)`, nên `capacity` là
+    // sức chứa **tổng** trên giấy nhưng thực tế là "mỗi shard phần chia đó".
+    // `LruCache::new(32)` với `S = 32` ⇒ mỗi shard **một** slot ⇒ chỉ cần hai
+    // key trùng shard là evict, tổng cache không liên quan.
+    //
+    // Sửa đúng chỗ cần arena cấp phát **động** (free-list chung) thay vì
+    // `Box<[Node]>` tĩnh theo shard — refactor đa luồng, chưa làm. Trong lúc
+    // đó, `TimeseriesStation` chạy `S = 1` để `capacity` là tổng thật
+    // (xem `STATION_SHARDS` trong `opsense-core/src/station.rs`).
+    //
+    // Bỏ `#[ignore]` khi sửa xong `lru.rs`.
+    #[test]
+    #[ignore = "BUG: capacity_per_shard = ceil(capacity/S) làm capacity mất ý nghĩa tổng"]
+    fn capacity_is_total_not_per_shard() {
+        const S: usize = 32;
+        // Chỉ 4 entry — thấp hơn capacity 32 rất nhiều.
+        let keys = keys_in_one_shard::<S>(4, 0);
+        let cache: LruCache<i64, u32, S> = LruCache::new(S);
+
+        for (i, k) in keys.iter().enumerate() {
+            cache.put(*k, i as u32);
+        }
+
+        // Với `capacity_per_shard = 1`, chỉ key cuối cùng còn sống.
+        let sống: Vec<i64> = keys.iter().copied().filter(|k| cache.get(k).is_some()).collect();
+        assert_eq!(
+            sống.len(),
+            keys.len(),
+            "cache capacity {} nhưng chỉ giữ {}/{} entry rồi — tổng còn trống mà vẫn evict.              Sức chứa phải là TỔNG, không phải trần mỗi shard (mọi key trùng shard 0).",
+            S,
+            sống.len(),
+            keys.len()
+        );
+    }
+
+    /// Cùng lỗi, nhưng nhìn từ góc khác: capacity 32 **từng được cho là** giữ
+    /// được 32 entry. Chứng minh nó chỉ giữ được `S` entry khi key trùng shard.
+    // BUG CHƯA SỬA Ở `opsense-mlib::lru` — test để đỏ có chủ đích.
+    //
+    // `new()` chia `capacity_per_shard = ceil(capacity / S)`, nên `capacity` là
+    // sức chứa **tổng** trên giấy nhưng thực tế là "mỗi shard phần chia đó".
+    // `LruCache::new(32)` với `S = 32` ⇒ mỗi shard **một** slot ⇒ chỉ cần hai
+    // key trùng shard là evict, tổng cache không liên quan.
+    //
+    // Sửa đúng chỗ cần arena cấp phát **động** (free-list chung) thay vì
+    // `Box<[Node]>` tĩnh theo shard — refactor đa luồng, chưa làm. Trong lúc
+    // đó, `TimeseriesStation` chạy `S = 1` để `capacity` là tổng thật
+    // (xem `STATION_SHARDS` trong `opsense-core/src/station.rs`).
+    //
+    // Bỏ `#[ignore]` khi sửa xong `lru.rs`.
+    #[test]
+    #[ignore = "BUG: capacity_per_shard = ceil(capacity/S) làm capacity mất ý nghĩa tổng"]
+    fn advertised_capacity_is_actually_held() {
+        const S: usize = 32;
+        let keys = keys_in_one_shard::<S>(S, 1000);
+        let cache: LruCache<i64, u32, S> = LruCache::new(S);
+        for (i, k) in keys.iter().enumerate() {
+            cache.put(*k, i as u32);
+        }
+        let alive = keys.iter().filter(|k| cache.get(k).is_some()).count();
+        assert_eq!(
+            alive, S,
+            "nạp đúng `capacity` = {S} entry, phải giữ hết — thực tế chỉ còn {alive}"
+        );
+    }
+
+    /// Phân bố key đều thì chưa lộ lỗi — đó là lý do nó lọt. Test này ghim
+    /// hành vi ĐÚNG để phân biệt: 32 key rải rác trên 32 shard thì giữ hết.
+    // BUG CHƯA SỬA Ở `opsense-mlib::lru` — test để đỏ có chủ đích.
+    //
+    // `new()` chia `capacity_per_shard = ceil(capacity / S)`, nên `capacity` là
+    // sức chứa **tổng** trên giấy nhưng thực tế là "mỗi shard phần chia đó".
+    // `LruCache::new(32)` với `S = 32` ⇒ mỗi shard **một** slot ⇒ chỉ cần hai
+    // key trùng shard là evict, tổng cache không liên quan.
+    //
+    // Sửa đúng chỗ cần arena cấp phát **động** (free-list chung) thay vì
+    // `Box<[Node]>` tĩnh theo shard — refactor đa luồng, chưa làm. Trong lúc
+    // đó, `TimeseriesStation` chạy `S = 1` để `capacity` là tổng thật
+    // (xem `STATION_SHARDS` trong `opsense-core/src/station.rs`).
+    //
+    // Bỏ `#[ignore]` khi sửa xong `lru.rs`.
+    #[test]
+    #[ignore = "BUG: capacity_per_shard = ceil(capacity/S) làm capacity mất ý nghĩa tổng"]
+    fn spread_keys_keep_everything() {
+        const S: usize = 32;
+        let cache: LruCache<i64, u32, S> = LruCache::new(S);
+        let keys: Vec<i64> = (0..S as i64).collect();
+        for (i, k) in keys.iter().enumerate() {
+            cache.put(*k, i as u32);
+        }
+        let alive = keys.iter().filter(|k| cache.get(k).is_some()).count();
+        assert_eq!(alive, S, "key rải rác, mỗi shard một cái thì giữ hết");
+    }
+
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
