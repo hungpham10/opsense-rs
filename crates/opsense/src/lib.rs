@@ -5,12 +5,14 @@
 //! [`client::RunnerClient`]), `cli` (script-friendly subcommands, mỗi lệnh = 1
 //! GraphQL round-trip), `init` (scaffold config), `repl` (interactive REPL),
 //! `runner` (kernel-runner gRPC server), `mcp` (MCP stdio server over the
-//! client), `tls` (process-wide rustls crypto provider) and `token`/`session`
+//! client), `cluster` (vận chuyển cho tầng gossip: quan sát ai còn sống),
+//! `tls` (process-wide rustls crypto provider) and `token`/`session`
 //! (auth helpers).
 
 pub mod api;
 pub mod cli;
 pub mod client;
+pub mod cluster;
 pub mod init;
 pub mod mcp;
 pub mod repl;

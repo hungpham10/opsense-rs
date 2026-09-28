@@ -73,7 +73,7 @@ opsense-core = { path = "../opsense-core", features = ["parquet", "sqlite"] }
 opsense-qlib = { path = "../opsense-qlib", features = ["json"] }
 # `json` enables the `vector` data-pipeline subsystem (sources/transforms/
 # sinks) that AppState builds the runtime from.
-opsense-mlib = { path = "../opsense-mlib", features = ["json"] }
+opsense-mlib = { path = "../opsense-mlib", features = ["json", "gossip"] }
 
 # gRPC kernel runner client (`client::grpc::RunnerClient` + the `repl`
 # subcommand's `--runner` mode, and the `runner` subcommand's standalone
