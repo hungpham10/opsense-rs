@@ -524,7 +524,7 @@ mod tests {
     /// server: body là của thật, chỉ thiếu bước bóc.
     #[test]
     fn gql_unwraps_root_field() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         const BODY: &str = r#"{"data":{"status":{"nodes":[
             {"id":"tsdb","type":"Sink","inputs":["clock"],"description":"ghi observation"}
         ],"stations":[{"id":"tsdb","kind":"timeseries"}]},
@@ -537,11 +537,11 @@ mod tests {
         std::thread::spawn(move || {
             for _ in 0..2 {
                 let Ok((mut sock, _)) = listener.accept() else { return };
-                let mut buf = [0u8; 4096];
-                let _ = sock.read(&mut buf);
+                // Đọc trọn request — xem `read_full_request`.
+                let _ = read_full_request(&mut sock);
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\n\r\n{BODY}",
+                     content-length: {}\r\nconnection: close\r\n\r\n{BODY}",
                     BODY.len()
                 );
                 let _ = sock.write_all(resp.as_bytes());
@@ -746,7 +746,7 @@ mod tests {
     /// lại ở bất kỳ biến nào.
     #[test]
     fn query_variables_are_camel_case() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::sync::mpsc;
 
         let (tx, rx) = mpsc::channel::<String>();
@@ -754,14 +754,15 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 8192];
-            let n = sock.read(&mut buf).unwrap_or(0);
-            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            // Đọc trọn request: test assert trên *nội dung* request này, và đọc
+            // một lần thì có thể cắt mất phần cuối của `variables`.
+            let buf = read_full_request(&mut sock).unwrap_or_default();
+            let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
             const BODY: &str =
                 r#"{"data":{"queryTimeseries":{"observations":[],"truncated":false,"scanned":0}}}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                 content-length: {}\r\n\r\n{BODY}",
+                 content-length: {}\r\nconnection: close\r\n\r\n{BODY}",
                 BODY.len()
             );
             let _ = sock.write_all(resp.as_bytes());
@@ -802,18 +803,18 @@ mod tests {
     /// Root field sai phải báo đúng tên, không báo "missing field" mơ hồ.
     #[test]
     fn gql_reports_missing_root_by_name() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         // Body không có `queryTimeseries` — mô phỏng gõ sai tên root ở call site.
         const BODY: &str = r#"{"data":{"somethingElse":{}}}"#;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 4096];
-            let _ = sock.read(&mut buf);
+            // Đọc trọn request — xem `read_full_request`.
+            let _ = read_full_request(&mut sock);
             let resp = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                 content-length: {}\r\n\r\n{BODY}",
+                 content-length: {}\r\nconnection: close\r\n\r\n{BODY}",
                 BODY.len()
             );
             let _ = sock.write_all(resp.as_bytes());
