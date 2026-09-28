@@ -23,6 +23,16 @@ impl ServeClient {
         if base_url.trim().is_empty() {
             anyhow::bail!("ServeClient base_url is empty");
         }
+        // Cài crypto provider **trước khi** dựng client. `reqwest` chỉ tự chọn
+        // provider khi `__rustls-ring` bật; workspace này cố ý tắt nó (xem
+        // `Cargo.toml` của workspace) và ghim `aws-lc-rs`, nên không cài thì
+        // `build()` panic `No provider set`.
+        //
+        // Binary `opsense` đã cài ở `main()`, nhưng crate này dùng lại được —
+        // embedder không có `main` và sẽ chết ngay ở dòng này. Cài tại chỗ dựng
+        // client giống `opsense-components::http::client_for`: idempotent, không
+        // panic, và giữ provider đã có nếu ai cài trước.
+        opsense_mlib::tls::install_default_crypto_provider();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
@@ -125,5 +135,23 @@ mod tests {
     #[test]
     fn empty_base_rejected() {
         assert!(ServeClient::new("".into(), "t".into(), 30).is_err());
+    }
+
+    /// Regression: `ServeClient::new` phải **tự** cài crypto provider.
+    ///
+    /// `reqwest` chỉ tự chọn provider khi `__rustls-ring` bật — ở build chỉ có
+    /// `opsense-runner` thì nó tắt, nên không có lời gọi cài provider thì
+    /// `Client::builder().build()` panic `No provider set`. Ở build cả workspace
+    /// thì `object_store` (qua `mlib/parquet`) bật `ring` và che mất lỗi, nên
+    /// `trims_trailing_slash` phía trên **không** bắt được hồi quy — assert này
+    /// thì bắt: provider phải được cài **trong process này**, không phụ thuộc
+    /// may mà có crate nào bật `ring` hay không.
+    #[test]
+    fn new_installs_a_crypto_provider_in_this_process() {
+        let _client = ServeClient::new("http://x".into(), "t".into(), 30).expect("dựng client");
+        assert!(
+            rustls::crypto::CryptoProvider::get_default().is_some(),
+            "client dựng được mà provider chưa cài ⇒ đang chỉ may mà `__rustls-ring` bật"
+        );
     }
 }

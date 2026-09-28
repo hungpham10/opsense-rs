@@ -35,3 +35,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Chỉ để test kiểm tra provider đã được cài — cùng crate, cùng feature set với
+# crate thật, nên assert được đúng thứ production dựa vào.
+rustls = { workspace = true }
