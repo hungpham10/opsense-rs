@@ -1,12 +1,21 @@
-//! 9 OAuth2 endpoints dưới `/api/oauth/v1/`.
+//! 8 OAuth2 endpoints dưới `/api/oauth/v1/`.
 //!
 //! Authentication:
 //! - Endpoints KHÔNG yêu cầu Bearer (public cho CLI/console): device/code, device (form),
-//!   device/token, token/refresh
+//!   device/token
 //! - Endpoints yêu cầu Bearer (Nginx inject `X-User-Id` + `X-Tenant-Id`):
 //!   device/verify, token/revoke, session/*
 //!
-//! Refs: RFC 8628 §3 (Device Authorization Grant) + RFC 6749 §6 (Refresh) + §11 (Revocation).
+//! KHÔNG có `token/refresh` (RFC 6749 §6). `device/token` vẫn trả `refresh_token`
+//! cho đúng hợp đồng RFC 8628 §3.4, nhưng server **không** cấp endpoint đổi nó:
+//! refresh token được `sys_short_sessions` cấp hạn 8h — **cùng hạn** với
+//! access_token, nên đổi nó cũng không kéo dài được phiên. Đo được trên stack
+//! thật: cả hai cùng `17:15:25`, và `token_refresh` cũ không UPDATE
+//! `sys_short_sessions` nên hạn không bao giờ lùi.
+//!
+//! Muốn dùng lại sau 8h thì chạy lại device flow (không cần trình duyệt).
+//!
+//! Refs: RFC 8628 §3 (Device Authorization Grant) + RFC 7009 (Revocation).
 
 use std::sync::Arc;
 
@@ -18,7 +27,7 @@ use axum::routing::{get, post};
 use axum::{Router, http::HeaderMap};
 use serde::{Deserialize, Serialize};
 
-use opsense_model::entities::admin::{Admin, Token, sha256_hex};
+use opsense_model::entities::admin::{Admin, sha256_hex};
 
 use crate::api::AppState;
 use crate::api::admin::AdminHeaders;
@@ -67,11 +76,6 @@ struct DeviceTokenResponse {
 struct OAuthError {
     error: String,
     error_description: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct RefreshRequest {
-    refresh_token: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -129,7 +133,6 @@ pub fn routes() -> Router<AppState> {
         .route("/device/verify", post(device_verify))
         .route("/device/token", post(device_token))
         // ---- token management ----
-        .route("/token/refresh", post(token_refresh))
         .route("/token/revoke", post(token_revoke))
         // ---- long session (Ed25519 keypair) ----
         .route("/session/issue", post(session_issue))
@@ -336,75 +339,6 @@ async fn device_token(
             oauth_error(http, code, &msg)
         }
     }
-}
-
-/// `POST /api/oauth/v1/token/refresh` — RFC 6749 §6.
-/// Body: `{ "refresh_token": "..." }`. Trả access_token + refresh_token mới.
-async fn token_refresh(
-    State(state): State<AppState>,
-    Json(payload): Json<RefreshRequest>,
-) -> Response {
-    let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
-
-    // Refresh token hash nằm trong `sys_short_sessions` (bảng partition,
-    // được cấp lúc approve device flow) — lookup theo sha256(plaintext).
-    let admin = admin(&state);
-    let (user_id, _session_id) = match admin
-        .lookup_short_session(tenant_id, &payload.refresh_token)
-        .await
-    {
-        Ok(Some(pair)) => pair,
-        Ok(None) => {
-            return oauth_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_grant",
-                "Refresh token not found",
-            );
-        }
-        Err(e) => {
-            return oauth_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                &format!("lookup refresh token: {e}"),
-            );
-        }
-    };
-
-    // Sinh access_token mới cùng hệ `sys_user` / `sys_token_map` (abt_*) —
-    // đúng hệ introspect mà Nginx xác minh.
-    let expires_at_ts = match chrono::Utc::now().checked_add_signed(chrono::Duration::hours(8)) {
-        Some(ts) => ts,
-        None => {
-            return oauth_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "Timestamp overflow",
-            );
-        }
-    };
-    let new_access = match admin
-        .issue_user_token(tenant_id, &user_id, Some(expires_at_ts))
-        .await
-    {
-        Ok(token) => token,
-        Err(e) => {
-            return oauth_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                &format!("issue access token: {e}"),
-            );
-        }
-    };
-    state.oauth_metrics.inc_access_token_refreshed();
-
-    Json(DeviceTokenResponse {
-        access_token: new_access,
-        refresh_token: payload.refresh_token, // refresh token reuse (rotation là Phase sau)
-        token_type: "Bearer".to_string(),
-        expires_in: 8 * 3600,
-        session_id: None,
-    })
-    .into_response()
 }
 
 /// `POST /api/oauth/v1/token/revoke` — RFC 7009.

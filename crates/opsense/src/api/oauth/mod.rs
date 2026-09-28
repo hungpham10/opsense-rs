@@ -48,7 +48,6 @@ const _: fn() = || {
         device_code_approved: 0,
         device_code_denied: 0,
         access_token_issued: 0,
-        access_token_refreshed: 0,
         long_session_issued: 0,
     };
 };

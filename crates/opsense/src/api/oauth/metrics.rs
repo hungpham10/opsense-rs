@@ -5,7 +5,6 @@
 //! - `device_code_approved_total`
 //! - `device_code_denied_total`
 //! - `access_token_issued_total`
-//! - `access_token_refreshed_total`
 //! - `long_session_issued_total`
 //!
 //! Tránh kéo thêm dep `prometheus`; dùng `AtomicU64` + expose JSON.
@@ -18,7 +17,6 @@ pub struct OAuthMetrics {
     pub device_code_approved: AtomicU64,
     pub device_code_denied: AtomicU64,
     pub access_token_issued: AtomicU64,
-    pub access_token_refreshed: AtomicU64,
     pub long_session_issued: AtomicU64,
 }
 
@@ -29,7 +27,6 @@ impl OAuthMetrics {
             device_code_approved: AtomicU64::new(0),
             device_code_denied: AtomicU64::new(0),
             access_token_issued: AtomicU64::new(0),
-            access_token_refreshed: AtomicU64::new(0),
             long_session_issued: AtomicU64::new(0),
         }
     }
@@ -46,9 +43,6 @@ impl OAuthMetrics {
     pub fn inc_access_token_issued(&self) {
         self.access_token_issued.fetch_add(1, Ordering::Relaxed);
     }
-    pub fn inc_access_token_refreshed(&self) {
-        self.access_token_refreshed.fetch_add(1, Ordering::Relaxed);
-    }
     pub fn inc_long_session_issued(&self) {
         self.long_session_issued.fetch_add(1, Ordering::Relaxed);
     }
@@ -59,7 +53,6 @@ impl OAuthMetrics {
             device_code_approved: self.device_code_approved.load(Ordering::Relaxed),
             device_code_denied: self.device_code_denied.load(Ordering::Relaxed),
             access_token_issued: self.access_token_issued.load(Ordering::Relaxed),
-            access_token_refreshed: self.access_token_refreshed.load(Ordering::Relaxed),
             long_session_issued: self.long_session_issued.load(Ordering::Relaxed),
         }
     }
@@ -71,7 +64,6 @@ pub struct OAuthMetricsSnapshot {
     pub device_code_approved: u64,
     pub device_code_denied: u64,
     pub access_token_issued: u64,
-    pub access_token_refreshed: u64,
     pub long_session_issued: u64,
 }
 
