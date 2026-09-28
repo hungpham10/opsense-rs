@@ -36,8 +36,19 @@ pub struct Admin {
     resolver: Arc<Resolver>,
 
     // @NOTE: caching
+    //
+    // CHỈ cache theo **service** (`user:<user_id>`), tuyệt đối không cache theo
+    // `token_id`. `token_id` là khoá danh tính của hàng `sys_token_map`, nó
+    // **không đổi** khi token được phát lại; còn giá trị token thì đổi. Cache
+    // khoá theo nó sẽ giữ plaintext của token *cũ* vĩnh viễn (không TTL, chỉ
+    // LRU theo sức chứa) ⇒ mọi lần phát token từ lần thứ hai trở đi đều bị
+    // từ chối 401 vì `verify_user_token` so constant-time với plaintext cũ.
+    //
+    // Bù lại, tầng introspect của Nginx đã cache 60s (`conf/nginx/vhost/
+    // 04-api.conf`), nên bỏ cache ở đây chỉ tốn thêm ~1 lần giải mã AES mỗi
+    // 60s mỗi token — không đáng để đổi lấy việc phải nhớ write-through ở
+    // mọi nơi phát token. Đó chính là bẫy đã gây ra bug này.
     cache_unencrypted_tokens_by_services: Arc<LruCache<(i64, String), Option<String>, 32>>,
-    cache_unencrypted_tokens_by_ids: Arc<LruCache<i64, Option<String>, 32>>,
 }
 
 impl Admin {
@@ -45,7 +56,6 @@ impl Admin {
         Self {
             resolver: resolver.clone(),
             cache_unencrypted_tokens_by_services: Arc::new(LruCache::new(10 * 32)),
-            cache_unencrypted_tokens_by_ids: Arc::new(LruCache::new(10 * 32)),
         }
     }
 
@@ -112,6 +122,13 @@ impl Admin {
         }
     }
 
+    /// Đọc plaintext của token từ `sys_token_map` theo `token_id`.
+    ///
+    /// **Cố ý không cache.** `token_id` là id của hàng `sys_token_map`, không đổi
+    /// khi token được phát lại, nên cache theo nó sẽ trả về plaintext cũ. Xem
+    /// ghi chú ở trường `cache_unencrypted_tokens_by_services` trên struct
+    /// `Admin`. Gọi thẳng DB: introspect đã được Nginx cache 60s nên chi phí
+    /// thực tế không đáng kể.
     pub(crate) async fn get_unencrypted_token_by_id(
         &self,
         tenant_id: i64,
@@ -120,38 +137,22 @@ impl Admin {
         use opsense_mlib::sops::decrypt;
         use sqlx::Row;
 
-        let cache_key = token_id;
+        let pool = self.dbt(tenant_id);
+        let mut conn = pool.acquire().await?;
+        let row = sqlx::query("SELECT token FROM sys_token_map WHERE tenant_id = $1 AND id = $2")
+            .bind(tenant_id)
+            .bind(token_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+        let Some(row) = row else {
+            return Err(AdminError::Other(format!(
+                "Not found token_id {token_id} for tenant {tenant_id}"
+            )));
+        };
+        let encrypted_bytes: Vec<u8> = row.try_get(0)?;
 
-        match self.cache_unencrypted_tokens_by_ids.get(&cache_key) {
-            Some(Some(token)) => Ok(token),
-            Some(None) => Err(AdminError::Other(format!(
-                "Not found token {token_id}, tenant {tenant_id}"
-            ))),
-            None => {
-                let pool = self.dbt(tenant_id);
-                let mut conn = pool.acquire().await?;
-                let row =
-                    sqlx::query("SELECT token FROM sys_token_map WHERE tenant_id = $1 AND id = $2")
-                        .bind(tenant_id)
-                        .bind(token_id)
-                        .fetch_optional(&mut *conn)
-                        .await?;
-                let Some(row) = row else {
-                    return Err(AdminError::Other(format!(
-                        "Not found token_id {token_id} for tenant {tenant_id}"
-                    )));
-                };
-                let encrypted_bytes: Vec<u8> = row.try_get(0)?;
-
-                let key = helpers::get_master_key().await?;
-                let token = decrypt(&key, &encrypted_bytes)
-                    .map_err(|e| AdminError::Other(format!("Decrypt failed: {e}")))?;
-
-                self.cache_unencrypted_tokens_by_ids
-                    .put(cache_key, Some(token.clone()));
-                Ok(token)
-            }
-        }
+        let key = helpers::get_master_key().await?;
+        decrypt(&key, &encrypted_bytes).map_err(|e| AdminError::Other(format!("Decrypt failed: {e}")))
     }
 }
 
