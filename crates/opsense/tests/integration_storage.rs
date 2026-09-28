@@ -249,6 +249,9 @@ async fn query_timeseries(
 /// Verify HTTP health endpoint returns correct structure.
 #[tokio::test]
 async fn storage_health_endpoint() {
+    // Cài crypto provider: test binary không có `main()` nên không ai cài hộ,
+    // và `Client::new()` sẽ panic `No provider set`.
+    opsense_mlib::tls::install_default_crypto_provider();
     let client = reqwest::Client::new();
     if !ensure_serve(&client).await {
         return;

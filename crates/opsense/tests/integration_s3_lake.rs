@@ -32,6 +32,9 @@ fn s3_pass() -> String {
 
 /// Đợi RustFS sẵn sàng (tối đa 30s). Trả `true` nếu ready.
 async fn wait_rustfs() -> bool {
+    // Cài crypto provider: test binary không có `main()` nên không ai cài hộ,
+    // và `Client::new()` sẽ panic `No provider set`.
+    opsense_mlib::tls::install_default_crypto_provider();
     let client = reqwest::Client::new();
     for _ in 0..30 {
         if client.get(format!("{}/health", s3_endpoint()))
