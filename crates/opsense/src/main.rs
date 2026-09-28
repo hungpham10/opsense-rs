@@ -32,6 +32,11 @@ use opsense_mlib as _;
 #[derive(Parser, Debug)]
 #[command(
     name = "opsense",
+    // `CARGO_PKG_VERSION` lấy từ `version.workspace = true` trong Cargo.toml
+    // **lúc build**, nên `./scripts/bump.sh` bump là binary mới tự đổi số — không
+    // phải sửa chỗ này. Không kèm git sha: làm vậy cần build script, tức thêm
+    // một file build cho một dòng thông tin.
+    version = env!("CARGO_PKG_VERSION"),
     about = "One gateway for every site relabitity activities"
 )]
 struct Cli {
