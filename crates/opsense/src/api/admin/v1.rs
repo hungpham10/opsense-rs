@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Json as JsonResponse};
 use axum::routing::{get, post};
 
 use chrono::{DateTime, Utc};
-use http::{Response, StatusCode, header};
+use http::{HeaderMap, Response, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -13,7 +13,7 @@ use opsense_model::cache::Cache;
 use opsense_model::entities::admin::{AuthConfig, Jwt, Tenant, Token, UserTokenInfo};
 
 use crate::api::AppState;
-use crate::api::admin::AdminHeaders;
+use crate::api::admin::{AdminHeaders, require_self_or_admin};
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct AdminResponse {
@@ -131,11 +131,37 @@ async fn put_token(
     }
 }
 
+/// Danh tính người gọi, lấy từ header Nginx set sau khi verify token.
+///
+/// `X-User-Id` = claim `sub` của token (`04-api.conf:205`); `X-User-Role` =
+/// claim `role` (`:203`, hiện chưa provider nào phát — xem `ADMIN_ROLE`).
+fn caller_id(headers: &HeaderMap) -> Result<String, crate::api::admin::AdminForbidden> {
+    headers
+        .get("x-user-id")
+        .or_else(|| headers.get("x-auth-user-id"))
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        // Thiếu header ⇒ coi như không chứng minh được mình là ai ⇒ chặn.
+        // Không mở lối "không có thì cho qua".
+        .ok_or(crate::api::admin::AdminForbidden::NotSelf {
+            caller: "<thiếu X-User-Id>".into(),
+            target: "<không xác định>".into(),
+        })
+}
+
 async fn issue_user_token(
     State(app_state): State<AppState>,
     AdminHeaders { tenant_id, .. }: AdminHeaders,
+    headers: HeaderMap,
     JsonRequest(payload): JsonRequest<IssueUserTokenRequest>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, crate::api::admin::AdminForbidden> {
+    // Chỉ phát token cho chính mình. Không có kiểm này thì bất kỳ user đăng
+    // nhập nào cũng tự phát được token dài hạn cho user khác — và sau đó dùng
+    // nó để gọi API **thay** người kia. Xem `require_self_or_admin`.
+    let caller = caller_id(&headers)?;
+    require_self_or_admin(&caller, &payload.user_id)?;
+
     let expires_at = match payload
         .expires_at
         .as_deref()
@@ -144,17 +170,17 @@ async fn issue_user_token(
         None => None,
         Some(Ok(datetime)) => Some(datetime.with_timezone(&Utc)),
         Some(Err(error)) => {
-            return (
+            return Ok((
                 StatusCode::BAD_REQUEST,
                 JsonResponse(UserTokenResponse {
                     error: Some(format!("Invalid expires_at (expect RFC 3339): {error}")),
                     ..Default::default()
                 }),
-            );
+            ));
         }
     };
 
-    match app_state
+    Ok(match app_state
         .admin_entity
         .issue_user_token(tenant_id.into(), &payload.user_id, expires_at)
         .await
@@ -176,7 +202,7 @@ async fn issue_user_token(
                 ..Default::default()
             }),
         ),
-    }
+    })
 }
 
 async fn list_user_tokens(
@@ -209,8 +235,15 @@ async fn reveal_user_token(
     State(app_state): State<AppState>,
     Path(user_id): Path<String>,
     AdminHeaders { tenant_id, .. }: AdminHeaders,
-) -> impl IntoResponse {
-    match app_state
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, crate::api::admin::AdminForbidden> {
+    // `user_id` lấy từ URL, không kiểm gì với người gọi ⇒ bất kỳ ai đăng nhập
+    // cũng đọc được **plaintext** token của user khác. Đo trước khi sửa:
+    // tạo user giả trong DB, gọi bằng token `dev-user` ⇒ 200 + token của user đó.
+    let caller = caller_id(&headers)?;
+    require_self_or_admin(&caller, &user_id)?;
+
+    Ok(match app_state
         .admin_entity
         .reveal_user_token(tenant_id.into(), &user_id)
         .await
@@ -229,24 +262,30 @@ async fn reveal_user_token(
                 ..Default::default()
             }),
         ),
-    }
+    })
 }
 
 async fn revoke_user_token(
     State(app_state): State<AppState>,
     Path(user_id): Path<String>,
     AdminHeaders { tenant_id, .. }: AdminHeaders,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, crate::api::admin::AdminForbidden> {
+    // Cùng lý do với `reveal_user_token`: `user_id` từ URL, không ai kiểm.
+    // Đo: qua UDS thì DELETE user khác trả 200 và set `revoked_at`.
+    let caller = caller_id(&headers)?;
+    require_self_or_admin(&caller, &user_id)?;
+
     match app_state
         .admin_entity
         .revoke_user_token(tenant_id.into(), &user_id)
         .await
     {
         Ok(_) => Ok(StatusCode::OK),
-        Err(error) => Err((
-            StatusCode::NOT_FOUND,
-            format!("Fail revoking token of {user_id}: {error}"),
-        )),
+        // Route này vốn trả `Err((StatusCode, String))`; nay lỗi thành
+        // `AdminForbidden` (403) để thống nhất với phần chặn self-only ở trên.
+        // 404 cũng đi qua `Ok` vì không còn kiểu lỗi thứ hai.
+        Err(_error) => Ok(StatusCode::NOT_FOUND),
     }
 }
 
