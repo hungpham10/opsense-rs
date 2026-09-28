@@ -38,7 +38,8 @@ Cờ `serve --repl` / `--mcp` / `--runner-bind` **không còn** — dùng subcom
 Mọi lệnh trên đều là client của `opsense serve`, nên cần bearer token:
 
 ```bash
-./scripts/mint-dex-token.py          # đăng nhập Dex, ghi ~/.config/opsense/token (mode 0600)
+./scripts/mint-dex-token.py          # gia hạn nếu được, không thì đăng nhập; ghi ~/.config/opsense/token (mode 0600)
+./scripts/mint-dex-token.py --login  # ép đăng nhập lại, bỏ qua refresh
 ./scripts/mint-dex-token.py --print  # chỉ in ra, để dán vào env của MCP client
 ```
 
@@ -50,6 +51,8 @@ Dex cấp token **24 giờ** — khoảng một lần/ngày. Triệu chứng h�
 wrote ~/.config/opsense/token (780 chars, mode 0600)
   user=dev-user@example.com  còn 24.0 giờ (hết lúc 2026-09-29 15:21:41)
 ```
+
+Script tự gia hạn bằng **refresh token** (`offline_access`, lưu ở `~/.config/opsense/refresh_token`): token còn hạn quá 5 phút thì không gọi mạng, sắp hết hạn thì 1 request, không có refresh token thì mới qua form đăng nhập. Dex **xoay** refresh token mỗi lần dùng nên script luôn lưu bản mới nhất; refresh token hỏng thì báo một dòng rồi rơi về đăng nhập.
 
 Restart `opsense-dex` cũng làm token cũ hết giá trị (Dex giữ phiên trong RAM).
 

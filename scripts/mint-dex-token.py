@@ -9,8 +9,16 @@ theo thứ tự (`crates/opsense/src/client/graphql.rs:422`):
 2. `~/.config/opsense/token` — file này tạo ra, mode 0600.
 
 Dùng:
-    ./scripts/mint-dex-token.py            # lấy token, ghi đè file
-    ./scripts/mint-dex-token.py --print    # chỉ in ra, không ghi file
+    ./scripts/mint-dex-token.py            # refresh nếu được, không thì login
+    ./scripts/mint-dex-token.py --login    # ép đăng nhập lại, bỏ qua refresh
+    ./scripts/mint-dex-token.py --print    # chỉ in ra token, không ghi file
+
+**Refresh token**: xin scope `offline_access` nên Dex cấp kèm refresh token, lưu
+ở `~/.config/opsense/refresh_token`. Mặc định script **gia hạn bằng refresh token**
+khi token hiện tại sắp hết hạn (mặc định 5 phút), chỉ đăng nhập lại khi không có
+refresh token hoặc nó đã hết hạn. Lý do: login lại tốn 4 request + phải qua form,
+còn refresh là 1 request; và nó giữ được phiên Dex, nên restart `opsense-dex` mới
+làm mất.
 
 Khi nào cần chạy lại:
   * Token hết hạn — Dex cấp **24 giờ** (mặc định), nên khoảng một lần/ngày.
@@ -57,6 +65,12 @@ DEX_USER = "dev-user@example.com"
 DEX_PASSWORD = "password"
 
 TOKEN_PATH = os.path.expanduser("~/.config/opsense/token")
+# Refresh token để riêng: `token` phải là **token thô** vì
+# `load_bearer_from_env` (`crates/opsense/src/client/graphql.rs:422`) đọc thẳng
+# file đó, không parse JSON.
+REFRESH_PATH = os.path.expanduser("~/.config/opsense/refresh_token")
+# Còn dưới ngưỡng này thì gia hạn, để không chạm lúc đang làm việc.
+REFRESH_AHEAD_SECS = 300
 
 
 def make_opener() -> urllib.request.OpenerDirector:
@@ -100,15 +114,42 @@ def absolute(action: str) -> str:
     return f"{parts.scheme}://{parts.netloc}{action}"
 
 
-def main() -> int:
-    opener = make_opener()
-    _, body = fetch(
-        opener, f"{DEX_ISSUER}/.well-known/openid-configuration"
-    )
+def discover(opener):
+    """OIDC discovery → (auth_endpoint, token_endpoint)."""
+    _, body = fetch(opener, f"{DEX_ISSUER}/.well-known/openid-configuration")
     disc = json.loads(body)
-    auth_endpoint = disc["authorization_endpoint"]
-    token_endpoint = disc["token_endpoint"]
+    return disc["authorization_endpoint"], disc["token_endpoint"]
 
+
+class TokenError(Exception):
+    """Token endpoint từ chối (HTTP lỗi, hoặc 200 mà không có `id_token`)."""
+
+
+def token_call(opener, token_endpoint, data) -> dict:
+    """POST token endpoint. Ném `TokenError` thay vì `SystemExit` — gọi bởi cả
+    `login()` lẫn `try_refresh()`, và refresh hỏng phải rơi về login chứ không
+    được giết cả script."""
+    _, body = fetch(
+        opener,
+        token_endpoint,
+        data={
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            **data,
+        },
+    )
+    try:
+        resp = json.loads(body)
+    except ValueError:
+        raise TokenError(f"token endpoint không trả JSON: {body[:200]}")
+    if "id_token" not in resp:
+        desc = resp.get("error_description") or resp.get("error") or body[:200]
+        raise TokenError(str(desc))
+    return resp
+
+
+def login(opener, auth_endpoint, token_endpoint) -> dict:
+    """Flow đầy đủ: form đăng nhập → approval → đổi code lấy token."""
     state = f"cli-state-{os.getpid()}"
     redirect_uri = f"{SERVE_URL}/callback"
     q = urllib.parse.urlencode(
@@ -116,7 +157,10 @@ def main() -> int:
             "client_id": CLIENT_ID,
             "response_type": "code",
             "redirect_uri": redirect_uri,
-            "scope": "openid email profile",
+            # `offline_access` ⇒ Dex cấp kèm refresh token để lần sau không
+            # phải qua form nữa (`scopes_supported` có nó, client cũng cho
+            # `grantTypes: [refresh_token]`).
+            "scope": "openid email profile offline_access",
             "state": state,
         }
     )
@@ -128,7 +172,7 @@ def main() -> int:
     approval_url, html = fetch(opener, login_url, data=form)
     if "code=" not in approval_url and "approval" not in html.lower():
         print(f"login failed, landing={approval_url}\n{html[:800]}", file=sys.stderr)
-        return 1
+        return None
 
     action = form_action(html)
     approve_url = absolute(action) if action else approval_url
@@ -139,42 +183,113 @@ def main() -> int:
 
     if "code=" not in final_url:
         print(f"no code in {final_url}\n{body[:800]}", file=sys.stderr)
-        return 1
+        return None
     code = urllib.parse.parse_qs(urllib.parse.urlsplit(final_url).query)["code"][0]
+    try:
+        return token_call(
+            opener,
+            token_endpoint,
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": redirect_uri,
+            },
+        )
+    except TokenError as e:
+        print(f"đổi code thất bại: {e}", file=sys.stderr)
+        return None
 
-    _, body = fetch(
-        opener,
-        token_endpoint,
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-            "redirect_uri": redirect_uri,
-        },
-    )
-    id_token = json.loads(body)["id_token"]
 
-    if "--print" in sys.argv[1:]:
+def try_refresh(opener, token_endpoint) -> dict | None:
+    """Gia hạn bằng refresh token. None nếu không có / không dùng được.
+
+    Nuốt lỗi có chủ đích: refresh token hết hạn hay bị thu hồi thì đường này
+    chỉ là tối ưu, còn `login()` vẫn chạy được. Không nuốt thì mỗi lần token
+    hết hạn là phải nhớ xoá file.
+    """
+    rt = read_secret(REFRESH_PATH)
+    if not rt:
+        return None
+    try:
+        return token_call(
+            opener, token_endpoint, {"grant_type": "refresh_token", "refresh_token": rt}
+        )
+    except (TokenError, OSError, urllib.error.URLError) as e:
+        # Refresh token hết hạn / bị thu hồi / mất mạng. Đây chỉ là tối ưu,
+        # nên báo rồi để `login()` thử tiếp — Dex nói rõ "has already been
+        # claimed by another client", tức refresh token là **dùng một lần**.
+        print(f"refresh token không dùng được ({e}) — đăng nhập lại", file=sys.stderr)
+        return None
+
+
+def read_secret(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def write_secret(path: str, value: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(value)
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if "--help" in argv or "-h" in argv:
+        print(__doc__)
+        return 0
+
+    opener = make_opener()
+    auth_endpoint, token_endpoint = discover(opener)
+
+    # Token hiện tại còn hạn và còn dư ngưỡng ⇒ không làm gì cả, kể cả network
+    # call. Đây là trường hợp phổ biến nhất khi chạy script nhiều lần trong
+    # ngày.
+    current = read_secret(TOKEN_PATH)
+    ttl = _seconds_left(current) if current else None
+    if "--login" not in argv and ttl is not None and ttl > REFRESH_AHEAD_SECS:
+        print(f"token còn {ttl / 3600:.1f} giờ (hết lúc {_expiry_text(current)}) — không cần làm mới")
+        if "--print" in argv:
+            print(current)
+        return 0
+
+    how = "login"
+    resp = None
+    if "--login" not in argv:
+        resp = try_refresh(opener, token_endpoint)
+        how = "refresh" if resp else "login"
+    if resp is None:
+        resp = login(opener, auth_endpoint, token_endpoint)
+        if resp is None:
+            return 1
+    id_token = resp["id_token"]
+
+    if "--print" in argv:
         # Chỉ in ra: để dán vào `env` của MCP client mà không đụng file.
         print(id_token)
         return 0
 
-    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-    fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(id_token)
+    write_secret(TOKEN_PATH, id_token)
+    # Dex **xoay** refresh token mỗi lần dùng, nên phải lưu bản mới nhất —
+    # lưu bản cũ thì lần sau nó đã bị thu hồi.
+    if resp.get("refresh_token"):
+        write_secret(REFRESH_PATH, resp["refresh_token"])
 
     # In luôn thời hạn: Dex cấp id_token **24 giờ**, nên đây là thứ quyết định
     # khi nào phải chạy lại script. Không in thì phải tự giải mã JWT mới biết.
-    ttl = _seconds_left(id_token)
+    new_ttl = _seconds_left(id_token)
     who = _claim(id_token, "email") or "?"
-    if ttl is None:
+    via = "refresh" if how == "refresh" else "đăng nhập"
+    if new_ttl is None:
         print(f"wrote {TOKEN_PATH} ({len(id_token)} chars, mode 0600) — không đọc được hạn")
-    elif ttl > 0:
+    elif new_ttl > 0:
         print(
-            f"wrote {TOKEN_PATH} ({len(id_token)} chars, mode 0600)\n"
-            f"  user={who}  còn {ttl / 3600:.1f} giờ (hết lúc {_expiry_text(id_token)})"
+            f"wrote {TOKEN_PATH} ({len(id_token)} chars, mode 0600) — {via}\n"
+            f"  user={who}  còn {new_ttl / 3600:.1f} giờ (hết lúc {_expiry_text(id_token)})"
         )
     else:
         print(
