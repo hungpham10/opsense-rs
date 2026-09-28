@@ -70,6 +70,84 @@ Nối vào MCP client (stdio) — endpoint mặc định là `http://localhost:8
 }
 ```
 
+### Ba loại token — đừng nhầm
+
+Mọi client (`opsense status`, `mcp`, `repl`) đều là client của `opsense serve`, nên đều cần token. Nhưng có **ba** loại, và chúng khác nhau cả về hạn lẫn cách lấy:
+
+| | Hình dạng | Hạn | Lấy bằng | Dùng để |
+|---|---|---|---|---|
+| `id_token` (Dex) | JWT 3 phần, `eyJ…` | 24h | `scripts/mint-dex-token.py` | Đăng nhập thường, không cần trình duyệt |
+| `abt_…` (device flow) | chuỗi ngẫu nhiên, **1 phần** | 8h | `repl :login` (mở trình duyệt) | Token cho CLI/MCP, không phụ thuộc phiên Dex |
+| refresh token (device flow) | chuỗi ngẫu nhiên | 8h, **cứng** | kèm `abt_` | Chỉ script dùng để gia hạn |
+
+`~/.config/opsense/token` chứa token nào tuỳ lệnh bạn chạy gần nhất. Đọc dạng
+thì biết ngay: 3 phần là `id_token`, 1 phần là `abt_`.
+
+### `repl :login` — chạy trọn device flow trong một lệnh
+
+```bash
+opsense repl
+:login
+# → in URL + user_code → bạn mở trình duyệt, nhập code, bấm Authorize
+# → ghi abt_ token vào ~/.config/opsense/token
+```
+
+**`:login` KHÔNG cần đăng nhập Dex trước.** Nó tự chạy cả flow. Lệnh `:login`
+gọi `request_device_code` → in ra URL để bạn mở → `poll_token` → lưu
+`access_token` (`repl/commands.rs:314`).
+
+Hết hạn nó báo đúng: *"Restart REPL (`:quit` then `opsense repl`) to use it."*
+
+Trường hợp này bắt buộc mở trình duyệt, vì bước `device/verify` cần người dùng
+thật bấm nút duyệt. Đổi provider sang Auth0 thì `:login` vẫn chạy (nó đi
+authorization_code flow chuẩn, provider lo phần đăng nhập), nhưng
+`scripts/mint-dex-token.py` thì **không** — script giả lập POST form
+`login`+`password`, còn Auth0 dùng Universal Login (Google/MFA/CAPTCHA), không
+có form tĩnh để POST vào. Với provider khác Dex thì dùng `:login`.
+
+### `opsense mcp` không tự đăng nhập được
+
+9 tool của MCP (`mcp/server.rs`) không có tool auth nào. `login_and_save_token`
+(`client/auth.rs:150`) là device flow dành cho CLI — nó in
+`Open this URL in your browser` rồi poll — nhưng **không có caller nào** và MCP
+là stdio (không có ai để bấm nút). Nên:
+
+```bash
+./scripts/mint-dex-token.py     # hoặc :login
+# rồi RESTART MCP client — token được nạp MỘT LẨN lúc khởi động
+```
+
+Sửa file `token` khi MCP đang chạy **không có tác dụng**: `OpsenseClient::new`
+đọc token một lần rồi giữ trong RAM (`client/graphql.rs:190`).
+
+### Token dài hạn (vĩnh viễn) cho tự động hoá
+
+Cả hai loại trên đều hạn ngắn (24h / 8h). Muốn token không hết hạn để chạy
+script dài hạn, phát bằng API admin (một người một token, `UPSERT` theo
+`tenant_id + user_id`):
+
+```bash
+# Lấy `sub` của chính mình từ id_token
+SUB=$(python3 -c "
+import base64,json,os
+t=open(os.path.expanduser('~/.config/opsense/token')).read().strip()
+d=t.split('.')[1]; d+='='*(-len(d)%4)
+print(json.loads(base64.urlsafe_b64decode(d))['sub'])")
+
+curl -s -XPOST http://localhost:8080/api/admin/v1/tokens/users \
+  -H "Authorization: Bearer $(cat ~/.config/opsense/token)" \
+  -H 'Content-Type: application/json' \
+  -d "{\"user_id\": \"$SUB\"}"        # bỏ expires_at ⇒ NULL ⇒ vĩnh viễn
+# → {"token":"abt_…"}   dùng token này thay ~/.config/opsense/token
+```
+
+- Có `"expires_at": "2026-12-31T23:59:59Z"` thì đặt hạn cụ thể.
+- `GET /api/admin/v1/tokens/users/{user_id}` trả lại plaintext.
+- `DELETE /api/admin/v1/tokens/users/{user_id}` thu hồi (set `revoked_at`, token
+  cũ chết ngay, hàng vẫn còn trong DB).
+
+Token phát ra là **một lần duy nhất** — mất thì lấy lại bằng `GET` ở trên.
+
 ### Các MCP tool
 
 `opsense mcp` là client mỏng của `opsense serve`: mỗi tool = 1 round-trip
