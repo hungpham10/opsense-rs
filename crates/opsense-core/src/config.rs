@@ -5,11 +5,6 @@
 //! [engine]
 //! poll_interval_seconds = 60
 //!
-//! [sources.vector]
-//! url = "http://vector:8686"
-//! jq_filter = ".data[]"
-//! metrics = ["cpu_usage", "mem_usage"]
-//!
 //! [attributes]
 //! dc = "hcm"
 //! ```
@@ -65,25 +60,6 @@ impl Default for EngineConfig {
             poll_interval_seconds: 60,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VectorSourceConfig {
-    pub url: String,
-
-    /// jq-style filter applied to the Vector payload (uses `opsense_mlib::jq::JsonQuery`).
-    #[serde(default)]
-    pub jq_filter: Option<String>,
-
-    /// Optional allow-list of metric names to pull from the source.
-    #[serde(default)]
-    pub metrics: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SourcesConfig {
-    #[serde(default)]
-    pub vector: Option<VectorSourceConfig>,
 }
 
 /// Pipeline section: components registered into the vector `Runtime`.
@@ -358,9 +334,6 @@ pub struct Config {
     #[serde(default)]
     pub engine: EngineConfig,
 
-    #[serde(default)]
-    pub sources: SourcesConfig,
-
     /// Free-form key/values available to pipeline components as template
     /// variables (`{{name}}` in an HTTP node's URL/headers/body).
     /// Environment variables named `OPSENSE_ATTR_<NAME>` (uppercase) override
@@ -468,11 +441,6 @@ mod tests {
 [engine]
 poll_interval_seconds = 60
 
-[sources.vector]
-url = "http://vector:8686"
-jq_filter = ".data[]"
-metrics = ["cpu_usage", "mem_usage"]
-
 [attributes]
 dc = "hcm"
 env_name = "prod"
@@ -487,13 +455,10 @@ env_name = "prod"
     }
 
     #[test]
-    fn parses_sources_and_attributes() {
+    fn parses_attributes() {
         let cfg = sample();
         assert_eq!(cfg.attributes.get("dc").map(String::as_str), Some("hcm"));
-        let v = cfg.sources.vector.unwrap();
-        assert_eq!(v.url, "http://vector:8686");
-        assert!(v.jq_filter.is_some());
-        assert_eq!(v.metrics.unwrap(), vec!["cpu_usage", "mem_usage"]);
+        assert_eq!(cfg.attributes.get("env_name").map(String::as_str), Some("prod"));
     }
 
     #[test]
