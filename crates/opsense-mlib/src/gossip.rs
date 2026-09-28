@@ -358,6 +358,21 @@ impl Gossip {
             .collect()
     }
 
+    /// Như [`Gossip::probe_targets`] nhưng kèm `node_id` — tầng vận chuyển cần
+    /// cả hai: URL để gọi `/health/live`, `node_id` để gọi
+    /// [`Gossip::mark_alive`] khi peer trả lời.
+    ///
+    /// Suy ra từ `probe_targets` thì phải lọc ngược bằng `alive || suspect` rồi
+    /// khớp URL — dễ lệch với `probe_targets` ngay khi thêm trạng thái mới.
+    #[must_use]
+    pub fn probe_pairs(&self) -> Vec<(&str, &str)> {
+        self.peers
+            .iter()
+            .filter(|(_, p)| p.state != NodeState::Dead)
+            .map(|(id, p)| (id.as_str(), p.url.as_str()))
+            .collect()
+    }
+
     /// Cặp `(peer hỏi, node đang bị nghi)` cho indirect probe. Bỏ qua peer cũng
     /// đang bị nghi — hỏi node ta không tin thì vô nghĩa.
     #[must_use]
@@ -511,6 +526,30 @@ mod tests {
         assert_eq!(g.probe_targets().len(), 1, "suspect vẫn phải ping");
         g.tick_reap(0, 1_000);
         assert!(g.probe_targets().is_empty(), "dead thì bỏ khỏi danh sách ping");
+    }
+
+    /// `probe_pairs` phải khớp **đúng** `probe_targets` — tầng vận chuyển dùng
+    /// cặp này để biết `node_id` của URL mình vừa gọi, nên lệch một node là
+    /// ghi nhầm cảnh báo vào node khác.
+    #[test]
+    fn probe_pairs_agrees_with_probe_targets() {
+        let mut g = Gossip::new("node-a", "http://node-a", 1, 0);
+        g.add_peer("http://node-b", "node-b", 0);
+        g.add_peer("http://node-c", "node-c", 0);
+        g.tick_suspects(0, 1_000);
+
+        let targets = g.probe_targets();
+        let pairs = g.probe_pairs();
+        assert_eq!(targets.len(), pairs.len());
+        for (id, url) in &pairs {
+            assert!(
+                targets.contains(&url.to_string()),
+                "URL {url} của {id} có trong probe_targets không"
+            );
+        }
+        // Node chết rơi khỏi cả hai, giống nhau.
+        g.tick_reap(0, 1_000);
+        assert_eq!(g.probe_pairs().len(), g.probe_targets().len());
     }
 
     #[test]
