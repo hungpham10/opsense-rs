@@ -132,6 +132,9 @@ fn serve_url() -> String {
 #[tokio::test]
 async fn oauth_full_flow_dex_nginx_axum() {
     // Client chấp nhận redirect tự động (cho Dex flow).
+    // Cài crypto provider: test binary không có `main()` nên không ai cài hộ,
+    // và `Client::new()` sẽ panic `No provider set`.
+    opsense_mlib::tls::install_default_crypto_provider();
     let client = reqwest::Client::builder()
         .cookie_store(true)
         .redirect(Policy::limited(10))

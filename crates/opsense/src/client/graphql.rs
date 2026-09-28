@@ -524,7 +524,7 @@ mod tests {
     /// server: body là của thật, chỉ thiếu bước bóc.
     #[test]
     fn gql_unwraps_root_field() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         const BODY: &str = r#"{"data":{"status":{"nodes":[
             {"id":"tsdb","type":"Sink","inputs":["clock"],"description":"ghi observation"}
         ],"stations":[{"id":"tsdb","kind":"timeseries"}]},
@@ -537,11 +537,11 @@ mod tests {
         std::thread::spawn(move || {
             for _ in 0..2 {
                 let Ok((mut sock, _)) = listener.accept() else { return };
-                let mut buf = [0u8; 4096];
-                let _ = sock.read(&mut buf);
+                // Đọc trọn request — xem `read_full_request`.
+                let _ = read_full_request(&mut sock);
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\n\r\n{BODY}",
+                     content-length: {}\r\nconnection: close\r\n\r\n{BODY}",
                     BODY.len()
                 );
                 let _ = sock.write_all(resp.as_bytes());
@@ -581,7 +581,7 @@ mod tests {
     /// ngay nếu tên field lệch.
     #[test]
     fn dto_field_names_match_real_server_response() {
-        use std::io::{Read, Write};
+        use std::io::Write;
 
         // Ba body chép **nguyên văn** từ `opsense-serve` thật, theo đúng thứ tự
         // method dưới đây gọi.
@@ -606,11 +606,11 @@ mod tests {
         std::thread::spawn(move || {
             for body in bodies {
                 let Ok((mut sock, _)) = listener.accept() else { return };
-                let mut buf = [0u8; 8192];
-                let _ = sock.read(&mut buf);
+                // Đọc **trọn** request trước khi trả lời — xem `read_full_request`.
+                let _ = read_full_request(&mut sock);
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\n\r\n{body}",
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = sock.write_all(resp.as_bytes());
@@ -642,6 +642,99 @@ mod tests {
         });
     }
 
+    /// Đọc **trọn** một HTTP request từ socket: tới hết header `\r\n\r\n` **và**
+    /// đủ `content-length` byte body.
+    ///
+    /// Một lần `read` là chưa đủ, và thiếu nó làm test đỏ theo lịch. Đã bắt
+    /// được trên CI, chỉ ở `queryTimeseries` — vì đó là request có POST body
+    /// lớn nhất:
+    ///
+    /// ```text
+    /// queryTimeseries phải decode được: error sending request for url (...)
+    ///   1: connection error
+    ///   2: Connection reset by peer (os error 104)
+    /// ```
+    ///
+    /// Server giả đọc một lần (chỉ đủ header), trả lời rồi drop socket **trong
+    /// lúc client còn đang gý body** ⇒ client nhận RST, và lỗi báo ra là
+    /// *connection*, không phải *decode* — dễ chẩn đoán nhầm thành lỗi DTO.
+    fn read_full_request(sock: &mut std::net::TcpStream) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 4096];
+        // Vị trí ngay sau `\r\n\r\n` và số byte body còn phải chờ.
+        let mut body_start: Option<usize> = None;
+        let mut content_length = 0usize;
+        loop {
+            let n = sock.read(&mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if body_start.is_none() {
+                let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let start = pos + 4;
+                let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                content_length = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                body_start = Some(start);
+            }
+            // Kiểm tra **ngay trong lần lặt này**: request thường tới trong một
+            // `read` duy nhất (header + body), nếu chờ lần lặt sau thì sẽ `read`
+            // thêm một lần nữa và treo vì client đang chờ response.
+            if let Some(start) = body_start
+                && buf.len() >= start + content_length
+            {
+                break;
+            }
+        }
+        Ok(buf)
+    }
+
+    /// `read_full_request` phải chờ đủ body, không phải chỉ tới hết header.
+    ///
+    /// Test này **tất định** (ngược lại với test trên): writer cố tình gửi
+    /// header trước, body sau một độ trễ, và có ghi thêm một request thứ hai vào
+    /// socket — nếu hàm trả về sớm ở mốc header thì hai request bị trộn làm một và
+    /// assert bắt được.
+    #[test]
+    fn read_full_request_waits_for_the_whole_body() {
+        use std::io::Write;
+        use std::net::TcpListener as Listener;
+        use std::time::Duration;
+
+        let listener = Listener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let writer = std::thread::spawn(move || {
+            let mut sock = std::net::TcpStream::connect(addr).expect("connect");
+            sock.write_all(b"POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 11\r\n\r\n")
+                .expect("headers");
+            std::thread::sleep(Duration::from_millis(60));
+            sock.write_all(b"hello world").expect("body");
+            std::thread::sleep(Duration::from_millis(60));
+            // Request thứ hai phải **không** lọt vào kết quả lần đọc đầu.
+            sock.write_all(b"GET /y HTTP/1.1\r\nHost: h\r\n\r\n").expect("next");
+            std::thread::sleep(Duration::from_millis(60));
+        });
+
+        let (mut sock, _) = listener.accept().expect("accept");
+        sock.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+        let got = read_full_request(&mut sock).expect("read");
+        writer.join().expect("writer");
+
+        let text = String::from_utf8_lossy(&got);
+        assert!(text.contains("hello world"), "thiếu body: {got:?}");
+        assert!(
+            !text.contains("GET /y"),
+            "lọt cả request thứ hai vào ⇒ hàm dừng sớm hơn hết body"
+        );
+    }
+
     /// Hồi quy: tên biến trong `variables` phải khớp `$…` khai trong query.
     ///
     /// `Vars` derive `Serialize` nên mặc định phát ra key `from_ts`/`to_ts`/
@@ -653,7 +746,7 @@ mod tests {
     /// lại ở bất kỳ biến nào.
     #[test]
     fn query_variables_are_camel_case() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::sync::mpsc;
 
         let (tx, rx) = mpsc::channel::<String>();
@@ -661,14 +754,15 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 8192];
-            let n = sock.read(&mut buf).unwrap_or(0);
-            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            // Đọc trọn request: test assert trên *nội dung* request này, và đọc
+            // một lần thì có thể cắt mất phần cuối của `variables`.
+            let buf = read_full_request(&mut sock).unwrap_or_default();
+            let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
             const BODY: &str =
                 r#"{"data":{"queryTimeseries":{"observations":[],"truncated":false,"scanned":0}}}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                 content-length: {}\r\n\r\n{BODY}",
+                 content-length: {}\r\nconnection: close\r\n\r\n{BODY}",
                 BODY.len()
             );
             let _ = sock.write_all(resp.as_bytes());
@@ -709,18 +803,18 @@ mod tests {
     /// Root field sai phải báo đúng tên, không báo "missing field" mơ hồ.
     #[test]
     fn gql_reports_missing_root_by_name() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         // Body không có `queryTimeseries` — mô phỏng gõ sai tên root ở call site.
         const BODY: &str = r#"{"data":{"somethingElse":{}}}"#;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut sock, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 4096];
-            let _ = sock.read(&mut buf);
+            // Đọc trọn request — xem `read_full_request`.
+            let _ = read_full_request(&mut sock);
             let resp = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                 content-length: {}\r\n\r\n{BODY}",
+                 content-length: {}\r\nconnection: close\r\n\r\n{BODY}",
                 BODY.len()
             );
             let _ = sock.write_all(resp.as_bytes());

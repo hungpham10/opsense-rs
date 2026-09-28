@@ -48,6 +48,9 @@ async fn ensure_dex(_client: &reqwest::Client) -> bool {
 
 #[tokio::test]
 async fn health_endpoint_returns_ok() {
+    // Cài crypto provider: test binary không có `main()` nên không ai cài hộ,
+    // và `Client::new()` sẽ panic `No provider set`.
+    opsense_mlib::tls::install_default_crypto_provider();
     let client = reqwest::Client::new();
     if !ensure_health(&client).await {
         return;
