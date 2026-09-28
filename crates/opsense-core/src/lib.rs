@@ -14,7 +14,7 @@ mod context;
 mod station;
 
 pub use candles::{OHLCV_FIELDS, TimeseriesStationHandle, candles_from_observations};
-pub use config::Config;
+pub use config::{Config, GossipConfig};
 pub use context::{Context, Stations};
 pub use station::{CategoryStation, PatternStation, Station, StationKind, TimeseriesStation};
 

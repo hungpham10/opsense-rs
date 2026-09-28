@@ -334,6 +334,12 @@ impl GossipConfig {
                 self.dead_secs, self.suspect_secs
             )));
         }
+        if self.suspect_secs < self.tick_secs {
+            return Err(ConfigError::Invalid(format!(
+                "gossip.suspect_secs ({}) must be >= gossip.tick_secs ({}) — không thể kết luận node im lặng nhanh hơn tần suất ta hỏi nó",
+                self.suspect_secs, self.tick_secs
+            )));
+        }
         if self.quorum == 0 {
             return Err(ConfigError::Invalid(
                 "gossip.quorum must be >= 1 — 0 sẽ bị `Gossip::new` nâng lên 1, tức im lặng ý nghĩa khác".into(),
@@ -714,6 +720,43 @@ node_id = "node-a"
 own_url = "http://node-a:8080"
 token = "s3cret"
 suspect_secs = 30
+dead_secs = 30
+"#,
+        );
+        assert!(ok.validate().is_ok(), "bằng nhau thì hợp lệ");
+    }
+
+    /// Không thể phát hiện node im lặng nhanh hơn tần suất ta hỏi nó.
+    ///
+    /// Đo được khi chạy 2 node thật: `tick_secs=2, suspect_secs=3` thì tick đầu
+    /// ra `suspect` ngay vì peer được seed với `last_seen = 0`. Ngược lại
+    /// `tick_secs=10, suspect_secs=5` thì **mọi** peer bị nghi ngờ ở tick đầu
+    /// tiên, kể cả peer đang trả lời tốt — view nhiễu ngay từ đầu.
+    #[test]
+    fn suspect_window_cannot_be_shorter_than_the_probe_period() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bad = gossip_toml(
+            r#"
+[gossip]
+node_id = "node-a"
+own_url = "http://node-a:8080"
+token = "s3cret"
+tick_secs = 10
+suspect_secs = 5
+dead_secs = 30
+"#,
+        );
+        let err = bad.validate().expect_err("tick chậm hơn cửa sổ nghi ngờ phải báo");
+        assert!(err.to_string().contains("gossip.suspect_secs"), "{err}");
+
+        let ok = gossip_toml(
+            r#"
+[gossip]
+node_id = "node-a"
+own_url = "http://node-a:8080"
+token = "s3cret"
+tick_secs = 5
+suspect_secs = 5
 dead_secs = 30
 "#,
         );

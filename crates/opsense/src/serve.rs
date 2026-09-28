@@ -24,7 +24,7 @@ use tracing_subscriber::prelude::*;
 
 use opsense_core::Config;
 
-use crate::api::{AppState, admin, health_check, oauth, repl};
+use crate::api::{AppState, admin, cluster, health_check, oauth, repl};
 
 fn init_telemetry() -> Option<(SdkTracerProvider, SdkMeterProvider)> {
     // Log ra stdout **luôn**, kể cả khi không bật OTLP. Trước đây cả subscriber
@@ -123,9 +123,13 @@ pub async fn routes(app_state: AppState) -> Result<Router, Error> {
     // TODO: xem thử có cách nào load cấu hình từ yaml bên ngoài luôn đươc không
     let router = Router::new()
         .route("/health", get(health_check))
+        // Liveness cho peer: `/health` trả lời "tiến trình còn sống", còn
+        // `/health/live` là điều kiện để tầng gossip coi node là sống.
+        .merge(cluster::live_routes())
         .nest("/api/repl", repl::routes(app_state.clone()))
         .nest("/api/admin", admin::routes())
-        .nest("/api/oauth", oauth::routes());
+        .nest("/api/oauth", oauth::routes())
+        .nest("/api/cluster", cluster::routes(app_state.clone()));
 
     let router = router
         .with_state(app_state)
@@ -235,6 +239,10 @@ pub async fn run() -> std::io::Result<()> {
     let app_state = AppState::new(&load_config()?).await?;
     let router = routes(app_state.clone()).await?;
 
+    // Vòng quan sát: chạy nền, không bật thì không có gì cả. `abort()` khi serve
+    // dừng — task này không tự biết lúc nào phải dừng.
+    let gossip_task = app_state.cluster().map(|mesh| mesh.spawn());
+
     let listener_mode = std::env::var("GATEWAY_LISTENER").unwrap_or_else(|_| "unix".to_string());
 
     let serve_result = match listener_mode.as_str() {
@@ -265,6 +273,9 @@ pub async fn run() -> std::io::Result<()> {
         }
     };
 
+    if let Some(task) = gossip_task {
+        task.abort();
+    }
     app_state.stop().await?;
     app_state.wait_for_shutdown().await?;
 

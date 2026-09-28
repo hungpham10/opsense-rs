@@ -7,6 +7,7 @@
 //! hoặc `Mutation.reload`.
 
 pub mod admin;
+pub mod cluster;
 pub mod oauth;
 pub mod repl;
 
@@ -29,6 +30,7 @@ use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
 
 use crate::api::oauth::OAuthMetrics;
+use crate::cluster::Mesh;
 
 /// Station chứa lịch sử thay đổi cấu hình (`labels.kind = "config_edit"`).
 /// Đọc lại bằng `opsense query opsense-audit --label-kind config_edit`.
@@ -83,6 +85,10 @@ pub struct AppState {
     runtime: Arc<RwLock<Runtime>>,
     admin_entity: Arc<opsense_model::entities::admin::Admin>,
     oauth_metrics: Arc<OAuthMetrics>,
+    /// Tầng gossip của node này. `None` = **không bật mesh** (mặc định của mọi
+    /// deploy hiện tại) — endpoint `/api/cluster/v1/nodes` vẫn trả lời, kèm
+    /// lý do, thay vì 404 khiến người vận hành tưởng server hỏng.
+    cluster: Option<Arc<Mesh>>,
 }
 
 impl AppState {
@@ -101,6 +107,19 @@ impl AppState {
 
         let admin_entity = Arc::new(opsense_model::entities::admin::Admin::new(&connector));
         let oauth_metrics = Arc::new(OAuthMetrics::new());
+
+        // Cấu hình mesh hỏng thì chết ở đây, không phải lúc node đã tưởng mình
+        // đang chạy trong cụm. `from_config` phân biệt "không bật" với "bật sai".
+        let cluster = Mesh::from_config(config.resolved_gossip())
+            .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+        let cluster = cluster.map(Arc::new);
+        if let Some(mesh) = cluster.as_ref() {
+            tracing::info!(
+                node_id = %mesh.node_id(),
+                own_url = %mesh.own_url(),
+                "cluster: gossip bật, sẽ quan sát peer mỗi vòng"
+            );
+        }
 
         {
             let mut runtime = runtime.write().await;
@@ -132,9 +151,16 @@ impl AppState {
             runtime,
             admin_entity,
             oauth_metrics,
+            cluster,
             secret,
             connector,
         })
+    }
+
+    /// Mesh của node này, `None` khi không bật gossip.
+    #[must_use]
+    pub fn cluster(&self) -> Option<&Arc<Mesh>> {
+        self.cluster.as_ref()
     }
 
     pub async fn stop(&self) -> Result<(), Error> {
