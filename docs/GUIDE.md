@@ -33,6 +33,40 @@ curl -XPOST localhost:8080/api/repl/graphql -d '{"query":"{ status { nodes { id 
 
 Cờ `serve --repl` / `--mcp` / `--runner-bind` **không còn** — dùng subcommand.
 
+### Token (bắt buộc khi tenant bật OIDC)
+
+Mọi lệnh trên đều là client của `opsense serve`, nên cần bearer token:
+
+```bash
+./scripts/mint-dex-token.py          # đăng nhập Dex, ghi ~/.config/opsense/token (mode 0600)
+./scripts/mint-dex-token.py --print  # chỉ in ra, để dán vào env của MCP client
+```
+
+Token đọc theo thứ tự (`client/graphql.rs:422`): `OPSENSE_ACCESS_TOKEN` **thắng**, kể cả khi sai (không fallback); không có thì đọc file. Env rỗng bị coi là "không khai" nên vẫn rơi về file.
+
+Dex cấp token **24 giờ** — khoảng một lần/ngày. Triệu chứng hết hạn là mọi lệnh trả `401`. Khi mới lấy, script in sẵn thời hạn:
+
+```
+wrote ~/.config/opsense/token (780 chars, mode 0600)
+  user=dev-user@example.com  còn 24.0 giờ (hết lúc 2026-09-29 15:21:41)
+```
+
+Restart `opsense-dex` cũng làm token cũ hết giá trị (Dex giữ phiên trong RAM).
+
+Nối vào MCP client (stdio) — endpoint mặc định là `http://localhost:8080/api/repl/graphql`, đổi bằng `OPSENSE_GRAPHQL_URL`:
+
+```json
+{
+  "mcpServers": {
+    "opsense": {
+      "command": "/đường/dẫn/tới/opsense",
+      "args": ["mcp"],
+      "env": { "OPSENSE_GRAPHQL_URL": "http://localhost:8080/api/repl/graphql" }
+    }
+  }
+}
+```
+
 ### Các MCP tool
 
 `opsense mcp` là client mỏng của `opsense serve`: mỗi tool = 1 round-trip
