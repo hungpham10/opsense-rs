@@ -301,6 +301,133 @@ async fn oauth_full_flow_dex_nginx_axum() {
     assert!(count > 0, "expected sys_user row for sub '{sub}'");
 }
 
+/// Token `abt_` phải dùng được **ngay cả khi nó là token thứ hai trở đi** của
+/// cùng một user.
+///
+/// Hồi quy cho bug cache by-id: `get_unencrypted_token_by_id` trước đây cache
+/// plaintext theo `token_id` của hàng `sys_token_map`. `token_id` là id của hàng,
+/// **không đổi** khi phát token mới, nên sau lần phát thứ hai cache vẫn giữ
+/// plaintext token cũ; `verify_user_token` so constant-time với nó ⇒ lệch ⇒
+/// `active:false` ⇒ Nginx trả 401 `Invalid Base Token` cho token **mới**, trong
+/// khi token cũ vẫn còn sống (tới hết 60s cache introspect của Nginx).
+///
+/// Test này chạy device flow **hai lần** cho cùng user và đòi token thứ hai phải
+/// dùng được. Trước khi sửa, bước này đỏ với 401.
+#[tokio::test]
+async fn abt_token_survives_rotation() {
+    opsense_mlib::tls::install_default_crypto_provider();
+    let client = reqwest::Client::builder()
+        .cookie_store(true)
+        .redirect(Policy::limited(10))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("reqwest client");
+
+    if !ensure_serve(&client).await {
+        return;
+    }
+    if !ensure_dex().await {
+        return;
+    }
+
+    let id_token = common::dex::dex_login_get_id_token(&client).await;
+    assert!(!id_token.is_empty());
+
+    // Chạy device flow, trả về access_token mới phát.
+    async fn one_round(
+        client: &reqwest::Client,
+        id_token: &str,
+        round: usize,
+    ) -> String {
+        let code = client
+            .post(format!("{}/api/oauth/v1/device/code", serve_url()))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("device/code request")
+            .json::<DeviceCodeResponse>()
+            .await
+            .expect("device/code JSON");
+
+        let verify = client
+            .post(format!("{}/api/oauth/v1/device/verify", serve_url()))
+            .bearer_auth(id_token)
+            .header("X-Tenant-Id", "1")
+            .json(&serde_json::json!({"user_code": code.user_code}))
+            .send()
+            .await
+            .expect("device/verify request");
+        let verify_status = verify.status();
+        let verify_body = verify.text().await.unwrap_or_default();
+        if !verify_status.is_success() {
+            panic!("round {round}: device/verify returned {verify_status}: {verify_body}");
+        }
+
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let resp = client
+                .post(format!("{}/api/oauth/v1/device/token", serve_url()))
+                .json(&serde_json::json!({
+                    "device_code": code.device_code,
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                }))
+                .send()
+                .await
+                .expect("device/token request");
+            if resp.status().is_success() {
+                return resp
+                    .json::<DeviceTokenResponse>()
+                    .await
+                    .expect("device/token JSON")
+                    .access_token;
+            }
+            if attempts >= 12 {
+                panic!("round {round}: device/token poll exhausted");
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    /// Gọi một API thật bằng `abt_` token — trả về status.
+    ///
+    /// Dùng `/session/issue` (POST) vì nó đi qua đúng đường introspect của
+    /// Nginx: `abt_` → `POST /api/admin/v1/token/introspect` → `verify_user_token`.
+    /// Token sai thì Nginx chặn ngay ở Lua và trả 401 `Invalid Base Token`.
+    async fn probe(client: &reqwest::Client, token: &str) -> reqwest::StatusCode {
+        client
+            .post(format!("{}/api/oauth/v1/session/issue", serve_url()))
+            .bearer_auth(token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("session/issue request")
+            .status()
+    }
+
+    // Vòng 1: token đầu tiên luôn dùng được (LRU rỗng ⇒ đọc DB).
+    let first = one_round(&client, &id_token, 1).await;
+    assert!(first.starts_with("abt_"), "round 1 phải trả abt_ token");
+    assert_eq!(
+        probe(&client, &first).await,
+        reqwest::StatusCode::OK,
+        "round 1: access_token đầu tiên phải dùng được"
+    );
+
+    // Vòng 2: token MỚI cũng phải dùng được. Đây là chỗ bug cũ làm đỏ.
+    let second = one_round(&client, &id_token, 2).await;
+    assert!(second.starts_with("abt_"), "round 2 phải trả abt_ token");
+    assert_ne!(second, first, "mỗi lần phát phải ra token khác nhau");
+
+    let status = probe(&client, &second).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "round 2: access_token MỚI phải dùng được, nhận {status} — \
+         cache by-id đang giữ plaintext của token cũ (token_id không đổi khi rotate)"
+    );
+}
+
 /// Smoke test: verify JWT signature helper compile được (sanity cho test deps).
 #[test]
 fn jwt_smoke_compile() {

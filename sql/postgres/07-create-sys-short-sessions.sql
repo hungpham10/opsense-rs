@@ -20,23 +20,70 @@ CREATE TABLE IF NOT EXISTS sys_short_sessions_default
 
 -- Hàm tạo partition cho 1 giờ cụ thể
 -- Gọi: SELECT make_short_session_partition('2026-09-03 14:00:00+00'::timestamptz);
+--
+-- LƯU Ý: phải dọn dữ liệu nằm trong partition mặc định thuộc khoảng giờ này
+-- TRƯỚC khi CREATE TABLE PARTITION OF. Postgres từ chối tạo partition khi
+-- partition mặc định còn chứa dòng rơi vào range đó:
+--     ERROR: updated partition constraint for default partition
+--            "sys_short_sessions_default" would be violated by some row
+-- Tình huống thật đã gặp: container khởi động lúc 09:xx trong khi partition
+-- của giờ 09 chưa tồn tại, một dòng session ghi lúc đó rơi vào partition
+-- mặc định; lần khởi động kế tiếp gọi hàm này và **cả container chết** với
+-- lỗi trên, làm sập stack. Dọn trước là điều kiện để bootstrap idempotent.
 CREATE OR REPLACE FUNCTION make_short_session_partition(partition_ts TIMESTAMPTZ)
 RETURNS TEXT AS $$
 DECLARE
     partition_name TEXT;
     start_ts       TIMESTAMPTZ;
     end_ts         TIMESTAMPTZ;
+    moved_rows     BIGINT := 0;
 BEGIN
     start_ts := date_trunc('hour', partition_ts);
     end_ts   := start_ts + INTERVAL '1 hour';
     partition_name := 'sys_short_sessions_' || to_char(start_ts, 'YYYYMMDDHH24MI');
 
-    -- Tạo partition nếu chưa có
+    -- Bước 1: đưa dòng lọt vào partition mặc định ra staging.
+    --
+    -- KHÔNG thể tạo partition khi partition mặc định còn dòng thuộc range:
+    -- Postgres từ chối vì ràng buộc của partition mặc định sẽ bị vi phạm. Và
+    -- cũng không thể `INSERT` lại trước khi partition tồn tại (dòng sẽ rơi
+    -- ngược về partition mặc định). Nên staging là bước trung gian bắt buộc.
+    CREATE TEMP TABLE IF NOT EXISTS _ssp_stage (
+        LIKE sys_short_sessions INCLUDING ALL
+    ) ON COMMIT DROP;
+
+    EXECUTE format(
+        'WITH moved AS (
+             DELETE FROM sys_short_sessions_default
+             WHERE created_at >= %L AND created_at < %L
+             RETURNING id, tenant_id, user_id, session_id, token_hash,
+                       expires_at, created_at
+         )
+         INSERT INTO _ssp_stage
+         SELECT * FROM moved',
+        start_ts, end_ts
+    );
+    GET DIAGNOSTICS moved_rows = ROW_COUNT;
+
+    -- Bước 2: giờ partition mặc định đã sạch cho range này ⇒ tạo được.
+    -- (Nếu partition đã tồn tại thì IF NOT EXISTS là no-op, vẫn an toàn.)
     EXECUTE format(
         'CREATE TABLE IF NOT EXISTS %I PARTITION OF sys_short_sessions
          FOR VALUES FROM (%L) TO (%L)',
         partition_name, start_ts, end_ts
     );
+
+    -- Bước 3: trả dòng về bảng cha; Postgres tự định tuyến vào partition mới.
+    IF moved_rows > 0 THEN
+        EXECUTE format(
+            'INSERT INTO sys_short_sessions
+                 (id, tenant_id, user_id, session_id, token_hash, expires_at, created_at)
+             SELECT id, tenant_id, user_id, session_id, token_hash, expires_at, created_at
+             FROM _ssp_stage
+             ORDER BY created_at, id'
+        );
+        RAISE NOTICE 'Moved % row(s) from default partition into %', moved_rows, partition_name;
+    END IF;
 
     RETURN partition_name;
 END;
