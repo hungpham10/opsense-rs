@@ -59,10 +59,17 @@ from datetime import datetime
 
 DEX_ISSUER = os.environ.get("OPSENSE_DEX_ISSUER", "http://localhost:5556/dex")
 SERVE_URL = os.environ.get("OPSENSE_SERVE_URL", "http://localhost:8080")
-CLIENT_ID = "opsense-test"
-CLIENT_SECRET = "opsense-dev-shared-secret-32-bytes-min!!"
-DEX_USER = "dev-user@example.com"
-DEX_PASSWORD = "password"
+# Gắn cứng client/credential thì đổi `conf/dex/config.dev.yaml` là script hỏng
+# **im lặng**: nó POST form login, Dex trả trang lỗi HTML, script báo chung
+# chung "login failed" — đọc không ra là sai tài khoản, sai client, hay Dex chết.
+# Cho override bằng env để cùng script chạy được với Dex local lẫn Dex thật.
+# Mặc định vẫn là giá trị trong `conf/dex/config.dev.yaml`.
+CLIENT_ID = os.environ.get("OPSENSE_DEX_CLIENT_ID", "opsense-test")
+CLIENT_SECRET = os.environ.get(
+    "OPSENSE_DEX_CLIENT_SECRET", "opsense-dev-shared-secret-32-bytes-min!!"
+)
+DEX_USER = os.environ.get("OPSENSE_DEX_USER", "dev-user@example.com")
+DEX_PASSWORD = os.environ.get("OPSENSE_DEX_PASSWORD", "password")
 
 TOKEN_PATH = os.path.expanduser("~/.config/opsense/token")
 # Refresh token để riêng: `token` phải là **token thô** vì
@@ -296,7 +303,39 @@ def main() -> int:
             f"wrote {TOKEN_PATH} nhưng token **đã hết hạn** ({_expiry_text(id_token)}) — "
             f"kiểm tra lại Dex/issuer",
         )
+
+    _warn_if_kid_unusable(opener, id_token)
     return 0
+
+
+def _warn_if_kid_unusable(opener, token: str) -> None:
+    """Cảnh báo khi `kid` trong token không có trong JWKS mà Dex đang phục vụ.
+
+    Đây không phải chuyện hiếm: Dex local chạy `storage: type: memory`
+    (`conf/dex/config.dev.yaml:18`), nên restart là mất phiên. `id_token` là JWT
+    tự chứa nên nó **vẫn còn hạn** sau restart — nhưng nếu Dex sinh cặp khoá
+    mới thì Nginx introspect theo `kid` sẽ không tìm thấy, và mọi request trả
+    `401 failed finding jwk`. Đã gặp: token còn 23.7h nhưng không dùng được.
+
+    Nếu im lặng thì triệu chứng là "MCP chết chung", nhìn từ phía client không
+    ra là do token cũ. Vì vậy kiểm ở đây, ngay lúc vừa lấy.
+    """
+    kid = _claim(token, "kid") or _header_claim(token, "kid")
+    if not kid:
+        return
+    try:
+        _, body = fetch(opener, f"{DEX_ISSUER}/keys")
+        served = {k.get("kid") for k in json.loads(body).get("keys", [])}
+    except Exception:  # noqa: BLE001 — kiểm tra là tiện ích, không được chặn flow
+        return
+    if served and kid not in served:
+        print(
+            f"  ⚠ CẢNH BÁO: kid {kid[:12]}… KHÔNG có trong JWKS của {DEX_ISSUER}\n"
+            f"    Dex đang phục vụ: {', '.join(sorted(served))}\n"
+            f"    Token này dùng vào API sẽ 401 (failed finding jwk). Thường do\n"
+            f"    Dex restart và đổi khoá ký. Chạy lại script này sau khi restart.",
+            file=sys.stderr,
+        )
 
 
 def _payload(token: str) -> dict:
@@ -308,6 +347,16 @@ def _payload(token: str) -> dict:
 def _claim(token: str, name: str):
     try:
         return _payload(token).get(name)
+    except (IndexError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _header_claim(token: str, name: str):
+    """`kid` nằm ở header, không phải payload."""
+    try:
+        seg = token.split(".")[0]
+        seg += "=" * (-len(seg) % 4)
+        return json.loads(base64.urlsafe_b64decode(seg)).get(name)
     except (IndexError, ValueError, json.JSONDecodeError):
         return None
 
