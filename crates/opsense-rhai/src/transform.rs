@@ -26,7 +26,7 @@ use serde_json::Value;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::runtime::ScriptSource;
-use crate::vector::runtime::{Component, Event, Identify, Message, Outbound};
+use crate::vector::runtime::{Component, Event, Fault, Identify, Message, Outbound, Severity};
 
 /// `station = true` makes the node terminal: its own station is queryable, so it
 /// needs no downstream consumer. The station is registered either way (see
@@ -133,7 +133,16 @@ impl_rhai_transform!(
                     // một lỗi tĩnh. Gửi `Event::Major` giữ **nhịp thử lại theo
                     // message** (mỗi nến/lệnh) như hiện tại, nhưng lần này lỗi
                     // tới được handler và status.
-                    let _ = tx.event.send(Event::Major((id, Error::other(e)))).await;
+                    // Script không nạp/compile được là lỗi **cấu hình** (sai
+                    // đường dẫn, cú pháp): không tự hết, nhưng cũng không được
+                    // làm chết pipeline.
+                    let _ = tx
+                        .event
+                        .send(Event::Fault((
+                            id,
+                            Fault::new(Severity::Fatal, "script_source", e),
+                        )))
+                        .await;
                     continue;
                 }
             };
@@ -184,9 +193,15 @@ impl_rhai_transform!(
                     tracing::warn!("rhai {} skipped batch at ts {ts}: {e}", self.id);
                     // Xem chỗ `script_source()` ở trên: log không đủ, lỗi phải
                     // tới handler để hỏi được bằng status.
+                    // Script chạy nhưng lỗi: thường là dữ liệu đầu vào hoặc
+                    // logic, và `process` sẽ thử lại ở message kế tiếp.
                     let _ = tx
                         .event
-                        .send(Event::Major((id, Error::other(e.to_string()))))
+                        .send(Event::Fault((
+                            id,
+                            Fault::new(Severity::Corrupt, "script_run", e.to_string())
+                                .recovered("bỏ batch này, forward processed để không chặn xuống"),
+                        )))
                         .await;
                     // Still forward processed to not stall downstream
                     let done = signal::tagged(signal::processed(ts), &self.id);
@@ -196,6 +211,14 @@ impl_rhai_transform!(
                     continue;
                 }
             };
+
+            // `portfolio_feed` và các native khác không có `Outbound` nên không
+            // bắn được `Event::Major`; chúng để lại `Fault` ở khe. Lấy ở đây —
+            // **mọi** nhánh `Ok`, kể cả khi script chạy bình thường — vì lỗi
+            // nằm trong native chứ không phải trong `process`.
+            if let Some(f) = crate::orders::take_fault() {
+                let _ = tx.event.send(Event::Fault((id, f))).await;
+            }
 
             // Convert script output back to Observations and write to own station
             let mut processed = Vec::with_capacity(items.len());

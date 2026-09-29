@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use futures::FutureExt;
 use log::info;
 
-use super::models::{Component, ComponentType, Context, Event, Message, NodeInfo, Outbound};
+use super::models::{Component, ComponentType, Context, Event, Fault, Message, NodeInfo, Outbound, Severity};
 
 /// Lỗi gần nhất của từng node, kèm revision để cache của [`Runtime::topology`]
 /// biết khi nào phải dựng lại.
@@ -24,15 +24,17 @@ use super::models::{Component, ComponentType, Context, Event, Message, NodeInfo,
 /// `Runtime` — lúc `start()` thì `api` vẫn đang giữ write guard.
 #[derive(Default)]
 pub struct NodeErrors {
-    by_node: RwLock<HashMap<String, String>>,
+    by_node: RwLock<HashMap<String, Fault>>,
     /// Bump mỗi lần nội dung `by_node` đổi. `topology()` phục vụ từ cache nên
     /// không có revision này thì lỗi mới không bao giờ lọt ra status.
     rev: AtomicU64,
+    /// Số lần `set` cho từng node — tổng mọi mức, kể cả `None`.
+    counts: RwLock<HashMap<String, u64>>,
 }
 
 impl NodeErrors {
     /// Ghi lỗi; `None` ⇒ node khoẻ, xoá lỗi cũ. Trả `true` khi nội dung đổi.
-    pub fn set(&self, node: &str, error: Option<String>) -> bool {
+    pub fn set(&self, node: &str, error: Option<Fault>) -> bool {
         let changed = match error {
             Some(e) => self
                 .by_node
@@ -45,17 +47,26 @@ impl NodeErrors {
                 .map(|mut m| m.remove(node).is_some())
                 .unwrap_or(false),
         };
+        if let Ok(mut c) = self.counts.write() {
+            *c.entry(node.to_string()).or_insert(0) += 1;
+        }
         if changed {
             self.rev.fetch_add(1, Ordering::Relaxed);
         }
         changed
     }
 
-    pub fn get(&self, node: &str) -> Option<String> {
+    pub fn get(&self, node: &str) -> Option<Fault> {
         self.by_node.read().ok()?.get(node).cloned()
     }
 
-    fn snapshot(&self) -> HashMap<String, String> {
+    /// Số lần xảy ra, để thấy "lỗi tĩnh lặp mỗi nến" khác "một lần rồi hết".
+    /// Không đếm trong `rev` vì không đổi nội dung status.
+    pub fn count(&self, node: &str) -> u64 {
+        self.counts.read().ok().map(|c| c.get(node).copied().unwrap_or(0)).unwrap_or(0)
+    }
+
+    fn snapshot(&self) -> HashMap<String, Fault> {
         self.by_node.read().map(|m| m.clone()).unwrap_or_default()
     }
 }
@@ -510,8 +521,35 @@ impl Runtime {
     }
 
     /// Ghi lỗi gần nhất của node. `error = None` ⇒ node khoẻ, xoá lỗi cũ.
-    pub fn report_node_error(&self, id: &str, error: Option<String>) {
-        self.last_errors.set(id, error);
+    /// Ghi một lỗi đã phân loại cho node; `None` ⇒ node khoẻ, xoá lỗi cũ.
+    ///
+    /// `Fatal`/`Corrupt` log ở mức `error` vì làm node mất chức năng và tự hồi
+    /// phục không chắc được; `Transient` log `warn`. Cả hai đều **lưu** để
+    /// `opsense_status` hỏi được — log thì mất khi container restart.
+    pub fn report_fault(&self, id: &str, fault: Option<Fault>) {
+        match &fault {
+            Some(f) if f.severity == Severity::Fatal || f.severity == Severity::Corrupt => {
+                log::error!(
+                    "node hỏng: severity={:?} code={} recovered={:?} error={}",
+                    f.severity,
+                    f.code,
+                    f.recovered,
+                    f.message
+                );
+            }
+            Some(f) => log::warn!(
+                "node lỗi tạm: code={} error={}",
+                f.code,
+                f.message
+            ),
+            None => {}
+        }
+        self.last_errors.set(id, fault);
+    }
+
+    /// Đếm số lần một node báo lỗi (mọi mức).
+    pub fn node_fault_count(&self, id: &str) -> u64 {
+        self.last_errors.count(id)
     }
 
     pub fn topology(&self) -> Vec<NodeInfo> {
@@ -602,6 +640,7 @@ impl Runtime {
                     outputs: sinks.get(idx).map(&names).unwrap_or_default(),
                     running: tasks.contains_key(idx),
                     last_error: errors.get(id).cloned(),
+                    fault_count: self.last_errors.count(id),
                 })
             })
             .collect()

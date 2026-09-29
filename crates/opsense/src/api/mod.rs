@@ -24,7 +24,7 @@ use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, Observation, StationKind};
 use opsense_mlib::vector::components::{clock, null};
-use opsense_mlib::vector::runtime::{Component, Event, Runtime};
+use opsense_mlib::vector::runtime::{Component, Event, Fault, Runtime, Severity};
 use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
 
@@ -136,29 +136,33 @@ impl AppState {
                 let handle = Arc::clone(&handle);
                 async move {
                     // Lấy idx + loại trước: `event` bị `match` bên dưới.
-                    let (idx, major) = match &event {
-                        Event::Minor((i, _)) => (*i, false),
-                        Event::Major((i, _)) => (*i, true),
-                        Event::Panic((i, _)) => (*i, true),
-                    };
-                    let text = match &event {
-                        Event::Minor((_, e)) | Event::Major((_, e)) | Event::Panic((_, e)) => {
-                            e.to_string()
-                        }
+                    let (idx, fault) = match &event {
+                        Event::Minor((i, e)) => (
+                            *i,
+                            Some(Fault::new(Severity::Transient, "minor", e.to_string())),
+                        ),
+                        // Lỗi của chính engine: nó chỉ retry được chứ không sửa
+                        // được, nên xếp `Fatal` — cần người/can thiệp.
+                        Event::Major((i, e)) => (
+                            *i,
+                            Some(Fault::new(Severity::Fatal, "major", e.to_string())),
+                        ),
+                        Event::Panic((i, e)) => (
+                            *i,
+                            Some(Fault::new(Severity::Fatal, "panic", e.to_string())),
+                        ),
+                        Event::Fault((i, f)) => (*i, Some(f.clone())),
                     };
                     match event {
                         Event::Minor((id, error)) => println!("Minor error in node {id}: {error}"),
                         Event::Major((id, error)) => println!("Major error in node {id}: {error}"),
                         Event::Panic((id, error)) => println!("Panic in node {id}: {error}"),
+                        Event::Fault((id, f)) => println!("Fault in node {id}: {}", f.summary()),
                     }
-                    if major {
-                        let rt = handle.read().await;
-                        match rt.node_name(idx) {
-                            Some(name) => rt.report_node_error(&name, Some(text)),
-                            // Node đã bị gỡ khỏi pipeline giữa lúc: không ghi
-                            // vào map của node không còn tồn tại.
-                            None => {}
-                        }
+                    if let Some(f) = fault
+                        && let Some(name) = handle.read().await.node_name(idx)
+                    {
+                        handle.read().await.report_fault(&name, Some(f));
                     }
                 }
             })?;

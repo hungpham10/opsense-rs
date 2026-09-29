@@ -40,7 +40,7 @@ use opsense_mlib::jq::JsonQuery;
 use opsense_macros::{source, transform};
 
 use crate::station::downcast_ctx;
-use crate::vector::runtime::{Component, Event, Identify, Message, Outbound};
+use crate::vector::runtime::{Component, Event, Fault, Identify, Message, Outbound, Severity};
 use crate::{render, signal};
 
 /// `station = true` makes the node terminal: its own station is queryable, so
@@ -725,7 +725,11 @@ impl_http_origin!(
                     );
                     let _ = tx
                         .event
-                        .send(Event::Major((id, Error::other(format!("http_origin {}: {e}", self.id)))))
+                        .send(Event::Fault((
+                            id,
+                            Fault::new(Severity::Transient, "http_origin", format!("{e}"))
+                                .recovered(format!("thử lại ở nhịp sau {interval}s")),
+                        )))
                         .await;
                 }
             }
@@ -798,7 +802,11 @@ impl_http_source!(
                     // status vẫn hiện nó đang chạy.
                     let _ = tx
                         .event
-                        .send(Event::Major((id, Error::other(format!("http {}: {e}", self.id)))))
+                        .send(Event::Fault((
+                            id,
+                            Fault::new(Severity::Transient, "http", format!("{e}"))
+                                .recovered("thử lại ở message sau"),
+                        )))
                         .await;
                     continue;
                 }

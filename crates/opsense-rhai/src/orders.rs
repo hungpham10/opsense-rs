@@ -42,6 +42,7 @@ use opsense_qlib::{
 use rhai::{Array, Dynamic, Map};
 
 use crate::ScriptStrategy;
+use opsense_mlib::vector::runtime::{Fault, Severity};
 
 /// Label của observation order.
 const L_STATUS: &str = "status";
@@ -75,6 +76,67 @@ const SIGNAL_PLAN: &str = "plan";
 const STATUS_OPEN: &str = "open";
 const STATUS_CLOSED: &str = "closed";
 
+/// Lỗi của **một lần gọi `portfolio_feed`**, gom lại rồi bắn ra ngoài qua
+/// [`take_fault`].
+///
+/// Vì sao phải gom thay vì `tracing!` tại chỗ: `portfolio_feed` là native của
+/// Rhai, không có `Outbound` nên không bắn được `Event::Major` — mà đó mới là
+/// đường duy nhất tới `opsense_status`. Gom ở đây rồi `transform.rs` lấy lại
+/// và bắn hộ.
+///
+/// Trước đây hầu hết nhánh lỗi ở đây **không log gì cả** (`else { return
+/// Vec::new() }`, `filter_map`, `.ok()?`): node im lặng, status vẫn hiện nó
+/// đang chạy, và cả "kernel không đặt lệnh vì plan rỗng" lẫn "cấu hình sai"
+/// trông y hệt nhau.
+#[derive(Default)]
+pub(crate) struct Diagnostics {
+    faults: Vec<Fault>,
+}
+
+impl Diagnostics {
+    fn push(&mut self, f: Fault) {
+        // `Transient` lặp mỗi nến sẽ thành spam: giữ **một** bản cho mỗi mã.
+        if !self.faults.iter().any(|e| e.code == f.code) {
+            self.faults.push(f);
+        }
+    }
+
+    /// Lỗi nghiêm trọng nhất đã gặp — thứ đáng báo nhất.
+    ///
+    /// Xếp theo mức chứ không theo thứ tự xuất hiện: một `Fatal` (cấu hình sai)
+    /// sau một `Transient` (chưa đủ nến) vẫn phải là thứ được báo, vì nó là
+    /// thứ **không tự hết**.
+    fn worst(&self) -> Option<&Fault> {
+        self.faults
+            .iter()
+            .max_by_key(|f| match f.severity {
+                Severity::Transient => 0,
+                Severity::Corrupt => 1,
+                Severity::Fatal => 2,
+            })
+    }
+}
+
+/// Lỗi của lượt `portfolio_feed` gần nhất, chờ `transform.rs` lấy và bắn vào
+/// `Event::Major`.
+///
+/// `Mutex` chứ không thread-local: script chạy trên `spawn_blocking` nên mỗi
+/// lượt là một thread khác nhau, và lượt sau có thể rơi vào thread đã xong.
+static LAST_FAULT: Mutex<Option<Fault>> = Mutex::new(None);
+
+/// Lấy lỗi của lượt gọi vừa rồi và xoá — `transform.rs` gọi sau mỗi
+/// `call_process_with`.
+pub fn take_fault() -> Option<Fault> {
+    LAST_FAULT.lock().ok()?.take()
+}
+
+fn publish_fault(d: &Diagnostics) {
+    let Some(f) = d.worst() else { return };
+    if let Ok(mut slot) = LAST_FAULT.lock() {
+        *slot = Some(f.clone());
+    }
+}
+
 /// `Dynamic::to_float/to_int` cần ownership; script map cho ta `&Dynamic`.
 fn as_f64(v: &Dynamic) -> f64 {
     v.as_float().unwrap_or(0.0)
@@ -95,22 +157,70 @@ pub fn register(eng: &mut rhai::Engine) {
     eng.register_fn(
         "portfolio_feed",
         |candles: Array, obs: Array, candle: Map, cfg: Map, symbol: String| -> Array {
-            let candles: Vec<CandleStick> = candles.into_iter().filter_map(candle_of).collect();
+            let mut diag = Diagnostics::default();
+            // `filter_map` nuốt im lặng: script đẩy nhầm thứ không phải nến
+            // (vd `summary` thay vì candle) thì trước đây chỉ còn thiếu mà
+            // không ai biết vì sao.
+            let mut dropped = 0usize;
+            let mut parsed: Vec<CandleStick> = Vec::with_capacity(candles.len());
+            for value in candles {
+                match candle_of(value) {
+                    Some(c) => parsed.push(c),
+                    None => dropped += 1,
+                }
+            }
+            let candles = parsed;
+            if dropped > 0 {
+                diag.push(Fault::new(
+                    Severity::Corrupt,
+                    "candle_shape",
+                    format!("{dropped}/{} phần tử không đọc được thành nến", dropped + candles.len()),
+                ));
+            }
             let incoming = candle_from_map(&candle);
             let settings = Settings::from_map(&cfg);
-            let state = State::from_observations(&obs);
+            let state = State::from_observations(&obs, &mut diag);
 
             // Script chạy trên blocking thread của runtime (`spawn_blocking`) nên
             // có handle để chờ kernel async. Nếu không có runtime (đánh giá
             // script ngoài pipeline) → không làm gì thay vì panic.
+            //
+            // `diag` cố ý **không** bị `block_on` giữ: closure của `block_on`
+            // phải `Send`, và bắt `&mut` vào nó sẽ không sống sót. Chạy
+            // `feed` với `diag` riêng rồi gộp lại.
+            let mut inner = Diagnostics::default();
+            let has_runtime = tokio::runtime::Handle::try_current().is_ok();
             let result = tokio::runtime::Handle::try_current()
                 .map(|handle| {
-                    handle.block_on(feed(&candles, &state, incoming, &settings, &symbol))
+                    handle.block_on(feed(
+                        &candles,
+                        &state,
+                        incoming,
+                        &settings,
+                        &symbol,
+                        &mut inner,
+                    ))
                 })
                 .unwrap_or_else(|_| {
-                    tracing::debug!("portfolio_feed: no tokio runtime in context, skipping");
+                    // Không có runtime = gọi ngoài pipeline (test, REPL đánh giá
+                    // script). Trước đây `debug` nên im lặng; đây là lỗi **cấu
+                    // hình cách gọi**, không phải lỗi dữ liệu, và không tự hết.
                     Vec::new()
                 });
+            for f in inner.faults {
+                diag.push(f);
+            }
+            if !has_runtime {
+                // Không có runtime = gọi ngoài pipeline (test, REPL đánh giá
+                // script). Trước đây chỉ `debug` nên im lặng; đây là lỗi **cách
+                // gọi**, không phải lỗi dữ liệu, và không tự hết.
+                diag.push(Fault::new(
+                    Severity::Fatal,
+                    "no_runtime",
+                    "portfolio_feed cần tokio runtime (chỉ chạy được trong pipeline)",
+                ));
+            }
+            publish_fault(&diag);
 
             result
                 .into_iter()
@@ -364,7 +474,7 @@ struct State {
 }
 
 impl State {
-    fn from_observations(obs: &Array) -> Self {
+    fn from_observations(obs: &Array, diag: &mut Diagnostics) -> Self {
         let mut session = Session::new();
         let mut open: HashMap<(usize, usize), (String, Order)> = HashMap::new();
         let mut closed_ids: Vec<String> = Vec::new();
@@ -379,6 +489,14 @@ impl State {
 
         for item in obs.iter() {
             let Some(observation) = observation_of(item.clone()) else {
+                // Script trả về phần tử không phải observation — bỏ qua trước đây
+                // im lặng, giờ phải nói ra vì nó thuộc loại *code* chứ không phải
+                // dữ liệu vắng.
+                diag.push(Fault::new(
+                    Severity::Corrupt,
+                    "obs_shape",
+                    "phần tử trong station không đọc được thành observation",
+                ));
                 continue;
             };
             // Cursor: nến nào đã chạy trading step + seq tới đâu.
@@ -392,10 +510,38 @@ impl State {
                 continue;
             }
             // Plan: dùng bản ghi **mới nhất** (ts lớn nhất) làm chính.
-            if let Some(grids) = plan_of_observation(&observation) {
-                if plan.is_empty() || observation.ts >= plan_ts {
-                    plan = grids;
-                    plan_ts = observation.ts;
+            if observation.signal == Signal::Summary
+                && observation.labels.get(L_KIND).map(String::as_str) == Some(SIGNAL_PLAN)
+            {
+                match plan_of_observation(&observation) {
+                    Some(grids) => {
+                        if plan.is_empty() || observation.ts >= plan_ts {
+                            plan = grids;
+                            plan_ts = observation.ts;
+                        }
+                    }
+                    None => {
+                        // **Hồi phục thật.** Trước đây `plan_of_observation` trả
+                        // `None` (`.ok()?`) và nhánh này chỉ `continue` ⇒ `plan`
+                        // rỗng, `review_at` giữ nguyên giá trị cũ nên kernel
+                        // **không rebuild** ⇒ node sống mãi không đặt lệnh, và
+                        // nhìn từ ngoài vẫn "đang chạy". Đây là kiểu hỏng im lặng
+                        // tệ nhất: mất vĩnh viễn mà không một dấu vết.
+                        //
+                        // Cách hồi phục: coi như không có plan và ép `review_at`
+                        // về 0 để `forward` rebuild ở chính lượt này.
+                        plan.clear();
+                        plan_ts = i64::MIN;
+                        review_at = 0;
+                        diag.push(
+                            Fault::new(
+                                Severity::Corrupt,
+                                "plan_corrupt",
+                                "plan trong station không khôi phục được (JSON/cell hỏng)",
+                            )
+                            .recovered("xoá plan cũ, ép rebuild ở lượt này"),
+                        );
+                    }
                 }
                 continue;
             }
@@ -410,6 +556,17 @@ impl State {
             next_id = next_id.max(tail_num(&id) + 1);
 
             let Some(order) = order_of(&observation) else {
+                // Lệnh đang mở mà không dựng lại được ⇒ **mất lệnh đó**, và
+                // không có cách nào suy ra từ station (entry nằm trong chính bản
+                // ghi hỏng). Không dừng node: các lệnh khác vẫn phải chạy.
+                diag.push(Fault::new(
+                    Severity::Corrupt,
+                    "order_shape",
+                    format!(
+                        "bản ghi lệnh `{}` không dựng lại được (thiếu dtype hoặc giá vào ≤ 0) — lệnh đó bị bỏ khỏi phiên",
+                        observation.labels.get(L_ORDER_ID).map(String::as_str).unwrap_or("?")
+                    ),
+                ));
                 continue;
             };
             if observation.labels.get(L_STATUS).map(String::as_str) == Some(STATUS_CLOSED) {
@@ -460,12 +617,30 @@ async fn feed(
     incoming: CandleStick,
     settings: &Settings,
     symbol: &str,
+    diag: &mut Diagnostics,
 ) -> Vec<Observation> {
     if incoming.t <= 0 || !incoming.c.is_finite() || incoming.c <= 0.0 {
+        // Tick rác (chưa có timestamp, giá 0/NaN). Trước đây trả rỗng im lặng.
+        diag.push(Fault::new(
+            Severity::Transient,
+            "bad_candle",
+            format!(
+                "nến mới không hợp lệ (t={}, c={}) — bỏ lượt này",
+                incoming.t, incoming.c
+            ),
+        ));
         return Vec::new();
     }
     // AnalysisGrid cần ≥ 10 nến; thiếu thì plan rỗng, không đặt được lệnh.
     if candles.len() < 10 {
+        // Chưa đủ dữ liệu cho `AnalysisGrid`. Đây là lý do **hợp lệ** nhất để
+        // không có lệnh, và trước đây nó trông y hệt "chiến lược chạy nhưng giá
+        // chưa chạm level" — hai thứ khác hẳn về nghĩa.
+        diag.push(Fault::new(
+            Severity::Transient,
+            "not_enough_candles",
+            format!("chỉ có {} nến, cần ≥ 10 để dựng lưới", candles.len()),
+        ));
         return vec![step_cursor(
             incoming.t,
             state.session.candle_seq,
@@ -480,8 +655,16 @@ async fn feed(
     if let Some(src) = crate::runtime::current_script() {
         settings.script = Some(src);
     }
-    let Ok(portfolio) = settings.portfolio() else {
-        return Vec::new();
+    let portfolio = match settings.portfolio() {
+        Ok(p) => p,
+        Err(e) => {
+            // Cấu hình sai: tên `strategy` lạ, thiếu `params.dag`, không dựng
+            // được strategy. Trước đây trả rỗng **không log** — node chạy, không
+            // đặt lệnh, không ai biết vì sao. Không tự hết được, nhưng cũng
+            // **không được** làm chết pipeline.
+            diag.push(Fault::new(Severity::Fatal, "portfolio_build", e.to_string()));
+            return Vec::new();
+        }
     };
 
     // Series phân tích: nến đã đóng trước đó + nến mới.
@@ -529,11 +712,14 @@ async fn feed(
         )
         .await
     {
-        tracing::warn!(
-            candle_ts = incoming.t,
-            error = %e,
-            "portfolio forward lỗi — giữ plan cũ, lần sau thử lại"
-        );
+        // Rebuild thiếu nến là chuyện thường ở nhịp đầu, nên `Transient`; kernel
+        // đã **tự giữ plan cũ và tiến `review_at`** nên lần sau thử lại — ghi rõ
+        // điều đó trong `recovered` thay vì chỉ báo lỗi.
+        diag.push(Fault::new(
+            Severity::Transient,
+            "forward",
+            format!("forward lỗi: {e}"),
+        ).recovered("giữ plan cũ, thử lại ở nhịp sau"));
     }
 
     let events = events.lock().map(|g| g.clone()).unwrap_or_default();
@@ -950,7 +1136,7 @@ mod tests {
                 CandleStick::new(1_700_000_000 + i * 60, p, p + 0.5, p - 0.5, p, 10.0)
             })
             .collect();
-        let state = State::from_observations(&Array::new());
+        let state = State::from_observations(&Array::new(), &mut Diagnostics::default());
         let settings = scripted_settings();
         let out = feed(
             &data,
@@ -958,6 +1144,7 @@ mod tests {
             *data.last().expect("có nến"),
             &settings,
             "BTCUSDT",
+            &mut Diagnostics::default(),
         )
         .await;
 
@@ -978,9 +1165,17 @@ mod tests {
                 CandleStick::new(1_700_000_000 + i * 60, p, p + 0.5, p - 0.5, p, 10.0)
             })
             .collect();
-        let state = State::from_observations(&Array::new());
+        let state = State::from_observations(&Array::new(), &mut Diagnostics::default());
         let settings = scripted_settings();
-        let out = feed(&data, &state, *data.last().expect("có nến"), &settings, "BTCUSDT").await;
+        let out = feed(
+            &data,
+            &state,
+            *data.last().expect("có nến"),
+            &settings,
+            "BTCUSDT",
+            &mut Diagnostics::default(),
+        )
+        .await;
 
         let orders: Vec<&Observation> = out
             .iter()
@@ -1061,10 +1256,11 @@ mod tests {
 
         let out = feed(
             &data,
-            &State::from_observations(&Array::new()),
+            &State::from_observations(&Array::new(), &mut Diagnostics::default()),
             *data.last().expect("có nến"),
             &settings,
             "BTCUSDT",
+            &mut Diagnostics::default(),
         )
         .await;
         // Dù không có lệnh (model zero-weight → prob ≈ 0.5, biên ATR hẹp),
@@ -1087,10 +1283,11 @@ mod tests {
         let settings = scripted_settings();
         let first = feed(
             &data,
-            &State::from_observations(&Array::new()),
+            &State::from_observations(&Array::new(), &mut Diagnostics::default()),
             *data.last().expect("có nến"),
             &settings,
             "BTCUSDT",
+            &mut Diagnostics::default(),
         )
         .await;
 
@@ -1106,7 +1303,7 @@ mod tests {
             .iter()
             .map(|o| rhai::serde::to_dynamic(o).expect("serialize"))
             .collect();
-        let state = State::from_observations(&persisted);
+        let state = State::from_observations(&persisted, &mut Diagnostics::default());
         assert_eq!(state.session.orders.len(), opens.len());
         assert!(!state.open_ids.is_empty(), "id lệnh phải được giữ để khép vòng đời");
 
@@ -1127,7 +1324,7 @@ mod tests {
             );
             persisted.push(rhai::serde::to_dynamic(&closed).expect("serialize"));
         }
-        let state = State::from_observations(&persisted);
+        let state = State::from_observations(&persisted, &mut Diagnostics::default());
         assert!(
             state.session.orders.is_empty(),
             "lệnh đã đóng không được giữ trong orders"
@@ -1163,7 +1360,7 @@ mod tests {
                 .expect("serialize"),
         );
 
-        let state = State::from_observations(&obs);
+        let state = State::from_observations(&obs, &mut Diagnostics::default());
 
         assert_eq!(state.session.review_at, 1_900, "review_at phải sống qua station");
         assert_eq!(state.session.candle_id, 7, "candle_id phải sống qua station");
