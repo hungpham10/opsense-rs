@@ -23,6 +23,26 @@ redis = ["dep:redis"]
 gossip = []
 raft = []
 
+# Arena LRU dùng chung giữa các shard, thay vì chia cứng.
+#
+# Mặc định `new()` cắt `Box<[Node]>` thành `S` khối × `ceil(capacity / S)` node,
+# ranh giới khối **đóng dấu lúc dựng, không bao giờ dịch**. Shard tràn không
+# mượn được node của shard đang trống, nên `capacity` mất hết ý nghĩa tổng và mất
+# dữ liệu khi `capacity_per_shard == 1`:
+#
+#   cap=32,  S=32  →  29 key còn 18   (mất 11)
+#   cap=2000, S=32  →  n=2000, còn 1898 (mất 102 — capacity ĐỦ vẫn mất)
+#   cap=32,  S=1   →  29 key còn 29
+#
+# Bật feature này: **một** arena `capacity` node trong free-list chung (Treiber
+# stack không khóa); shard nào cần thì pop node trống, hết thì mượn từ shard
+# khác. `capacity` trở thành sức chứa tổng thật.
+#
+# Đánh đổi: `acquire_node` khi cache đầy phải khóa **hai** shard (shard đích và
+# shard bị mượn) thay vì một, nên ghi dưới tải nặng chậm hơn bản chia shard. Bù lại
+# không còn mất dữ liệu. Xem `cap_probe` trong test `lru.rs` để đo lại.
+lru-shared-memory = []
+
 [dependencies]
 arrow-array = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
