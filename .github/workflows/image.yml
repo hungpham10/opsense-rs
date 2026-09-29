@@ -67,7 +67,14 @@ jobs:
       - name: Build cross-arch binary
         # --features opsense-core/parquet bật backend Parquet storage vào binary
         # (bắt buộc cho prod: station với backend="parquet" cần feature này).
-        run: cargo zigbuild --release --locked --features opsense-core/parquet --target ${{ matrix.target }}
+        #
+        # `lru-shared-memory` bật arena LRU dùng chung giữa các shard, để
+        # `capacity` là sức chứa **tổng thật**. Không bật thì arena chia cứng:
+        # ranh giới khối đóng dấu lúc dựng, shard tràn không mượn được node của
+        # shard đang trống, và station mất dữ liệu thật khi
+        # `capacity_per_shard == 1` (đo: nạp 29 block, `capacity = 32, S = 32`
+        # chỉ còn 18).
+        run: cargo zigbuild --release --locked --features opsense-core/parquet,opsense-core/lru-shared-memory --target ${{ matrix.target }}
 
       # Stage binaries in a neutral dir so the artifact layout is flat
       # (same pattern as .github/workflows/ci.yml, which is proven to work).

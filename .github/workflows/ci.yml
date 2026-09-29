@@ -73,11 +73,25 @@ jobs:
           retention-days: 1
 
   # Unit tests — no docker compose needed
+  #
+  # Matrix `lru`: chạy cả hai hành vi arena của `LruCache`.
+  #   - `""`  : chia cứng (mặc định) — là hành vi của tag trước `v1.0.21`
+  #   - `shared`: arena chung, `capacity` là sức chứa tổng thật
+  #
+  # Phải giữ **cả hai**: bản chia cứng vẫn là mặc định của crate, nên bỏ nhánh
+  # nó khỏi CI là mất luôn lưới an toàn của đường mặc định. Còn nhánh `shared`
+  # thì nếu không có ở đây, 4 test `#[ignore]` ở `lru.rs` (`#[ignore]` vì
+  # **chứng minh bug** của bản chia cứng) sẽ không bao giờ được chạy lại, và
+  # feature có thể hỏng mà không ai biết.
   unit-test:
-    name: Unit Tests
+    name: Unit Tests (${{ matrix.lru }})
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        lru: ["", "shared"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -117,7 +131,16 @@ jobs:
           NEXTEST_EXPERIMENTAL_LIBTEST_HARNESS: "1"
         # `gossip` + `raft` bật hai module phân cụm. Cả hai mặc định tắt nên
         # phải bật ở đây, nếu không nextest sẽ bỏ qua test của chúng âm thầm.
-        run: cargo nextest run --workspace --locked --cargo-profile release --features opsense-mlib/gossip,opsense-mlib/raft --jobs $(nproc)
+        #
+        # `lru-shared-memory` chỉ bật ở nhánh matrix `shared` — bản chia cứng là
+        # mặc định của crate, bật ở cả hai nhánh sẽ **không** test nhánh mặc định.
+        run: |
+          if [ "${{ matrix.lru }}" = "shared" ]; then
+            FEATS="opsense-mlib/gossip,opsense-mlib/raft,opsense-mlib/lru-shared-memory"
+          else
+            FEATS="opsense-mlib/gossip,opsense-mlib/raft"
+          fi
+          cargo nextest run --workspace --locked --cargo-profile release --features "$FEATS" --jobs $(nproc)
 
   # Chiến lược script (Rhai) + trading realtime — **không** cần compose/network.
   #
