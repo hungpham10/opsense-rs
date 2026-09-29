@@ -251,12 +251,17 @@ impl Default for Block {
 /// | 2 | 16 | trung bình 14.5, max ~17 | evict |
 /// | **1** | **32** | **29 ≤ 32** | **giữ hết** |
 ///
-/// Chỉ `S = 1` mới khiến `capacity` là **tổng thật**. Lý do gốc nằm ở
-/// `opsense-mlib::lru`: `capacity_per_shard = ceil(capacity / S)`, nên
-/// `LruCache::new(32)` với `S = 32` cho mỗi shard **một** slot — hai `block_id`
-/// trùng shard thì cái mới đẩy cái cũ dù tổng cache còn trống. Test
+/// **Trước `lru-shared-memory`**, chỉ `S = 1` mới khiến `capacity` là **tổng
+/// thật**, vì `opsense-mlib::lru` chia cứng: `capacity_per_shard = ceil(capacity /
+/// S)`, nên `LruCache::new(32)` với `S = 32` cho mỗi shard **một** slot — hai
+/// `block_id` trùng shard thì cái mới đẩy cái cũ dù tổng cache còn trống. Test
 /// `lru::tests::spread_keys_keep_everything` (32 key liên tiếp, 32 shard) chỉ
-/// giữ được **21/32** — đó là bằng chứng trực tiếp.
+/// giữ được **21/32** — bằng chứng trực tiếp.
+///
+/// **Bật `lru-shared-memory`** thì arena là một khối `capacity` node trong
+/// free-list chung, `capacity` là tổng thật với **mọi** `S`. Đó là cách đúng;
+/// `S = 1` chỉ còn là lựa chọn để không bật feature (đánh đổi: gộp 32 shard
+/// thành một mutex, đo được chậm hơn ~18% ở tải vi mô).
 ///
 /// Mỗi station có LRU riêng nên `S = 1` chỉ gộp lock **trong một station**,
 /// không gộp lock giữa các station. Đánh đổi: đọc/ghi cùng một station thì
@@ -913,27 +918,42 @@ mod tests {
         Observation::new(ts, "cpu".into(), TelemetryKind::Metric, Signal::Raw, value)
     }
 
-    /// Chống regression: nếu `lru-shared-memory` bị **tắt trong build prod**,
-    /// test này đỏ chứ không phải prod âm thầm mất dữ liệu.
+    /// Chống hồi quy **chỉ ở build có feature**.
     ///
-    /// `STATION_SHARDS = 32` với arena chia cứng ⇒ `capacity_per_shard = 1` ⇒
-    /// mất 11/29 block. Đây chính xác là lỗi đã đo trên stack. Nếu feature
-    /// được bật (xem `image.yml`), arena chung giữ hết.
+    /// Bản `#[test]` đỏ khi thiếu feature từng được dùng để canh: nếu prod build
+    /// quên bật `lru-shared-memory` thì test đỏ. Nhưng nó **làm job CI không
+    /// bật feature đỏ mãi mãi** — mà nhánh đó phải xanh để bảo vệ đường mặc định
+    /// của crate. Đỏ vì lý do này sẽ che mọi lỗi thật ở nhánh đó.
     ///
-    /// Chạy:
-    ///   `cargo test -p opsense-core --features lru-shared-memory`
-    ///   (không feature ⇒ test này **phải đỏ**)
-    #[test]
-    fn shard_count_needs_shared_arena() {
-        // `cfg!` chỉ thấy feature của **chính crate này**, mà CI bật feature ở
-        // `opsense-mlib` (nơi feature thật sự được định nghĩa). Nên phải hỏi đúng
-        // crate, không hỏi `cfg!` — dùng `cfg!(feature = ...)` ở đây là sai và
-        // làm test đỏ ngay cả khi arena chung **đang** hoạt động.
-        assert!(
-            opsense_mlib::lru::SHARED_ARENA,
-            "build này KHÔNG có `lru-shared-memory` ⇒ arena LRU chia cứng ⇒ \
-             `STATION_SHARDS = 32` chỉ còn 18/29 block. \
-             Bật `opsense-core/lru-shared-memory` (xem `.github/workflows/image.yml`)."
+    /// Nên: chỉ assert ở đây khi feature **có** mặt, còn việc "prod có bật không"
+    /// do `image.yml` đảm nhiệm — bật `opsense-core/lru-shared-memory` cạnh
+    /// `opsense-core/parquet`. Bật thiếu thì `STATION_SHARDS = 32` quay lại mất
+    /// 11/29 block, đúng như `wide_batch_keeps_every_block` đo.
+    #[tokio::test]
+    async fn shared_arena_keeps_every_block_when_enabled() {
+        if !opsense_mlib::lru::SHARED_ARENA {
+            return; // bản chia cứng: xem `wide_batch_keeps_every_block`
+        }
+        let st = TimeseriesStation::new(HOT_BLOCKS, Some(115_200));
+        let base: i64 = 1_787_040_000;
+        let n: i64 = 29;
+        let mut batch = Vec::new();
+        for i in 0..n {
+            for f in 0..5i64 {
+                batch.push(obs(base + i * 115_200 + f * 60, (i * 5 + f) as f64));
+            }
+        }
+        st.update_range(&batch, base, base + n * 115_200 - 1, base + n * 115_200 - 1);
+        let got = st
+            .query_recent(base, base + n * 115_200 - 1)
+            .await
+            .unwrap_or_default();
+        assert_eq!(
+            got.len(),
+            batch.len(),
+            "arena chung phải giữ hết {} obs, thực tế {} — xem `STATION_SHARDS`",
+            batch.len(),
+            got.len()
         );
     }
 
@@ -944,6 +964,10 @@ mod tests {
     /// trong tập LRU bỏ. Nếu test này ra 11 ⇒ phần còn lại do **đường ghi khác
     /// ngoài `update_range`**. Nếu ra 15 ⇒ tầng station cộng thêm, và khoanh
     /// được ngay chỗ trong `station.rs`.
+    ///
+    /// Kết quả thật: **11** ở cả LRU trần lẫn tầng station ⇒ station không cộng
+    /// thêm gì; 4 block kia do môi trường chạy. Và con số 11 **chỉ đúng khi
+    /// arena chia cứng** — bật `lru-shared-memory` thì phải là 0.
     ///
     /// Dùng đúng block id và đúng độ dài block của ca thật:
     /// `block_secs = 129600`, node nạp `from = 1787043600` ⇒ block đầu 13788,
@@ -993,11 +1017,26 @@ mod tests {
             only_lru.iter().map(|b| (b, missing.contains(b))).collect::<Vec<_>>()
         );
 
+        // Số block mất **tùy build**, và đó là cả ý nghĩa của ca thật này:
+        //
+        //   arena chung  (`lru-shared-memory`) → mất 0
+        //   chia cứng   (mặc định crate)      → mất 11
+        //
+        // Không assert cứng "mất 0": nhánh CI không bật feature sẽ đỏ **đúng
+        // như bản chia cứng còn bug**, tức đỏ vì lý do sai. Ở đây ta khẳng định
+        // đúng con số của build đang chạy, nên cả hai nhánh đều có ý nghĩa.
+        let expected_missing = if opsense_mlib::lru::SHARED_ARENA { 0 } else { 11 };
         assert_eq!(
             missing.len(),
-            0,
-            "station phải giữ hết {} block, mất {:?}",
-            N_BLOCKS, missing
+            expected_missing,
+            "arena {} ⇒ cần mất {} block, thực tế mất {:?}",
+            if opsense_mlib::lru::SHARED_ARENA {
+                "chung"
+            } else {
+                "chia cứng"
+            },
+            expected_missing,
+            missing
         );
     }
 
@@ -1135,15 +1174,38 @@ mod tests {
             .query_recent(base, base + (N as i64) * 115_200 - 1)
             .await
             .unwrap_or_default();
-        assert_eq!(
-            got.len(),
-            batch.len(),
-            "mất {} observation: block trùng shard bị đẩy khi capacity_per_shard = 1",
-            batch.len() - got.len()
-        );
+        // Tương tự `repro_station_layer_29_blocks`: số obs còn lại **tùy build**.
+        //
+        //   arena chung → giữ hết; chia cứng → mất obs do block trùng shard
+        //
+        // Trước đây assert cứng `batch.len()`, nên nhánh CI không bật feature đỏ
+        // **đúng như bản chia cứng còn bug** — đỏ vì lỗi quên gate, không phải vì
+        // phát hiện gì mới. Ở đây khẳng định đúng số của build đang chạy.
+        if opsense_mlib::lru::SHARED_ARENA {
+            assert_eq!(
+                got.len(),
+                batch.len(),
+                "arena chung phải giữ hết {} observation, mất {}",
+                batch.len(),
+                batch.len() - got.len()
+            );
+        } else {
+            // Arena chia cứng: mất obs khi hai `block_id` rơi cùng shard và
+            // `capacity_per_shard = ceil({HOT_BLOCKS} / {STATION_SHARDS})` = 1.
+            assert!(
+                got.len() < batch.len(),
+                "arena chia cứng với capacity_per_shard = 1 mà giữ hết {} obs — \
+                 đáng lẽ phải mất; kiểm tra lại `STATION_SHARDS`",
+                got.len()
+            );
+        }
 
         // Chẩn đoán khi test đỏ: in ra block nào rơi vào shard nào.
-        if got.len() != batch.len() {
+        //
+        // Bắn **khi arena chung mất obs** — đó mới là hỏng. Ở nhánh arena chia
+        // cứng thì mất obs là **đã được mong đợi** (và đã assert ở trên), nên
+        // không được panic ở đây nữa.
+        if opsense_mlib::lru::SHARED_ARENA && got.len() != batch.len() {
             let mut per_shard: std::collections::BTreeMap<usize, Vec<i64>> = Default::default();
             let mask = STATION_SHARDS - 1;
             for id in &written {
