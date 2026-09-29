@@ -266,7 +266,7 @@ impl Default for Block {
 /// TODO: sửa gốc ở `opsense-mlib::lru` — arena cấp phát tĩnh theo shard, nên
 /// muốn "chỉ evict khi TỔNG đầy" thì phải chuyển sang free-list chung. Khi đó
 /// sharding trở lại an toàn và có thể nâng `S`.
-const STATION_SHARDS: usize = 1;
+const STATION_SHARDS: usize = 32;
 
 pub struct TimeseriesStation {
     caches: LruCache<i64, Block, STATION_SHARDS>,
@@ -911,6 +911,26 @@ mod tests {
 
     fn obs(ts: i64, value: f64) -> Observation {
         Observation::new(ts, "cpu".into(), TelemetryKind::Metric, Signal::Raw, value)
+    }
+
+    /// Chống regression: nếu `lru-shared-memory` bị **tắt trong build prod**,
+    /// test này đỏ chứ không phải prod âm thầm mất dữ liệu.
+    ///
+    /// `STATION_SHARDS = 32` với arena chia cứng ⇒ `capacity_per_shard = 1` ⇒
+    /// mất 11/29 block. Đây chính xác là lỗi đã đo trên stack. Nếu feature
+    /// được bật (xem `image.yml`), arena chung giữ hết.
+    ///
+    /// Chạy:
+    ///   `cargo test -p opsense-core --features lru-shared-memory`
+    ///   (không feature ⇒ test này **phải đỏ**)
+    #[test]
+    fn shard_count_needs_shared_arena() {
+        assert!(
+            cfg!(feature = "lru-shared-memory"),
+            "build này KHÔNG có `lru-shared-memory` ⇒ arena LRU chia cứng ⇒ \
+             `STATION_SHARDS = 32` chỉ còn 18/29 block. \
+             Bật `opsense-core/lru-shared-memory` (xem `.github/workflows/image.yml`)."
+        );
     }
 
     /// REPRO ở tầng STATION (không phải LRU trần) — ca thật của `history-1H`.
