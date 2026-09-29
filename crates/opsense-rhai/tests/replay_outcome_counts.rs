@@ -50,9 +50,12 @@ const SYMBOL: &str = "BTCUSDT";
 const GRID: &str = "grid";
 const CANDLE: &str = "tick-candle";
 
-/// Số nến đẩy. Nhiều để chắc chắn có lệnh **đóng** (cần giá đi qua TP và SL),
-/// không chỉ lệnh mở.
-const N_CANDLES: i64 = 300;
+/// Số nến đẩy.
+///
+/// Cần **nhiều lệnh đóng**, không phải 1–2. Mẫu cỡ 300 nến cho 1–2 lệnh đóng và
+/// kết quả `*_cnt` nhảy giữa 0 và 1 ⇒ không phân biệt được "cơ chế hỏng" với
+/// "chưa đủ mẫu". Mẫu phải đủ lớn để nếu cơ chế đúng thì thấy ngay.
+const N_CANDLES: i64 = 2_000;
 
 fn params() -> BTreeMap<String, Value> {
     let mut m = BTreeMap::new();
@@ -63,8 +66,15 @@ fn params() -> BTreeMap<String, Value> {
     // trong harness này.
     m.insert("history_source".into(), Value::from(CANDLE));
     m.insert("live_source".into(), Value::from(CANDLE));
-    m.insert("history_secs".into(), Value::from(3600));
-    m.insert("live_window_secs".into(), Value::from(300));
+    // PHẢI phủ hết khoảng replay. `grid.rhai:514` đọc history theo **đồng hồ
+    // thật**: `station_candles(hist_src, now - history_secs, now, …)`. Nến nào
+    // nằm ngoài cửa sổ thì script **không nhìn thấy**, dù nó có trong station.
+    //
+    // Đây là giới hạn thật của cách replay: muốn chạy N nến thì phải nâng
+    // `history_secs` theo N, không nâng thì tầng dưới vẫn chạy nhưng tầng trên
+    // coi như không có dữ liệu.
+    m.insert("history_secs".into(), Value::from(86_400.0 * 7.0));
+    m.insert("live_window_secs".into(), Value::from(86_400.0 * 7.0));
     m.insert("mode".into(), Value::from("trading"));
     m.insert("calendar".into(), Value::from("crypto"));
     m.insert("strategy".into(), Value::from("grid"));
@@ -72,7 +82,11 @@ fn params() -> BTreeMap<String, Value> {
     m.insert("sl_pct".into(), Value::from(0.008));
     m.insert("grid_min_trades".into(), Value::from(3));
     m.insert("lookback_secs".into(), Value::from(172_800));
-    m.insert("review_interval_secs".into(), Value::from(900));
+    // Chu kỳ review **rất ngắn**: plan observation chỉ phản ánh bộ đếm tại
+    // thời điểm rebuild, nên với `900` (như prod) gần như không rebuild nào
+    // rơi vào khoảng có lệnh đóng ⇒ đọc ra 0 dù bộ đếm có tăng. Đây chính là
+    // nguồn gây chập chờn ở bản test đầu.
+    m.insert("review_interval_secs".into(), Value::from(2));
     m.insert("fee_rate".into(), Value::from(0.0005));
     m.insert("kelly_fraction".into(), Value::from(0.25));
     m.insert("base_capital".into(), Value::from(100_000.0));
@@ -107,6 +121,54 @@ fn tick_payload(ts: i64, price: f64) -> Value {
 ///
 /// Gỡ `#[ignore]` khi nào test chờ theo điều kiện thay vì sleep cố định, và kết
 /// luận được.
+/// Đọc station `grid`: (số lệnh đóng, ts lệnh đóng mới nhất, ts plan mới nhất,
+/// max `*_cnt` trong plan).
+async fn read_counts(ctx: &Arc<Context>) -> (usize, i64, i64, u64, usize) {
+    let now = opsense_components::signal::now_secs();
+    let obs: Vec<Observation> = match ctx
+        .station::<Arc<RwLock<opsense_core::TimeseriesStation>>>(GRID)
+        .await
+    {
+        Ok(st) => st
+            .write()
+            .await
+            .query_recent(now - 86_400, now)
+            .await
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let mut closed = 0usize;
+    let mut closed_ts = i64::MIN;
+    let mut plan_ts = i64::MIN;
+    let mut plan_obs = 0usize;
+    let mut max_cnt = 0u64;
+    for o in &obs {
+        if o.signal == Signal::Order
+            && o.labels.get("status").map(String::as_str) == Some("closed")
+        {
+            closed += 1;
+            closed_ts = closed_ts.max(o.ts);
+        }
+        if o.labels.get("kind").map(String::as_str) == Some("plan") {
+            plan_ts = plan_ts.max(o.ts);
+            plan_obs += 1;
+            if let Some(cells) = o.labels.get("cells").and_then(|c| c.parse::<Value>().ok()) {
+                for cell in cells.as_array().into_iter().flatten() {
+                    for key in ["long_win_cnt", "long_lost_cnt", "short_win_cnt", "short_lost_cnt"] {
+                        for v in cell.get(key).and_then(|a| a.as_array()).into_iter().flatten() {
+                            max_cnt = max_cnt.max(v.as_u64().unwrap_or(0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (closed, closed_ts, plan_ts, max_cnt, plan_obs)
+}
+
+/// Số lệnh đóng tối thiểu để kết luận được.
+const MIN_CLOSED: usize = 10;
+
 #[tokio::test]
 #[ignore = "CHƯA kết luận được: số lệnh đóng phụ thuộc thời điểm, chạy lại ra kết quả khác"]
 async fn outcome_counts_accumulate_through_runtime() {
@@ -119,7 +181,9 @@ async fn outcome_counts_accumulate_through_runtime() {
 
     let components: Vec<Arc<dyn Component>> = vec![
         Arc::new(Input { id: "candles".into() }),
-        Arc::new(Clock::new(Duration::from_millis(200))),
+        // Script tiến **một nến mỗi nhịp Clock** ⇒ tốc độ replay = tốc độ Clock.
+        // 5ms × 2000 nến ≈ 10s. Nhịp chậm thì chỉ kịp xử lý vài chục nến.
+        Arc::new(Clock::new(Duration::from_millis(5))),
         Arc::new(Tick2Candle {
             id: CANDLE.into(),
             inputs: vec!["candles".into()],
@@ -159,7 +223,7 @@ async fn outcome_counts_accumulate_through_runtime() {
         .await
         .expect("inject tick");
         // Đẩy nhịp để Clock kích nhánh trading theo từng nến.
-        tokio::time::sleep(Duration::from_millis(8)).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     // Tick ở bucket kế tiếp để đóng nến cuối.
     rt.inject(
@@ -168,59 +232,57 @@ async fn outcome_counts_accumulate_through_runtime() {
     )
     .await
     .expect("inject tick cuối");
+    // Chờ **theo điều kiện**, không sleep cố định: chờ tới khi có lệnh đóng VÀ
+    // có plan observation mới hơn lệnh đó. Như vậy bộ đếm chắc chắn đã được
+    // tăng *trước* lúc ta đọc, không còn phụ thuộc may rủi thứ tự.
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let (closed_now, _, _, _, _) = read_counts(&ctx).await;
+        if closed_now >= MIN_CLOSED {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let (c, ct, pt, mc, po) = read_counts(&ctx).await;
+            println!(
+                "DIAG hết giờ: chỉ {c} lệnh đóng (cần {MIN_CLOSED}), closed ts={ct}, \
+                 plan ts={pt}, {po} plan obs, max(*_cnt)={mc}"
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Thêm nhịp để chắc chắn có rebuild **sau** lệnh đóng cuối, rồi mới đọc.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // Đọc cửa sổ rộng: nến đẩy ngược từ `open_bucket`.
-    let lo = open_bucket - 120;
-    let hi = open_bucket + N_CANDLES * 60 + 120;
+    let (closed, closed_ts, plan_ts, max_cnt, plan_obs) = read_counts(&ctx).await;
+    println!(
+        "REPLAY: {N_CANDLES} nến → {closed} lệnh đóng (ts mới nhất {closed_ts}), \
+         {plan_obs} plan obs (mới nhất ts={plan_ts}), max(*_cnt)={max_cnt}"
+    );
 
-    let obs: Vec<Observation> = ctx
-        .station::<Arc<RwLock<opsense_core::TimeseriesStation>>>(GRID)
-        .await
-        .expect("station grid")
-        .write()
-        .await
-        .query_recent(lo, hi)
-        .await
-        .unwrap_or_default();
+    // 1) Phải có lệnh đóng — nếu không thì phần dưới vô nghĩa.
+    assert!(
+        closed >= MIN_CLOSED,
+        "chỉ {closed} lệnh đóng, cần ≥ {MIN_CLOSED} để phân biệt được hỏng với chưa đủ mẫu"
+    );
 
-    let orders: Vec<&Observation> = obs.iter().filter(|o| o.signal == Signal::Order).collect();
-    let open = orders.iter().filter(|o| o.labels.get("status").map(String::as_str) == Some("open")).count();
-    let closed = orders
-        .iter()
-        .filter(|o| o.labels.get("status").map(String::as_str) == Some("closed"))
-        .count();
-    let plans = obs.iter().filter(|o| o.labels.get("kind").map(String::as_str) == Some("plan")).count();
+    // 2) Plan observation phải **mới hơn** lệnh đóng, thì bộ đếm mới kịp được
+    //    phản ánh. Vòng chờ phía trên đã bảo đảm điều này (nếu hết giờ thì
+    //    `plan_ts <= closed_ts` và assert này bắt được).
+    assert!(
+        plan_ts > closed_ts,
+        "chưa có rebuild nào **sau** lệnh đóng (plan ts={plan_ts}, closed ts={closed_ts}) — \
+         không thể kết luận gì về bộ đếm"
+    );
 
-    println!("REPLAY: {N_CANDLES} nến → {open} lệnh mở, {closed} lệnh đóng, {plans} plan obs");
-
-    // 1) Phải có lệnh đóng — nếu không thì test dưới vô nghĩa.
-    assert!(closed > 0, "cần ít nhất 1 lệnh đóng để bộ đếm có việc; mở={open} đóng={closed}");
-
-    // 2) Bộ đếm trong plan observation phải khác 0.
+    // 3) KẾT LUẬN.
     //
-    // Đây là điểm cần xác minh. Hai tầng dưới đã chứng minh giữ được bộ đếm, và
-    // tầng lưu vẫn tăng bộ đếm khi lệnh đóng — nên nếu `*_cnt` ở đây **vẫn 0**,
-    // thì đích đến của bộ đếm đang bị đứt ở giữa: kernel đếm vào một
-    // `Session`, còn observation lấy từ `Session` khác.
-    let mut max_cnt = 0u64;
-    for p in obs.iter().filter(|o| o.labels.get("kind").map(String::as_str) == Some("plan")) {
-        let Some(cells) = p.labels.get("cells").and_then(|c| c.parse::<Value>().ok()) else {
-            continue;
-        };
-        for cell in cells.as_array().into_iter().flatten() {
-            for key in ["long_win_cnt", "long_lost_cnt", "short_win_cnt", "short_lost_cnt"] {
-                for v in cell.get(key).and_then(|a| a.as_array()).into_iter().flatten() {
-                    max_cnt = max_cnt.max(v.as_u64().unwrap_or(0));
-                }
-            }
-        }
-    }
-    println!("REPLAY: max(*_cnt) trong plan observation = {max_cnt}");
-
+    //    Điều kiện đã chắc chắn: có lệnh đóng, và có rebuild **sau** nó, nên
+    //    plan observation đã đi qua đúng vòng `đóng lệnh → rebuild → ghi obs`.
+    //    Nếu bộ đếm vẫn 0 ở đây thì nó thật sự không tới nơi quan sát.
     assert!(
         max_cnt > 0,
-        "có {closed} lệnh đóng nhưng `*_cnt` trong plan observation vẫn 0. \
+        "có {closed} lệnh đóng và rebuild sau đó, nhưng `*_cnt` vẫn 0. \
          ⇒ bộ đếm của kernel không tới được chỗ quan sát."
     );
 }
