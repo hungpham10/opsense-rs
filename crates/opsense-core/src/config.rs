@@ -244,10 +244,14 @@ impl GossipConfig {
     /// hoa) thắng giá trị trong TOML — cùng cơ chế với
     /// [`Config::resolved_attributes`], nên deploy không phải sửa file.
     ///
-    /// Env rỗng bị bỏ qua: `OPSENSE_GOSSIP_NODE_ID=""` là *không khai*, không
+    /// Env **rỗng** bị bỏ qua: `OPSENSE_GOSSIP_NODE_ID=""` là *không khai*, không
     /// phải "xoá node_id trong file".
-    #[must_use]
-    pub fn resolved(&self) -> Self {
+    ///
+    /// Env **sai kiểu** thì báo lỗi, không lặng lẽ giữ giá trị cũ: một dấu phẩy
+    /// thừa trong `OPSENSE_GOSSIP_TICK_SECS=5s` sẽ khiến vận hành tin là mình
+    /// đang đặt 5 giây trong khi thật ra vẫn là mặc định — đó là cấu hình *nói
+    /// dối*, nguy hiểm hơn hẳn việc không khởi động được.
+    pub fn resolved(&self) -> Result<Self, ConfigError> {
         let mut out = self.clone();
         const PREFIX: &str = "OPSENSE_GOSSIP_";
         for (env_key, value) in std::env::vars() {
@@ -255,20 +259,29 @@ impl GossipConfig {
             if value.is_empty() {
                 continue;
             }
+            // Ghi rõ tên biến trong lỗi: "abc is not a positive integer" mà không
+            // nói biến nào thì chẩn đoán kiểu mò mẫm.
+            let num = || -> Result<u64, ConfigError> {
+                value.parse::<u64>().map_err(|_| {
+                    ConfigError::Invalid(format!("{env_key}={value:?} is not a positive integer"))
+                })
+            };
             match field {
                 "NODE_ID" => out.node_id = value,
                 "OWN_URL" => out.own_url = value,
                 "SEEDS" => out.seeds = value,
                 "TOKEN" => out.token = value,
-                "TICK_SECS" => out.tick_secs = value.parse().unwrap_or(out.tick_secs),
-                "SUSPECT_SECS" => out.suspect_secs = value.parse().unwrap_or(out.suspect_secs),
-                "DEAD_SECS" => out.dead_secs = value.parse().unwrap_or(out.dead_secs),
-                "SETTLE_SECS" => out.settle_secs = value.parse().unwrap_or(out.settle_secs),
-                "QUORUM" => out.quorum = value.parse().unwrap_or(out.quorum),
-                _ => {}
+                "TICK_SECS" => out.tick_secs = num()?,
+                "SUSPECT_SECS" => out.suspect_secs = num()?,
+                "DEAD_SECS" => out.dead_secs = num()?,
+                "SETTLE_SECS" => out.settle_secs = num()?,
+                "QUORUM" => out.quorum = u32::try_from(num()?).unwrap_or(u32::MAX),
+                // Biến `OPSENSE_GOSSIP_*` lạ không phải lỗi: có thể thuộc phiên bản
+                // sau. Bỏ qua, nhưng im lặng thì khó chẩn đoán.
+                _ => continue,
             }
         }
-        out
+        Ok(out)
     }
 
     /// Kiểm tra bất biến mà parser TOML không ép được. Chỉ kiểm khi mesh **bật**;
@@ -320,9 +333,8 @@ impl GossipConfig {
 }
 
 /// Cấu hình tầng raft — xem [`crate::config::Config::raft`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct RaftConfig {
     /// Pipeline mà node đứng một mình sẽ chạy (khi chưa ai gom nó vào cụm nào).
     pub pipeline: String,
@@ -402,14 +414,13 @@ impl Config {
         // Kiểm trên bản **đã áp env**: `OPSENSE_GOSSIP_*` có thể làm hỏng cấu
         // hình sau khi file đã hợp lệ, và lỗi đó phải lộ ra lúc khởi động chứ
         // không phải lúc node đã vào mesh.
-        self.gossip.resolved().validate()?;
+        self.gossip.resolved()?.validate()?;
         Ok(())
     }
 
     /// `[gossip]` sau khi áp `OPSENSE_GOSSIP_<FIELD>` — thứ tầng vận chuyển dùng,
-    /// không phải bản thô trong file.
-    #[must_use]
-    pub fn resolved_gossip(&self) -> GossipConfig {
+    /// không phải bản thô trong file. Lỗi env sai kiểu nổi ra ở đây.
+    pub fn resolved_gossip(&self) -> Result<GossipConfig, ConfigError> {
         self.gossip.resolved()
     }
 
@@ -735,7 +746,7 @@ token = "s3cret"
             ("OPSENSE_GOSSIP_QUORUM", "3"),
         ]);
         let cfg = gossip_toml("");
-        let g = cfg.resolved_gossip();
+        let g = cfg.resolved_gossip().expect("env hợp lệ");
         assert_eq!(g.node_id, "node-env");
         assert_eq!(g.own_url, "http://env:8080");
         assert_eq!(g.seed_urls(), vec!["http://a:8080", "http://b:8080"]);
@@ -745,10 +756,9 @@ token = "s3cret"
         assert!(cfg.validate().is_ok(), "env đủ thì config hợp lệ");
     }
 
-    /// Env rỗng = *không khai*, không phải "xoá giá trị trong file"; env sai
-    /// kiểu số thì giữ nguyên giá trị cũ thay vì làm 0.
+    /// Env rỗng = *không khai*, không phải "xoá giá trị trong file".
     #[test]
-    fn empty_or_unparsable_env_falls_back_to_the_file() {
+    fn empty_env_means_unset_not_erase() {
         let cfg = gossip_toml(
             r#"
 [gossip]
@@ -762,13 +772,40 @@ quorum = 2
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env = GossipEnv::set(&[
             ("OPSENSE_GOSSIP_NODE_ID", ""),
-            ("OPSENSE_GOSSIP_TICK_SECS", "abc"),
             ("OPSENSE_GOSSIP_QUORUM", ""),
         ]);
-        let g = cfg.resolved_gossip();
+        let g = cfg.resolved_gossip().expect("env rỗng không phải lỗi");
         assert_eq!(g.node_id, "node-file", "env rỗng không được xoá giá trị file");
-        assert_eq!(g.tick_secs, 7, "env sai kiểu phải giữ giá trị file");
         assert_eq!(g.quorum, 2);
+    }
+
+    /// Env sai kiểu phải **báo lỗi**, không lặng lẽ giữ giá trị cũ.
+    ///
+    /// Lý do: `TICK_SECS=5s` khiến vận hành tin mình đang đặt 5 giây trong khi
+    /// thật ra vẫn là mặc định — cấu hình nói dối, nguy hiểm hơn hẳn việc không
+    /// khởi động được, và lỗi sẽ chỉ lộ ra rất lâu sau đó.
+    #[test]
+    fn unparsable_env_is_rejected_not_silently_ignored() {
+        for bad in ["abc", "5s", "-1", "1.5", "99999999999999999999999"] {
+            let cfg = gossip_toml(
+                r#"
+[gossip]
+node_id = "node-file"
+own_url = "http://file:8080"
+token = "tok-file"
+tick_secs = 7
+"#,
+            );
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _env = GossipEnv::set(&[("OPSENSE_GOSSIP_TICK_SECS", bad)]);
+            let err = cfg
+                .resolved_gossip()
+                .expect_err(&format!("TICK_SECS={bad:?} phải bị từ chối"));
+            assert!(
+                err.to_string().contains("OPSENSE_GOSSIP_TICK_SECS"),
+                "thông báo phải chỉ đúng biến sai: {err}"
+            );
+        }
     }
 
     /// Env làm hỏng cấu hình sau khi file đã hợp lệ thì `validate` phải bắt —
