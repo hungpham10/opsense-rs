@@ -16,6 +16,50 @@ use log::info;
 
 use super::models::{Component, ComponentType, Context, Event, Message, NodeInfo, Outbound};
 
+/// Lỗi gần nhất của từng node, kèm revision để cache của [`Runtime::topology`]
+/// biết khi nào phải dựng lại.
+///
+/// `Arc` riêng (không phải field `RwLock` thường) vì handler `start()` ở
+/// `crates/opsense/src/api/mod.rs` chạy ở task khác và không được khoá cả
+/// `Runtime` — lúc `start()` thì `api` vẫn đang giữ write guard.
+#[derive(Default)]
+pub struct NodeErrors {
+    by_node: RwLock<HashMap<String, String>>,
+    /// Bump mỗi lần nội dung `by_node` đổi. `topology()` phục vụ từ cache nên
+    /// không có revision này thì lỗi mới không bao giờ lọt ra status.
+    rev: AtomicU64,
+}
+
+impl NodeErrors {
+    /// Ghi lỗi; `None` ⇒ node khoẻ, xoá lỗi cũ. Trả `true` khi nội dung đổi.
+    pub fn set(&self, node: &str, error: Option<String>) -> bool {
+        let changed = match error {
+            Some(e) => self
+                .by_node
+                .write()
+                .map(|mut m| m.insert(node.to_string(), e).is_none())
+                .unwrap_or(false),
+            None => self
+                .by_node
+                .write()
+                .map(|mut m| m.remove(node).is_some())
+                .unwrap_or(false),
+        };
+        if changed {
+            self.rev.fetch_add(1, Ordering::Relaxed);
+        }
+        changed
+    }
+
+    pub fn get(&self, node: &str) -> Option<String> {
+        self.by_node.read().ok()?.get(node).cloned()
+    }
+
+    fn snapshot(&self) -> HashMap<String, String> {
+        self.by_node.read().map(|m| m.clone()).unwrap_or_default()
+    }
+}
+
 struct Bootstrap {
     component: RwLock<Arc<dyn Component>>,
     boot: Arc<Semaphore>,
@@ -366,12 +410,22 @@ pub struct Runtime {
     nodes: RwLock<HashMap<String, usize>>,
     inc: AtomicUsize,
 
+    /// Lỗi gần nhất theo **tên** node — nguồn cho `NodeInfo::last_error`.
+    ///
+    /// Vì sao cần: `run()` của hầu hết component **không** trả `Err` khi hỏng
+    /// (script lỗi chỉ `warn!` rồi bỏ batch, HTTP chỉ `warn!` rồi thử lại ở
+    /// nhịp sau) nên `Event::Major` của engine không kích hoạt, và `println!`
+    /// ở handler mất ngay khi container restart. Node chết vẫn hiện là
+    /// "đang chạy" trong status. Hỏi status là cách duy nhất hỏi được.
+    last_errors: Arc<NodeErrors>,
+
     /// Bumped after every successful [`Runtime::reload`]; [`Runtime::topology`]
     /// serves its snapshot from cache until this moves again.
     generation: AtomicU64,
     /// `(generation, snapshot)` — status tools poll this often, rebuilding the
     /// full NodeInfo vec per call made it the hottest read path.
-    topology_cache: std::sync::Mutex<Option<(u64, std::sync::Arc<Vec<NodeInfo>>)>>,
+    topology_cache:
+        std::sync::Mutex<Option<(u64, u64, std::sync::Arc<Vec<NodeInfo>>)>>,
 }
 
 impl Default for Runtime {
@@ -406,6 +460,9 @@ impl Runtime {
             // @NOTE: shared context (injected before start)
             context: None,
 
+            // @NOTE: error bookkeeping
+            last_errors: Arc::new(NodeErrors::default()),
+
             // @NOTE: topology snapshot cache
             generation: AtomicU64::new(1),
             topology_cache: std::sync::Mutex::new(None),
@@ -437,11 +494,33 @@ impl Runtime {
     /// Rebuilt only when [`Runtime::reload`] bumps the generation counter —
     /// repeated status calls read one cached snapshot instead of locking all
     /// five maps every time.
+    /// Tên node theo index — `Event` mang index (`usize`), còn `last_error` khoá
+    /// theo tên cho khớp `NodeInfo`.
+    pub fn node_name(&self, idx: usize) -> Option<String> {
+        let nodes = self.nodes.read().ok()?;
+        nodes
+            .iter()
+            .find(|(_, v)| **v == idx)
+            .map(|(k, _)| k.clone())
+    }
+    /// Handle lỗi chia sẻ — đưa cho handler `start()` mà **không** phải khoá
+    /// `Runtime` (xem [`NodeErrors`]).
+    pub fn node_errors(&self) -> Arc<NodeErrors> {
+        Arc::clone(&self.last_errors)
+    }
+
+    /// Ghi lỗi gần nhất của node. `error = None` ⇒ node khoẻ, xoá lỗi cũ.
+    pub fn report_node_error(&self, id: &str, error: Option<String>) {
+        self.last_errors.set(id, error);
+    }
+
     pub fn topology(&self) -> Vec<NodeInfo> {
         let generation = self.generation.load(Ordering::Relaxed);
+        let err_rev = self.last_errors.rev.load(Ordering::Relaxed);
         if let Ok(cache) = self.topology_cache.lock()
-            && let Some((cached_gen, snapshot)) = cache.as_ref()
+            && let Some((cached_gen, cached_rev, snapshot)) = cache.as_ref()
             && *cached_gen == generation
+            && *cached_rev == err_rev
         {
             return snapshot.as_ref().clone();
         }
@@ -449,8 +528,10 @@ impl Runtime {
         if let Ok(mut cache) = self.topology_cache.lock() {
             // Only publish if no reload slipped in while we were building;
             // a stale snapshot must never outlive its generation.
-            if self.generation.load(Ordering::Relaxed) == generation {
-                *cache = Some((generation, std::sync::Arc::clone(&snapshot)));
+            if self.generation.load(Ordering::Relaxed) == generation
+                && self.last_errors.rev.load(Ordering::Relaxed) == err_rev
+            {
+                *cache = Some((generation, err_rev, std::sync::Arc::clone(&snapshot)));
             }
         }
         snapshot.as_ref().clone()
@@ -502,6 +583,7 @@ impl Runtime {
             return Vec::new();
         };
 
+        let errors = self.last_errors.snapshot();
         let idx_to_id: HashMap<usize, &String> = nodes.iter().map(|(id, idx)| (*idx, id)).collect();
         let names = |idxs: &Vec<usize>| -> Vec<String> {
             idxs.iter()
@@ -519,6 +601,7 @@ impl Runtime {
                     inputs: sources.get(idx).map(&names).unwrap_or_default(),
                     outputs: sinks.get(idx).map(&names).unwrap_or_default(),
                     running: tasks.contains_key(idx),
+                    last_error: errors.get(id).cloned(),
                 })
             })
             .collect()

@@ -102,6 +102,9 @@ impl AppState {
         let admin_entity = Arc::new(opsense_model::entities::admin::Admin::new(&connector));
         let oauth_metrics = Arc::new(OAuthMetrics::new());
 
+        // Clone **trước** khi  bị shadow bởi write guard bên dưới —
+        // handler cần `Arc`, không phải guard.
+        let runtime_arc = Arc::clone(&runtime);
         {
             let mut runtime = runtime.write().await;
 
@@ -117,11 +120,46 @@ impl AppState {
                         .map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
                 )
                 .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
-            runtime.start(|event| async move {
-                match event {
-                    Event::Minor((id, error)) => println!("Minor error in node {id}: {error}"),
-                    Event::Major((id, error)) => println!("Major error in node {id}: {error}"),
-                    Event::Panic((id, error)) => println!("Panic in node {id}: {error}"),
+            // Không chỉ `println!`: lỗi phải **hỏi được** bằng `opsense_status`.
+            // `println!` mất ngay khi container restart, và node vẫn hiện là
+            // "đang chạy" trong status dù đã chết — nhầm lẫn rất dễ.
+            //
+            // Handler **không** giữ write guard: chỉ `read()` khoá lấy tên node
+            // rồi thả, và chỉ khi có `Major`/`Panic`. Nó chạy ở task riêng nên
+            // chờ guard ở khối này thả là bình thường, không phải deadlock.
+            //
+            // `Event::Minor` không ghi vào `last_error`: đó là lỗi bố trí (batch
+            // lệch nối,…) còn pipeline vẫn chạy — ghi thành lỗi node sẽ ám mọi
+            // node chỉ vì có một batch lệch.
+            let handle = Arc::clone(&runtime_arc);
+            runtime.start(move |event| {
+                let handle = Arc::clone(&handle);
+                async move {
+                    // Lấy idx + loại trước: `event` bị `match` bên dưới.
+                    let (idx, major) = match &event {
+                        Event::Minor((i, _)) => (*i, false),
+                        Event::Major((i, _)) => (*i, true),
+                        Event::Panic((i, _)) => (*i, true),
+                    };
+                    let text = match &event {
+                        Event::Minor((_, e)) | Event::Major((_, e)) | Event::Panic((_, e)) => {
+                            e.to_string()
+                        }
+                    };
+                    match event {
+                        Event::Minor((id, error)) => println!("Minor error in node {id}: {error}"),
+                        Event::Major((id, error)) => println!("Major error in node {id}: {error}"),
+                        Event::Panic((id, error)) => println!("Panic in node {id}: {error}"),
+                    }
+                    if major {
+                        let rt = handle.read().await;
+                        match rt.node_name(idx) {
+                            Some(name) => rt.report_node_error(&name, Some(text)),
+                            // Node đã bị gỡ khỏi pipeline giữa lúc: không ghi
+                            // vào map của node không còn tồn tại.
+                            None => {}
+                        }
+                    }
                 }
             })?;
         }

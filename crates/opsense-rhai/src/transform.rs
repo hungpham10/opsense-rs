@@ -26,7 +26,7 @@ use serde_json::Value;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::runtime::ScriptSource;
-use crate::vector::runtime::{Component, Identify, Message, Outbound};
+use crate::vector::runtime::{Component, Event, Identify, Message, Outbound};
 
 /// `station = true` makes the node terminal: its own station is queryable, so it
 /// needs no downstream consumer. The station is registered either way (see
@@ -88,7 +88,7 @@ impl RhaiTransform {
 impl_rhai_transform!(
     async fn run(
         &self,
-        _id: usize,
+        id: usize,
         rx: &mut mpsc::Receiver<Message>,
         tx: Outbound,
     ) -> Result<(), Error> {
@@ -127,6 +127,13 @@ impl_rhai_transform!(
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!("rhai {}: {}", self.id, e);
+                    // Báo qua kênh lỗi của engine, không chỉ log. `run()` trả
+                    // `Ok` nên `Bootstrap::execute` không bắt được — và nếu để
+                    // `run()` trả `Err` thì engine retry mỗi 1 giây, tức spam
+                    // một lỗi tĩnh. Gửi `Event::Major` giữ **nhịp thử lại theo
+                    // message** (mỗi nến/lệnh) như hiện tại, nhưng lần này lỗi
+                    // tới được handler và status.
+                    let _ = tx.event.send(Event::Major((id, Error::other(e)))).await;
                     continue;
                 }
             };
@@ -175,6 +182,12 @@ impl_rhai_transform!(
                 Ok(items) => items,
                 Err(e) => {
                     tracing::warn!("rhai {} skipped batch at ts {ts}: {e}", self.id);
+                    // Xem chỗ `script_source()` ở trên: log không đủ, lỗi phải
+                    // tới handler để hỏi được bằng status.
+                    let _ = tx
+                        .event
+                        .send(Event::Major((id, Error::other(e.to_string()))))
+                        .await;
                     // Still forward processed to not stall downstream
                     let done = signal::tagged(signal::processed(ts), &self.id);
                     for s in &tx.streams {

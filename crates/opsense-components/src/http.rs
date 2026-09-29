@@ -40,7 +40,7 @@ use opsense_mlib::jq::JsonQuery;
 use opsense_macros::{source, transform};
 
 use crate::station::downcast_ctx;
-use crate::vector::runtime::{Component, Identify, Message, Outbound};
+use crate::vector::runtime::{Component, Event, Identify, Message, Outbound};
 use crate::{render, signal};
 
 /// `station = true` makes the node terminal: its own station is queryable, so
@@ -627,7 +627,7 @@ pub struct HttpOrigin {
 impl_http_origin!(
     async fn run(
         &self,
-        _id: usize,
+        id: usize,
         _rx: &mut mpsc::Receiver<Message>,
         tx: Outbound,
     ) -> Result<(), Error> {
@@ -707,6 +707,15 @@ impl_http_origin!(
                 }
                 // Lỗi **không** làm chết node: chu kỳ sau thử lại. Nếu để `?`
                 // thì một lần 502 của Binance là pipeline chết vĩnh viễn.
+                //
+                // Nhưng `warn!` thôi thì node chỉ "âm thầm hỏng": status vẫn hiện
+                // nó đang chạy, và sau một lần 502 không ai biết nó đã im hàng
+                // giờ. Bắn qua kênh lỗi của engine để `opsense_status` trả về
+                // `last_error` — hỏi là biết, không phải đào log.
+                //
+                // `Event::Major` **không** làm node chết: `Bootstrap::execute`
+                // chỉ sinh event này khi chính `run()` trả `Err`, còn `run()`
+                // ở đây vẫn `Ok` và quay lại vòng quét.
                 Err(e) => {
                     tracing::warn!(
                         node = %self.id,
@@ -714,6 +723,10 @@ impl_http_origin!(
                         error = %e,
                         "http_origin: fetch thất bại — thử lại ở nhịp sau"
                     );
+                    let _ = tx
+                        .event
+                        .send(Event::Major((id, Error::other(format!("http_origin {}: {e}", self.id)))))
+                        .await;
                 }
             }
 
@@ -725,7 +738,7 @@ impl_http_origin!(
 impl_http_source!(
     async fn run(
         &self,
-        _id: usize,
+        id: usize,
         rx: &mut mpsc::Receiver<Message>,
         tx: Outbound,
     ) -> Result<(), Error> {
@@ -781,6 +794,12 @@ impl_http_source!(
                 Ok(b) => b,
                 Err(e) => {
                     tracing::warn!("http {}: {e}", self.id);
+                    // Xem `HttpOrigin` — `warn!` thôi thì node âm thầm hỏng,
+                    // status vẫn hiện nó đang chạy.
+                    let _ = tx
+                        .event
+                        .send(Event::Major((id, Error::other(format!("http {}: {e}", self.id)))))
+                        .await;
                     continue;
                 }
             };

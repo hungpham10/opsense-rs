@@ -95,6 +95,13 @@ pub struct NodeInfo {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub running: bool,
+    /// Lỗi gần nhất của node, `None` khi node đang khoẻ.
+    ///
+    /// Vì sao cần: `run()` của hầu hết component **không** trả `Err` khi hỏng
+    /// (script lỗi chỉ `warn!` rồi bỏ batch) nên `Event::Major` của engine không
+    /// kích hoạt, và `println!` ở handler mất ngay khi container restart. Hỏi
+    /// status mới là cách duy nhất hỏi được node đang chết vì sao.
+    pub last_error: Option<String>,
 }
 
 /// Context trait — type-erased container for shared application state.
