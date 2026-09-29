@@ -913,6 +913,70 @@ mod tests {
         Observation::new(ts, "cpu".into(), TelemetryKind::Metric, Signal::Raw, value)
     }
 
+    /// REPRO ở tầng STATION (không phải LRU trần) — ca thật của `history-1H`.
+    ///
+    /// LRU trần với 29 block cho **11** block mất. Nhưng đo trên stack là
+    /// **15**, và 4 block trong đó (`13789, 13792, 13795, 13796`) không nằm
+    /// trong tập LRU bỏ. Nếu test này ra 11 ⇒ phần còn lại do **đường ghi khác
+    /// ngoài `update_range`**. Nếu ra 15 ⇒ tầng station cộng thêm, và khoanh
+    /// được ngay chỗ trong `station.rs`.
+    ///
+    /// Dùng đúng block id và đúng độ dài block của ca thật:
+    /// `block_secs = 129600`, node nạp `from = 1787043600` ⇒ block đầu 13788,
+    /// 29 block, mỗi block 36 nến giờ × 5 field.
+    #[tokio::test]
+    async fn repro_station_layer_29_blocks() {
+        const BLOCK_SECS: i64 = 129_600;
+        const FIRST_BLOCK: i64 = 13788;
+        const N_BLOCKS: usize = 29;
+
+        let st = TimeseriesStation::new(HOT_BLOCKS, Some(BLOCK_SECS));
+
+        let mut batch = Vec::with_capacity(N_BLOCKS * 36 * 5);
+        for b in 0..N_BLOCKS as i64 {
+            let block_start = FIRST_BLOCK * BLOCK_SECS + b * BLOCK_SECS;
+            for h in 0..36i64 {
+                let ts = block_start + h * 3600;
+                for f in 0..5 {
+                    batch.push(obs(ts + f, (b * 36 + h) as f64));
+                }
+            }
+        }
+        let from = FIRST_BLOCK * BLOCK_SECS;
+        let to = from + (N_BLOCKS as i64) * BLOCK_SECS - 1;
+        st.update_range(&batch, from, to, to);
+
+        let got = st.query_recent(from, to).await.unwrap_or_default();
+
+        let mut per_block = std::collections::BTreeMap::<i64, usize>::new();
+        for o in &got {
+            *per_block.entry(st.get_block_id(o.ts)).or_default() += 1;
+        }
+        let missing: Vec<i64> = (0..N_BLOCKS as i64)
+            .map(|i| FIRST_BLOCK + i)
+            .filter(|k| !per_block.contains_key(k))
+            .collect();
+
+        println!(
+            "REPRO station: nạp {} block ({} obs) → còn {} block / {} obs\n               block mất ({}): {:?}",
+            N_BLOCKS, batch.len(), per_block.len(), got.len(), missing.len(), missing
+        );
+        // In thêm 4 block mà LRU trần không giải thích được, để so trực tiếp.
+        let only_lru = [13789i64, 13792, 13795, 13796];
+        println!(
+            "  4 block LRU không giải thích: {:?} → có mất ở tầng station không? {:?}",
+            only_lru,
+            only_lru.iter().map(|b| (b, missing.contains(b))).collect::<Vec<_>>()
+        );
+
+        assert_eq!(
+            missing.len(),
+            0,
+            "station phải giữ hết {} block, mất {:?}",
+            N_BLOCKS, missing
+        );
+    }
+
     /// Cửa sổ rộng hơn `MAX_BLOCKS_PER_QUERY` phải bị cắt về các block gần
     /// nhất — nếu không, cửa sổ mặc định 30 ngày với `block_secs = 5` là
     /// ~518.400 lần `caches.get` + `load_cold_block` cho **một** lệnh query.
