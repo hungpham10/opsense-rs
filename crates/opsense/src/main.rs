@@ -251,6 +251,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Giữ handle trong biến: drop nó sẽ shutdown client. Không có `SENTRY_DSN`
     // thì hàm trả `None` và không làm gì — xem `sentry_setup`.
     let _sentry_guard = opsense::sentry_setup::init();
+
+    // Handler SIGSEGV — **trước** mọi thứ để bọc được cả phần khởi động.
+    // Độc lập với Sentry: cái này in stack ra stderr, Sentry chỉ bắt panic.
+    opsense::segv_backtrace::install();
     // sqlx `any` drivers (mysql/postgres/sqlite) — `AppState::new` tự đăng ký
     // (idempotent) vì crate này phải tự đủ khi không có `main`; giữ lời gọi ở
     // đây để mọi lệnh CLI đều có driver sẵn.
