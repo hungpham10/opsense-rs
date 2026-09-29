@@ -98,8 +98,15 @@ fn strategy(levels: i64) -> ScriptStrategy {
     .with_knob("grid_levels", levels.into())
 }
 
-fn params(i: usize, sl_pct: f64, levels: i64) -> f64 {
-    [KELLY, CAPITAL, levels as f64, sl_pct, 0.0][i]
+/// Tham số mà kernel đọc theo **chỉ số**, không phải theo tên — xem
+/// `ScriptStrategy::rebuild` (`param(0..4)`).
+///
+/// `param(4)` = `lookback_secs`: phải **phủ hết tập nến**, vì script đọc lịch sử
+/// theo đồng hồ thật. Đặt 0 thì cửa sổ lấy nến rỗng và
+/// `strategy script cần ≥ 10 nến, có 0` — lỗi này lần đầu tôi đặt sai, đã dính
+/// và ghi lại đây.
+fn params(i: usize, sl_pct: f64, levels: i64, lookback: f64) -> f64 {
+    [KELLY, CAPITAL, levels as f64, sl_pct, lookback][i]
 }
 
 struct NoLoader;
@@ -177,11 +184,17 @@ async fn run(data: &[CandleStick], sl_pct: f64, levels: i64) -> Run {
             >
     };
 
+    // `rebuild` chạy theo `REVIEW` giây, mỗi lần lấy cửa sổ
+    // `[now - lookback, now]`. Cửa sổ phải phủ **toàn bộ** tập nến, nếu không
+    // lượt đầu tiên không thấy nến nào.
+    let span = data[data.len() - 1].t - data[0].t;
+    let lookback = (span as f64) + 3.0 * 3600.0;
+
     let mut session = Session::new();
     session.next_ts = data[0].t as u64;
     pf.forward(
         &mut session,
-        &|i: usize| params(i, sl_pct, levels),
+        &|i: usize| params(i, sl_pct, levels, lookback),
         &mut slice_fetch(data.to_vec()),
         &mut slice_fetch(data.to_vec()),
         &mut notify,
