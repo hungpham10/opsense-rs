@@ -61,6 +61,7 @@ sqlx = { workspace = true }
 rmcp = { version = "=0.8.0", features = ["transport-io"] }
 
 # Workspace crates
+sentry = { workspace = true }
 opsense-model = { path = "../opsense-model" }
 # `parquet` + `sqlite` storage backends: strategy configs in
 # strategies/<name>/config.toml use these, so the serve/runner binaries must

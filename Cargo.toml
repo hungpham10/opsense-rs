@@ -39,6 +39,19 @@ futures-util = { version = "0.3", features = ["sink"] }
 
 # Debuging
 log = "0.4.29"
+# Sentry: bắt panic + SIGSEGV (xem `crates/opsense/src/sentry_setup.rs`).
+# `backtrace` cần để dựng stack khi crash — không có nó Sentry gửi event rỗng.
+# `default-features = false` để không kéo `reqwest`/`curl` — crate này chỉ cần
+# gửi event. `backtrace` để dựng stack khi crash; `panic` để bắt panic;
+# `contexts` để event có trạng thái thread; `tracing` để gắn span đang chạy.
+# Handler `SIGSEGV` nằm trong `sentry::integrations::unix` và có sẵn ở
+# `default-features` — không phải feature riêng.
+sentry = { version = "0.34", default-features = false, features = [
+    "backtrace",
+    "contexts",
+    "panic",
+    "tracing",
+] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 # TLS via rustls (not OpenSSL) so cross builds don't need libssl-dev;

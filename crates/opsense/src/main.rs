@@ -239,7 +239,18 @@ mod tests {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {    dotenvy::dotenv().ok();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `dotenvy` **trước** Sentry: nó nạp `.env`, mà `SENTRY_DSN` hay đặt ở đó
+    // cho local. Gọi `init()` trước `dotenvy` thì biến chưa có ⇒ Sentry không
+    // bật, âm thầm. (Đã viết sai thứ tự này một lần.)
+    dotenvy::dotenv().ok();
+
+    // Sentry sau `dotenvy` nhưng **trước mọi việc còn lại** — đọc config, kết
+    // nối DB — để lỗi phần khởi động vẫn được báo.
+    //
+    // Giữ handle trong biến: drop nó sẽ shutdown client. Không có `SENTRY_DSN`
+    // thì hàm trả `None` và không làm gì — xem `sentry_setup`.
+    let _sentry_guard = opsense::sentry_setup::init();
     // sqlx `any` drivers (mysql/postgres/sqlite) — `AppState::new` tự đăng ký
     // (idempotent) vì crate này phải tự đủ khi không có `main`; giữ lời gọi ở
     // đây để mọi lệnh CLI đều có driver sẵn.

@@ -15,6 +15,7 @@ pub mod init;
 pub mod mcp;
 pub mod repl;
 pub mod runner;
+pub mod sentry_setup;
 pub mod serve;
 pub mod tls;
 
