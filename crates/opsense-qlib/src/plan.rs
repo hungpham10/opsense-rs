@@ -185,6 +185,59 @@ mod tests {
         assert!((g.long_win_pct(2) - 0.55).abs() < 1e-12);
     }
 
+    /// REPRO đúng ca production: **nhiều** vòng rebuild liên tiếp, 2 ô × 4 bậc.
+    ///
+    /// Test `plan_round_trip_and_stats_carried_over` chỉ chạy **một** vòng
+    /// (to_grids → đọc bộ đếm) nên không bắt được lỗi ở vòng thứ hai trở đi.
+    /// Vòng lặp thật của `portfolio.rs` mỗi chu kỳ review:
+    ///
+    /// ```text
+    ///   session.plan = to_grids(plans_cua_script, session.plan_cu)   // rebuild
+    ///   session.plan[g].record_trade_outcome(level, …)               // lệnh đóng
+    /// ```
+    ///
+    /// Bộ đếm phải **cộng dồn** qua mọi vòng, không bị reset. Trên stack đo
+    /// được: 3 lệnh đóng mà `*_cnt` vẫn bằng 0 ở **mọi** plan ⇒ đúng lỗi này.
+    #[test]
+    fn outcome_counts_accumulate_across_rebuilds() {
+        // Script dựng lại plan mỗi vòng — long_win/short_win là **xác suất**,
+        // không phải số đếm (script tính từ mô hình khi chưa đủ mẫu).
+        let script_plan = |base: f64| GridPlan {
+            levels: vec![base, base + 100.0, base + 200.0, base + 300.0],
+            sl_pct: Some(0.008),
+            max_candles: None,
+            weights: None,
+            weight_sharpness: Some(4.0),
+            long_win: Some(vec![0.75, 0.75, 0.75, 0.75]),
+            short_win: Some(vec![0.25, 0.25, 0.25, 0.25]),
+        };
+        let plans = vec![script_plan(82_000.0), script_plan(84_000.0)];
+
+        let mut session: Vec<TradingGrid> = GridPlan::to_grids(&plans, &[]);
+        assert_eq!(session.len(), 2);
+        assert_eq!(session[0].num_levels(), 4);
+
+        // 3 vòng; mỗi vòng: rebuild rồi đóng một lệnh long ở ô 1, bậc 0.
+        for cycle in 1..=3usize {
+            session = GridPlan::to_grids(&plans, &session);
+            session[1].record_trade_outcome(0, true, 0.002);
+            assert_eq!(
+                session[1].long_win_count(0),
+                cycle,
+                "sau vòng {cycle}: bộ đếm phải cộng dồn, không reset"
+            );
+        }
+
+        // Sau 3 vòng: ô 1 bậc 0 có 3 thắng; ô 0 không lệnh nào ⇒ vẫn 0.
+        assert_eq!(session[1].long_win_count(0), 3);
+        assert_eq!(session[0].long_win_count(0), 0, "ô không có lệnh thì không có số đếm");
+        assert_eq!(session[1].long_win_count(1), 0, "số đếm phải theo bậc");
+
+        // Và đọc được qua đúng đường script dùng: `CellStats::of`.
+        let stats = CellStats::of(&session[1]);
+        assert_eq!(stats.long_win[0], 3, "script đọc bằng CellStats::of");
+    }
+
     #[test]
     fn plan_optional_fields_use_defaults() {
         let plan = GridPlan {
