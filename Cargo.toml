@@ -46,6 +46,13 @@ log = "0.4.29"
 # `contexts` để event có trạng thái thread; `tracing` để gắn span đang chạy.
 # Handler `SIGSEGV` nằm trong `sentry::integrations::unix` và có sẵn ở
 # `default-features` — không phải feature riêng.
+# In stack khi `SIGSEGV`. Tách khỏi `sentry` vì `sentry-rust` **không** bắt
+# signal — chỉ bắt panic. Xem `crates/opsense/src/segv_backtrace.rs`.
+backtrace = "0.3"
+# `libc` chỉ dùng cho `signal`/`write`/`raise` trong signal handler. Đã có sẵn
+# trong cây dependency nên không tăng thêm gì cho build.
+libc = "0.2"
+
 sentry = { version = "0.34", default-features = false, features = [
     "backtrace",
     "contexts",
