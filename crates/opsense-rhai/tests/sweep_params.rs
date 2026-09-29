@@ -230,8 +230,6 @@ async fn run(data: &[CandleStick], sl_pct: f64, levels: i64) -> Run {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "TEST ĐỂ CHẠY TAY — quét trên nến thật; có test set nhưng 1 cặp 1 thang, \
-            chưa đủ để kết luận hiệu quả ngoài đời"]
 async fn sweep_sl_pct_and_levels_on_real_candles() {
     let train = data("btc_1h_train.csv");
     let test = data("btc_1h_test.csv");
