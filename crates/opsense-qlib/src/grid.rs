@@ -580,6 +580,33 @@ impl TradingGrid {
         2.0 * fee_rate * at_price
     }
 
+    /// **Tỉ lệ thắng tối thiểu để một lệnh hòa vốn** với TP/SL cho trước.
+    ///
+    /// `reward` = lợi nhuận thô khi chạm TP (dương, dạng tỉ lệ)
+    /// `risk`   = lỗ thô khi chạm SL (dương, dạng tỉ lệ)
+    /// `fee_rate` = phí **mỗi phía**; một lệnh khứ hồi trả 2 lần.
+    ///
+    /// Công thức: `win_p × reward = (1 − win_p) × risk + 2 × fee`
+    /// ⇒ `win_p = (risk + 2 × fee) / (reward + risk)`.
+    ///
+    /// # Vì sao cần hàm này
+    ///
+    /// `grid.rhai` từng chặn trần `win_p` ở **0,75** — con số đó là **ràng buộc
+    /// độ tin cậy** (đừng tin mô hình/thống kê quá đà), nhưng lại được dùng như
+    /// **ràng buộc kinh tế**. Với TP = 1 bước lưới (0,271%) và SL = 0,8%, ngưỡng
+    /// hòa vốn là **78,5%**, tức cao hơn trần ⇒ hệ thống **luôn âm** dù dữ liệu
+    /// thật có tốt. Đo: `P(chạm TP trước) = risk/(reward+risk) = 74,77%`, khớp
+    /// prior 0,75 — tức thiết kế hòa vốn ở mức random walk **cộng phí**, nên
+    /// thua chắc.
+    ///
+    /// Trần độ-tin-cậy phải tách khỏi ngưỡng này (xem `grid.rhai`).
+    pub fn breakeven_win_p(reward: f64, risk: f64, fee_rate: f64) -> f64 {
+        if reward <= 0.0 || risk <= 0.0 {
+            return f64::NAN;
+        }
+        (risk + 2.0 * fee_rate) / (reward + risk)
+    }
+
     /// Kiểm tra step hiện tại có đủ lớn để có lời sau phí không.
     pub fn is_step_profitable(&self, fee_rate: f64, at_price: f64) -> bool {
         self.step() > Self::min_profitable_step(fee_rate, at_price)
@@ -654,5 +681,63 @@ impl fmt::Display for TradingGrid {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod breakeven_tests {
+    use super::TradingGrid;
+
+    /// Con số đo được trên chính `strategies/binance/grid.rhai`: TP = 1 bước
+    /// lưới, SL = 0,8%, phí 0,02%/phía. Trần `clamp01` cũ là 0,75 ⇒ hệ thống
+    /// âm ở **mọi** tham số hợp lệ. Test này chốt lại để lỗi đó không quay lại.
+    #[test]
+    fn breakeven_above_old_clamp_ceiling() {
+        let be = TradingGrid::breakeven_win_p(0.00271, 0.008, 0.0002);
+        assert!(
+            be > 0.75,
+            "ngưỡng hòa vốn {be} phải cao hơn trần clamp01 cũ 0.75, nếu không \
+             thì trần độ-tin-cậy lại thành trần kinh tế và chiến lúc luôn âm"
+        );
+    }
+
+    /// Ở đúng ngưỡng hòa vốn, kỳ vọng mỗi lệnh bằng 0 — phí đã nằm trong công
+    /// thức (nhân 2 vì khứ hồi vào/ra). Nếu test này lệch thì công thức sai.
+    #[test]
+    fn breakeven_gives_zero_expectancy() {
+        for (reward, risk, fee) in [
+            (0.00271, 0.008, 0.0002),
+            (0.005, 0.005, 0.0002),
+            (0.001, 0.002, 0.001),
+        ] {
+            let be = TradingGrid::breakeven_win_p(reward, risk, fee);
+            let ev = be * reward - (1.0 - be) * risk - 2.0 * fee;
+            assert!(
+                ev.abs() < 1e-12,
+                "({reward}, {risk}, {fee}): E = {ev}, phải bằng 0 tại ngưỡng hòa vốn"
+            );
+        }
+    }
+
+    /// Thắng nhiều hơn ngưỡng hòa vốn thì E dương, thua thì E âm — đảo chiều
+    /// đúng quanh điểm hòa vốn.
+    #[test]
+    fn expectancy_signs_around_breakeven() {
+        let (reward, risk, fee) = (0.00271, 0.008, 0.0002);
+        let be = TradingGrid::breakeven_win_p(reward, risk, fee);
+        let ev = |w: f64| w * reward - (1.0 - w) * risk - 2.0 * fee;
+        assert!(ev(be + 0.02) > 0.0, "trên ngưỡng phải lãi");
+        assert!(ev(be - 0.02) < 0.0, "dưới ngưỡng phải lỗ");
+    }
+
+    /// `reward = 0` (mốc cuối cùng không có TP phía trên ⇒ `tp_above` trả về
+    /// chính nó) thì **không tỉ lệ thắng nào** hòa vốn. Trả `NaN` để script
+    /// nhận ra và không đặt trần sai — trả 1.0 sẽ giấu mất sự thật là mốc đó
+    /// lỗ chắc.
+    #[test]
+    fn zero_reward_is_undefined_not_one() {
+        assert!(TradingGrid::breakeven_win_p(0.0, 0.008, 0.0002).is_nan());
+        assert!(TradingGrid::breakeven_win_p(0.00271, 0.0, 0.0002).is_nan());
+        assert!(TradingGrid::breakeven_win_p(-1.0, 0.008, 0.0002).is_nan());
     }
 }
