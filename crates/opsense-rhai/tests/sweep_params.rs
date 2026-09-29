@@ -66,12 +66,18 @@ const RESOLUTION: &str = "1h";
 const REVIEW: u64 = 86_400;
 const FEE: f64 = 0.0002;
 const KELLY: f64 = 0.25;
+/// `lookback_secs` của production (`config.toml:199`) = 48 giờ. **Phải khớp**:
+/// lần chạy đầu tôi đặt bằng cả tập nến (~30 ngày) và sieve ra ô rộng 9%, bước
+/// lưới 4,5% thay vì 0,27% — tức đo một chiến lược khác hẳn, không phải chiến
+/// lược đang chạy.
+const LOOKBACK_SECS: f64 = 172_800.0;
 const CAPITAL: f64 = 100_000.0;
 
 /// Bộ tham số quét. `sl_pct` × `grid_levels` là hai thứ quyết định hình học
 /// rào TP/SL, tức hai thứ quyết định lãi-thua.
 const SL_PCTS: &[f64] = &[0.002, 0.004, 0.008];
-const LEVELS: &[i64] = &[3, 5];
+/// 4 là `grid_levels` của production; 3 và 5 để xem lân cận.
+const LEVELS: &[i64] = &[3, 4, 5];
 
 fn data(name: &str) -> Vec<CandleStick> {
     let p: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -203,20 +209,83 @@ async fn run(data: &[CandleStick], sl_pct: f64, levels: i64) -> Run {
     // `rebuild` chạy theo `REVIEW` giây, mỗi lần lấy cửa sổ
     // `[now - lookback, now]`. Cửa sổ phải phủ **toàn bộ** tập nến, nếu không
     // lượt đầu tiên không thấy nến nào.
-    let span = data[data.len() - 1].t - data[0].t;
-    let lookback = (span as f64) + 3.0 * 3600.0;
+    let lookback = LOOKBACK_SECS;
 
     let mut session = Session::new();
     session.next_ts = data[0].t as u64;
-    pf.forward(
-        &mut session,
-        &|i: usize| params(i, sl_pct, levels, lookback),
-        &mut slice_fetch(data.to_vec()),
-        &mut slice_fetch(data.to_vec()),
-        &mut notify,
-    )
-    .await
-    .expect("forward trên nến thật");
+    // Con trỏ `next_ts` luôn lệch **+1 giây** so với mốc nến (calendar cộng
+    // `resolution` vào chính con trỏ trước đó), còn `fetch` lọc `t < to`.
+    //
+    // Nên nếu `review_at` rơi **đúng** lên mốc nến thì cửa sổ
+    // `[next_ts, review_at)` không chứa nến nào ⇒ `forward` trả `Ok(false)` và
+    // replay **dừng im** ở giữa chừng. Đo được: dừng đúng ở nến thứ 240.
+    //
+    // Lệch 61 giây: vẫn nằm trong giờ đó (nến kế tiếp +1h) nhưng không trùng
+    // mốc nến, nên `fetch` lấy được nến và replay chạy hết.
+    //
+    // Các lần `review_at` sau do `next(current) = current + REVIEW` sinh ra thì
+    // tự mang lệch +1 giây rồi, không cần can thiệp.
+    const BOUNDARY_OFFSET: i64 = 61;
+    // `forward` xử lý **một nến mỗi lần gọi** (trả `Ok(false)` khi hết
+    // nến mới) — phải lặp, không gọi một lần là xong. Gọi một lần thì chỉ có
+    // nến đầu, `review_at` ở t0+10 ngày không bao giờ tới, plan rỗng, và test
+    // "xanh" với 0 ô 0 lệnh — dấu hiệu tệ hơn đỏ.
+    let mut guard = 0usize;
+    // Khởi động ấm: `rebuild` cần **lịch sử phía trước** mốc hiện tại, mà
+    // `slice_fetch` lọc `t < to` — tức chính nến đang xét cũng không tính.
+    //
+    // `Session::new()` để `review_at = 0` ⇒ rebuild ngay ở nến đầu tiên, cửa
+    // sổ `[t0 − lookback, t0)` rỗng ⇒ `strategy script cần ≥ 10 nến, có 0`.
+    // Fix `lookback_secs` trước đó **không** giải được: cửa sổ rộng hay hẹp thì
+    // vẫn không có nến nào phía trước `t0`.
+    //
+    // Ở production nơi này không hỏng vì node `history` đã có sẵn dữ liệu
+    // trước khi node `grid` chạy. Replay thì không có gì trước nến đầu tiên,
+    // nên phải tự chờ tích lũy.
+    //
+    // Chờ tích lũy **nhiều hơn `lookback_secs`** rồi mới rebuild, để lượt
+    // rebuild đầu đã có đủ cửa sổ 48 giờ như production — nếu không thì lượng
+    // đầu dựng lưới trên cửa sổ ngắn hơn, khác hẳn hành vi thật.
+    // Chờ 48 giờ + 24 giờ dư trước lượt rebuild đầu.
+    const WARMUP_SECS: u64 = 72 * 3600;
+    session.review_at = data[0].t as u64 + WARMUP_SECS + BOUNDARY_OFFSET as u64;
+    // `forward` trả `Ok(false)` khi **cửa sổ hiện tại không có nến mới** — và
+    // khi đó nó vẫn đẩy `next_ts` theo calendar, nghĩa là "gọi lại ở lượt sau",
+    // KHÔNG phải "hết dữ liệu". Dừng ở lần `false` đầu tiên cắt replay cụt.
+    //
+    // Đo được: `review_at` nằm giữa hai mốc nến (`t0+240h+61`), nên sau khi ăn
+    // nến `t0+240h` thì cửa sổ `[next_ts, review_at)` rỗng ⇒ `false`, con trỏ
+    // mới nhích qua `review_at` ⇒ rebuild ở lượt kế. Phải gọi tiếp.
+    //
+    // Dừng theo **số nến đã xử lý**, không theo mã trả về. Chặn trên bằng trần
+    // để lỗi con trỏ không tiến lộ ra thành vòng lặp vô hạn.
+    let max_calls = data.len() * 8 + 64;
+    while (session.candle_seq as usize) < data.len() {
+        assert!(
+            guard < max_calls,
+            "forward gọi {} lần mà mới xử lý {}/{} nến — con trỏ không tiến",
+            guard,
+            session.candle_seq,
+            data.len()
+        );
+        pf.forward(
+            &mut session,
+            &|i: usize| params(i, sl_pct, levels, lookback),
+            &mut slice_fetch(data.to_vec()),
+            &mut slice_fetch(data.to_vec()),
+            &mut notify,
+        )
+        .await
+        .expect("forward trên nến thật");
+        guard += 1;
+    }
+    assert_eq!(
+        session.candle_seq as usize,
+        data.len(),
+        "forward phải đi hết {} nến, mới chỉ đi {} nến",
+        data.len(),
+        session.candle_seq
+    );
 
     let mut tp = 0usize;
     let mut sl = 0usize;
@@ -259,6 +328,8 @@ async fn run(data: &[CandleStick], sl_pct: f64, levels: i64) -> Run {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "TEST ĐỂ CHẠY TAY — quét trên nến thật; có test set nhưng 1 cặp 1 thang, \
+            chưa đủ để kết luận hiệu quả ngoài đời"]
 async fn sweep_sl_pct_and_levels_on_real_candles() {
     let train = data("btc_1h_train.csv");
     let test = data("btc_1h_test.csv");
