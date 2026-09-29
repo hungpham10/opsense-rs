@@ -498,20 +498,34 @@ async fn full_pipeline_trading_emits_orders() {
             matches!(status, Some("open") | Some("closed")),
             "status phải open|closed: {order:?}"
         );
-        // `value` = giá vào lệnh khi MỞ, PnL % khi ĐÓNG (`opsense-rhai/src/orders.rs:557`).
-        // PnL âm là chuyện bình thường nên không thể assert dương cho lệnh đã đóng —
-        // assertion cũ chỉ xanh vì tình cờ lần chạy đó chưa có lệnh đóng lỗ.
+        // `value` = **giá vào lệnh, luôn** — cả bản ghi `open` lẫn `closed`
+        // (`opsense-rhai/src/orders.rs`). PnL nằm ở `labels.pnl_pct`, giá ra
+        // vào ở `labels.exit_price`.
+        //
+        // Trước đây test này assert `value == pnl_pct` cho lệnh đóng — tức khẳng
+        // định **đúng bug** `value` mang hai nghĩa. Nó chỉ xanh vì tình cờ những
+        // lần chạy đó chưa có lệnh nào đóng ⇒ assertion chưa từng được thực thi.
+        assert!(order.value > 0.0, "value phải là giá vào, dương: {order:?}");
         if status == Some("open") {
             opened += 1;
-            assert!(order.value > 0.0, "entry price dương: {order:?}");
-        } else if let Some(pnl) = order
-            .labels
-            .get("pnl_pct")
-            .and_then(|v| v.parse::<f64>().ok())
-        {
+        } else {
+            // Lệnh đóng phải mang PnL và giá ra vào, và `value` vẫn là giá vào.
+            let pnl: f64 = order
+                .labels
+                .get("pnl_pct")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("lệnh đóng phải có label pnl_pct: {order:?}"));
+            let exit: f64 = order
+                .labels
+                .get("exit_price")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("lệnh đóng phải có label exit_price: {order:?}"));
+            assert!(exit > 0.0, "exit price dương: {order:?}");
+            // `value` là giá vào ⇒ không được bằng PnL (trừ khi giá vào tình cờ
+            // đúng bằng tỉ lệ PnL, tức entry == 1.0 — vô lý với BTC).
             assert!(
-                (order.value - pnl).abs() < 1e-9,
-                "lệnh đóng: value phải bằng pnl_pct: {order:?}"
+                (order.value - pnl).abs() > 1e-6,
+                "lệnh đóng: value phải là giá vào, KHÔNG phải pnl_pct: {order:?}"
             );
         }
         for key in ["order_id", "dtype", "grid", "level", "size", "sl", "tp"] {
@@ -758,11 +772,22 @@ async fn trading_orders_readable_via_graphql() {
                 // Labels của station là `HashMap<String, String>` nên qua
                 // GraphQL chúng là **chuỗi**, không phải số. Nhánh lệnh-đóng
                 // trước đây hiếm chạy nên giả định `as_f64()` chưa lộ.
+                //
+                // `value` là **giá vào** ở cả hai bản ghi; xem chỗ assert ở test
+                // `full_pipeline_trading_emits_orders` (bản chữ ở đó đầy đủ hơn).
                 let pnl = order["labels"]["pnl_pct"]
                     .as_str()
                     .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or_else(|| panic!("lệnh đóng phải có label pnl_pct: {order}"));
-                assert!((value - pnl).abs() < 1e-9, "value phải bằng pnl_pct: {order}");
+                let exit = order["labels"]["exit_price"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or_else(|| panic!("lệnh đóng phải có label exit_price: {order}"));
+                assert!(exit > 0.0, "exit price dương: {order}");
+                assert!(
+                    (value - pnl).abs() > 1e-6,
+                    "value phải là giá vào, KHÔNG phải pnl_pct: {order}"
+                );
             }
             _ => unreachable!("status đã assert ở trên"),
         }
