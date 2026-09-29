@@ -925,8 +925,12 @@ mod tests {
     ///   (không feature ⇒ test này **phải đỏ**)
     #[test]
     fn shard_count_needs_shared_arena() {
+        // `cfg!` chỉ thấy feature của **chính crate này**, mà CI bật feature ở
+        // `opsense-mlib` (nơi feature thật sự được định nghĩa). Nên phải hỏi đúng
+        // crate, không hỏi `cfg!` — dùng `cfg!(feature = ...)` ở đây là sai và
+        // làm test đỏ ngay cả khi arena chung **đang** hoạt động.
         assert!(
-            cfg!(feature = "lru-shared-memory"),
+            opsense_mlib::lru::SHARED_ARENA,
             "build này KHÔNG có `lru-shared-memory` ⇒ arena LRU chia cứng ⇒ \
              `STATION_SHARDS = 32` chỉ còn 18/29 block. \
              Bật `opsense-core/lru-shared-memory` (xem `.github/workflows/image.yml`)."
