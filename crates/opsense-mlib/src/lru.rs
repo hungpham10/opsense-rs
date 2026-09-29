@@ -14,6 +14,14 @@ use crate::storage::TimeseriesStorage;
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 const NULL: usize = usize::MAX;
 
+/// Arena LRU có đang dùng chung giữa các shard không?
+///
+/// Hằng số công khai để crate khác **kiểm tra được** thay vì `cfg!` — `cfg!` chỉ
+/// thấy feature của chính crate đó, mà feature `lru-shared-memory` thuộc về
+/// `opsense-mlib`. Không có hằng này thì `opsense-core` phải đoán, và đoán sai thì
+/// im lặng mất dữ liệu.
+pub const SHARED_ARENA: bool = cfg!(feature = "lru-shared-memory");
+
 /// Boxed, owned, `'static` future used by the `fallback` read-through callback.
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
