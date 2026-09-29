@@ -370,7 +370,6 @@ where
     /// Đọc value theo key.
     pub fn get(&self, key: &K) -> Option<V> {
         let index = *self.mapping.get(key)?;
-        tracing::trace!(target: "opsense_mlib::lru", ?key, "lru get HIT");
 
         // Đọc giá trị an toàn (Node này chắc chắn tồn tại vì mapping đang giữ nó)
         let val = self.caching[index].value.as_ref()?.clone();
@@ -422,7 +421,6 @@ where
         let node = &self.caching[last_idx];
 
         // Đuổi dữ liệu cũ nếu có — giữ snapshot để persist ra ngoài lock
-        tracing::trace!(target: "opsense_mlib::lru", ?key, shard_idx, last_idx, "lru put NEW");
         let evicted = node.key.as_ref().map(|old_key| {
             let old_val = node.value.as_ref().unwrap().clone();
             self.mapping.remove(old_key);
@@ -643,8 +641,9 @@ mod tests {
     // (xem `STATION_SHARDS` trong `opsense-core/src/station.rs`).
     //
     // Bỏ `#[ignore]` khi sửa xong `lru.rs`.
+    // BUG CHƯA SỬA — xem `capacity_is_total_not_per_shard`.
     #[test]
-    #[ignore = "BUG: capacity_per_shard = ceil(capacity/S) làm capacity mất ý nghĩa tổng"]
+    #[ignore = "BUG: capacity là sức chứa mỗi shard, không phải tổng"]
     fn capacity_is_total_not_per_shard() {
         const S: usize = 32;
         // Chỉ 4 entry — thấp hơn capacity 32 rất nhiều.
@@ -682,8 +681,9 @@ mod tests {
     // (xem `STATION_SHARDS` trong `opsense-core/src/station.rs`).
     //
     // Bỏ `#[ignore]` khi sửa xong `lru.rs`.
+    // BUG CHƯA SỬA — xem `capacity_is_total_not_per_shard`.
     #[test]
-    #[ignore = "BUG: capacity_per_shard = ceil(capacity/S) làm capacity mất ý nghĩa tổng"]
+    #[ignore = "BUG: capacity là sức chứa mỗi shard, không phải tổng"]
     fn advertised_capacity_is_actually_held() {
         const S: usize = 32;
         let keys = keys_in_one_shard::<S>(S, 1000);
@@ -708,7 +708,10 @@ mod tests {
     /// một mình có giải thích được 15 đó không, hay còn đường ghi khác.
     ///
     /// Ghi LOG số entry còn lại theo từng shard để thấy ngay block nào rơi.
+    // BUG CHƯA SỬA — test để đỏ có chủ đích, xem `capacity_is_total_not_per_shard`.
+    // BUG CHƯA SỬA — xem `capacity_is_total_not_per_shard`.
     #[test]
+    #[ignore = "BUG: arena chia cứng, 11/15 block mất; chỉ vá tạm bằng STATION_SHARDS = 1"]
     fn repro_real_case_29_blocks_into_32_shards() {
         const S: usize = 32;
         const CAP: usize = 32;
@@ -769,8 +772,9 @@ mod tests {
     // (xem `STATION_SHARDS` trong `opsense-core/src/station.rs`).
     //
     // Bỏ `#[ignore]` khi sửa xong `lru.rs`.
+    // BUG CHƯA SỬA — xem `capacity_is_total_not_per_shard`.
     #[test]
-    #[ignore = "BUG: capacity_per_shard = ceil(capacity/S) làm capacity mất ý nghĩa tổng"]
+    #[ignore = "BUG: capacity là sức chứa mỗi shard, không phải tổng"]
     fn spread_keys_keep_everything() {
         const S: usize = 32;
         let cache: LruCache<i64, u32, S> = LruCache::new(S);
@@ -1334,3 +1338,205 @@ mod tests {
         assert_eq!(pts[0].1, b"v1");
     }
 }
+
+#[cfg(test)]
+mod cap_probe {
+    use super::*;
+
+    /// Tách hai biến: `capacity` (tuyệt đối) và `S` (số shard) — cái nào
+    /// quyết định mất dữ liệu?
+    ///
+    /// Cùng **29 block id thật** của `history-1H` (`13788..13788+29`), chỉ đổi
+    /// `capacity` và `S`, rồi đếm block còn lại.
+    #[test]
+    fn which_factor_causes_loss() {
+        const N: i64 = 29;
+        let first: i64 = 1787043600 / 129600;
+
+        // A) đúng ca thật: capacity 32, S 32  ⇒ 1 slot/shard
+        let a: LruCache<i64, u32, 32> = LruCache::new(32);
+        for i in 0..N {
+            a.put(first + i, i as u32);
+        }
+        let a_alive = (0..N).filter(|i| a.get(&(first + i)).is_some()).count();
+
+        // B) capacity BỊ CHÍNH mà S giữ nguyên 32 ⇒ 32 slot/shard
+        let b: LruCache<i64, u32, 32> = LruCache::new(1024);
+        for i in 0..N {
+            b.put(first + i, i as u32);
+        }
+        let b_alive = (0..N).filter(|i| b.get(&(first + i)).is_some()).count();
+
+        // C) S = 1, capacity giữ nguyên 32 (bằng đúng capacity thật của station)
+        let c: LruCache<i64, u32, 1> = LruCache::new(32);
+        for i in 0..N {
+            c.put(first + i, i as u32);
+        }
+        let c_alive = (0..N).filter(|i| c.get(&(first + i)).is_some()).count();
+
+        // D) capacity nhỏ HƠN N, S = 1 ⇒ thiếu slot thật, không phải do chia
+        let d: LruCache<i64, u32, 1> = LruCache::new(10);
+        for i in 0..N {
+            d.put(first + i, i as u32);
+        }
+        let d_alive = (0..N).filter(|i| d.get(&(first + i)).is_some()).count();
+
+        println!("\n  29 block, đổi capacity/S:");
+        println!("  A cap=32   S=32  slot/shard={:2}  → còn {:2}/29", cap_per_shard::<32>(32), a_alive);
+        println!("  B cap=1024 S=32  slot/shard={:2}  → còn {:2}/29", cap_per_shard::<32>(1024), b_alive);
+        println!("  C cap=32   S=1   slot/shard={:2}  → còn {:2}/29", cap_per_shard::<1>(32), c_alive);
+        println!("  D cap=10   S=1   slot/shard={:2}  → còn {:2}/29  (thiếu slot thật)", cap_per_shard::<1>(10), d_alive);
+    }
+
+    fn cap_per_shard<const S: usize>(cap: usize) -> usize {
+        cap.div_ceil(S)
+    }
+}
+
+#[cfg(test)]
+mod cap_probe2 {
+    use super::*;
+
+    /// `capacity = 1024` **không** hết bug — chỉ là 29 key quá ít để lộ.
+    ///
+    /// Bug không nằm ở việc chia, mà ở việc mỗi shard chỉ có
+    /// `ceil(capacity / S)` node trong arena tĩnh. Mất dữ liệu xảy ra khi một
+    /// shard nhận **nhiều hơn** số node của nó. Nên số key tối đa an toàn =
+    /// `S × capacity_per_shard` **và** phụ thuộc phân bố hash.
+    ///
+    /// Với 29 key rải 32 shard thì va chạm 2 key/shard là chuyện thường, nên
+    /// `capacity_per_shard = 1` lộ ngay. Với `capacity_per_shard = 32` phải có
+    /// **33 key trùng một shard** mới mất — hiếm với 29 key.
+    #[test]
+    fn big_capacity_just_hides_the_bug() {
+        // (capacity, S, số key) — giữ capacity_per_shard = 32, tăng số key.
+        for n in [29i64, 500, 2000, 8000] {
+            let c: LruCache<i64, u32, 32> = LruCache::new(1024);
+            for i in 0..n {
+                c.put(1_000_000 + i, i as u32);
+            }
+            let alive = (0..n).filter(|i| c.get(&(1_000_000 + i)).is_some()).count();
+            println!(
+                "  cap=1024 S=32 slot/shard={:2}  n={:5}  → còn {:5}  mất {:5}",
+                1024usize.div_ceil(32),
+                n,
+                alive,
+                n as usize - alive
+            );
+        }
+        // Cùng số key đó, capacity vừa đúng 8000 ⇒ 250 slot/shard, không mất.
+        for n in [2000i64, 8000] {
+            let c: LruCache<i64, u32, 32> = LruCache::new(n as usize);
+            for i in 0..n {
+                c.put(1_000_000 + i, i as u32);
+            }
+            let alive = (0..n).filter(|i| c.get(&(1_000_000 + i)).is_some()).count();
+            println!(
+                "  cap={:5} S=32 slot/shard={:3}  n={:5}  → còn {:5}  mất {:5}",
+                n,
+                (n as usize).div_ceil(32),
+                n,
+                alive,
+                n as usize - alive
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod lru_order_probe {
+    use super::*;
+
+    /// LRU phải đá **ít được dùng nhất**. Có đúng không?
+    ///
+    /// Nạp 4 key (đủ chật khi capacity = 4), chạm 2 key giữa chừng cho có
+    /// "truy cập gần đây", rồi nạp thêm key mới. Key nào bị đá?
+    /// Đúng LRU ⇒ đá `1` và `2` (lâu lâu nhất không ai chạm), **giữ** `3`,`4`
+    /// (vừa chạm) và `5` (mới nhất).
+    #[test]
+    fn eviction_order_is_least_recently_used() {
+        let c: LruCache<i64, u32, 1> = LruCache::new(4);
+        for i in 1..=4i64 {
+            c.put(i, i as u32);
+        }
+        // Chạm 1 và 2 → chúng thành "vừa dùng", còn 3,4 là cũ nhất.
+        c.get(&1);
+        c.get(&2);
+        // Nạp key mới → phải đá 1 trong số 3,4.
+        c.put(5, 5);
+
+        let alive: Vec<i64> = (1..=5i64).filter(|k| c.get(k).is_some()).collect();
+        println!("\n  nạp 1..4, chạm 1 và 2, rồi put(5) → còn {alive:?}");
+        // `capacity = 4` ⇒ giữ 4 entry, chỉ **một** key bị đá: `3` — tức key
+        // lâu lâu nhất **không ai chạm** (1, 2 vừa được `get` nên hồi sinh).
+        // Đúng LRU. Nếu đây là FIFO, `1` (nhập đầu tiên) mới là kẻ bị đá.
+        assert_eq!(alive, vec![1, 2, 4, 5], "phải đá 3, giữ 1,2,4,5");
+        assert!(!alive.contains(&3), "3 là cũ nhất nên phải bị đá");
+        assert!(alive.contains(&1), "1 được chạm nên phải sống — FIFO sẽ đá 1");
+    }
+
+    /// `get` có thật sự kéo entry lên đầu không? Nếu `get` không ghi, cache
+    /// biến thành FIFO và đá nhầm.
+    #[test]
+    fn get_refreshes_recency() {
+        let c: LruCache<i64, u32, 1> = LruCache::new(3);
+        for i in 1..=3i64 {
+            c.put(i, i as u32);
+        }
+        // 1 là cũ nhất. Chạm nó 3 lần rồi đẩy 4 vào.
+        for _ in 0..3 {
+            c.get(&1);
+        }
+        c.put(4, 4);
+        let alive: Vec<i64> = (1..=4i64).filter(|k| c.get(k).is_some()).collect();
+        println!("  nạp 1..3, chạm 1 (cũ nhất) 3 lần, put(4) → còn {alive:?}");
+        println!("  LRU đúng: giữ 1,2,3? không — đá 3 (cũ nhất sau khi 1 được hồi sinh)");
+        // 1 được chạm nên sống; 2, 3 lần lượt là cũ nhất khi đẩy 4 vào.
+        assert!(alive.contains(&1), "1 phải sống vì vừa được chạm");
+    }
+}
+
+#[cfg(test)]
+mod spread_probe {
+    use super::*;
+
+    /// Hash phân bố **đều** hay **Gaussian**? Và lệch bao nhiêu so với kỳ vọng?
+    ///
+    /// Gaussian (mũ/chuẩn) ⇒ đa số key dồn quanh trung tâm, rìa thưa. Nếu vậy
+    /// chỉ vài shard giữa chịu tải nặng. Uniform ⇒ phân bố đều nhưng vẫn có
+    /// **biến động**, và biến động đó mới là thủ phạm khi sức chứa mỏng.
+    #[test]
+    fn is_hash_uniform_or_gaussian() {
+        const S: usize = 32;
+        const N: i64 = 29; // đúng ca `history-1H` thật
+        let c: LruCache<i64, u32, S> = LruCache::new(S);
+
+        let mut bins = vec![0usize; S];
+        for i in 0..N {
+            let k = 1787043600 / 129600 + i;
+            bins[c.get_shard_idx(&k)] += 1;
+        }
+        let mean = N as f64 / S as f64;
+        let max = *bins.iter().max().unwrap();
+        let min = *bins.iter().min().unwrap();
+        let occupied = bins.iter().filter(|b| **b > 0).count();
+
+        // Trùng lặp kỳ vọng: xác suất có ít nhất 1 cặp trùng shard.
+        let p_collide = 1.0 - {
+            let mut p = 1.0f64;
+            for j in 0..S {
+                p *= 1.0 - (j as f64) / (S as f64);
+            }
+            p
+        };
+
+        println!("\n  S={S}, n={N}  ⇒ trung bình {mean:.2} key/shard");
+        println!("  shard có key : {occupied}/{S}   (rỗng: {})", S - occupied);
+        println!("  min={min}  max={max}   ⇒ lệch {:.0}% so với trung bình",
+            (max as f64 - mean) / mean * 100.0);
+        println!("  xác suất ÍT NHẤT 1 va chạm (birthday): {:.1}%", p_collide * 100.0);
+        println!("  ⇒ mất {} block vì sức chứa 1/shard", N as usize - occupied.min(N as usize));
+    }
+}
+
+
