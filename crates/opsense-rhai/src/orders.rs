@@ -53,6 +53,7 @@ const L_SIZE: &str = "size";
 const L_SL: &str = "sl";
 const L_TP: &str = "tp";
 const L_PNL: &str = "pnl_pct";
+const L_EXIT: &str = "exit_price";
 const L_UNLOCK: &str = "unlock_seq";
 
 /// Label cursor (dùng chung `labels.kind` với snapshot của script).
@@ -601,9 +602,14 @@ fn slice_fetch(
 // Observation ⇄ Order
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// 1 obs = 1 lệnh: `value` = giá vào lệnh (mở) hoặc PnL % (đóng), phần còn lại
-/// trong `labels` (labels là string map nên số phải format). Append-only: đóng
-/// lệnh là obs mới cùng `order_id` → vòng đời lệnh là event log trong station.
+/// 1 obs = 1 **sự kiện** của lệnh. `value` = **giá vào lệnh, luôn** — kể cả bản
+/// ghi `closed`; PnL ở `labels.pnl_pct`, giá ra vào ở `labels.exit_price`. Phần còn
+/// lại trong `labels` (labels là string map nên số phải format).
+///
+/// Append-only: đóng lệnh là obs **mới** cùng `order_id` ⇒ vòng đời lệnh là
+/// event log trong station, và bản `open` cũ **vẫn còn** với `status = "open"`.
+/// Nên đọc vị thế đang mở phải **gộp theo `order_id` và lấy bản mới nhất**, không
+/// lọc `status == "open"` — làm vậy thấy lệnh đã đóng vẫn còn "mở".
 fn open_observation(ts: u64, id: &str, order: &Order, symbol: &str) -> Observation {
     let mut o = Observation::new(
         ts as i64,
@@ -617,12 +623,23 @@ fn open_observation(ts: u64, id: &str, order: &Order, symbol: &str) -> Observati
 }
 
 fn closed_observation(ts: u64, id: &str, order: &Order, symbol: &str) -> Observation {
+    // `value` = **giá vào**, y hệt bản ghi `open`.
+    //
+    // Trước đây bản ghi đóng để `value = pnl_pct` ⇒ cùng `signal` + cùng
+    // `order_id` nhưng `value` mang hai nghĩa. Hai hậu quả đã gặp thật:
+    //   1. `parse_order` đọc `o.value` làm `entry_price` ⇒ parse bản ghi đóng
+    //      ra `entry_price = 0.0023` thay vì 83472.15.
+    //   2. Người đọc station lọc `status == "open"` thấy **2** lệnh đang mở
+    //      trong khi lệnh thứ nhất đã đóng — vì bản `open` không bị sửa, engine
+    //      chỉ **append** bản `closed`.
+    //
+    // Giá ra vào nằm ở `labels.exit_price`, PnL ở `labels.pnl_pct`.
     let mut o = Observation::new(
         ts as i64,
         symbol.to_string(),
         TelemetryKind::Metric,
         Signal::Order,
-        order.pnl_pct.unwrap_or_default(),
+        order.entry_price,
     );
     o.labels = order_labels(id, order, STATUS_CLOSED);
     o
@@ -752,6 +769,9 @@ fn order_labels(id: &str, order: &Order, status: &str) -> HashMap<String, String
     if let Some(pnl) = order.pnl_pct {
         labels.insert(L_PNL.to_string(), pnl.to_string());
     }
+    if let Some(exit) = order.exit_price {
+        labels.insert(L_EXIT.to_string(), exit.to_string());
+    }
     labels
 }
 
@@ -797,7 +817,7 @@ fn order_of(o: &Observation) -> Option<Order> {
         grid_index: num(L_GRID).max(0.0) as usize,
         level_index: num(L_LEVEL).max(0.0) as usize,
         pnl_pct: o.labels.get(L_PNL).and_then(|v| v.parse().ok()),
-        exit_price: None,
+        exit_price: o.labels.get(L_EXIT).and_then(|v| v.parse().ok()),
         unlock_seq: num(L_UNLOCK).max(0.0) as u64,
     })
 }
@@ -1219,5 +1239,68 @@ mod tests {
         .expect("thread không panic");
         assert!(out.is_ok(), "native phải trả kết quả, không panic");
         assert!(out.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod value_semantics {
+    //! `value` của obs lệnh phải là **giá vào** ở cả hai bản ghi `open`/`closed`.
+    //!
+    //! Trước đây bản ghi đóng để `value = pnl_pct`, nên cùng `signal` + cùng
+    //! `order_id` nhưng `value` mang hai nghĩa. Đã dính vào nó hai lần khi đọc dữ
+    //! liệu thật: ra `entry_price = 0.0023`, và ra `pnl_usd = 23 tỷ`.
+
+    use super::*;
+
+    fn sample_order() -> Order {
+        Order {
+            dtype: OrderType::Long,
+            entry_price: 83_472.15,
+            size: 647.16,
+            sl_price: 82_804.37,
+            tp_price: 83_699.44,
+            grid_index: 1,
+            level_index: 0,
+            pnl_pct: None,
+            exit_price: None,
+            unlock_seq: 5,
+        }
+    }
+
+    #[test]
+    fn value_is_entry_price_on_both_open_and_closed() {
+        let open = sample_order();
+        let open_obs = open_observation(1_790_661_780, "o1", &open, "BTCUSDT");
+        assert_eq!(open_obs.value, 83_472.15, "bản open: value = giá vào");
+
+        let mut closed = sample_order();
+        closed.pnl_pct = Some(0.002_322_914_169_576_389_5);
+        closed.exit_price = Some(83_699.4375);
+        let closed_obs = closed_observation(1_790_662_140, "o1", &closed, "BTCUSDT");
+
+        assert_eq!(
+            closed_obs.value, 83_472.15,
+            "bản closed PHẢI cùng nghĩa với bản open — value = giá vào, không phải pnl_pct"
+        );
+        // PnL và giá ra vào nằm ở labels.
+        assert_eq!(
+            closed_obs.labels.get(L_PNL).map(String::as_str),
+            Some("0.0023229141695763895")
+        );
+        assert_eq!(closed_obs.labels.get(L_EXIT).map(String::as_str), Some("83699.4375"));
+    }
+
+    #[test]
+    fn parse_roundtrip_keeps_entry_and_exit() {
+        // Parse lại bản ghi đóng phải ra đúng `entry_price` và `exit_price`.
+        let mut closed = sample_order();
+        closed.pnl_pct = Some(0.002_322_914_169_576_389_5);
+        closed.exit_price = Some(83_699.4375);
+        let obs = closed_observation(1_790_662_140, "o1", &closed, "BTCUSDT");
+
+        let back = order_of(&obs).expect("bản ghi đóng phải parse được");
+        assert_eq!(back.entry_price, 83_472.15, "entry phải là giá vào, không phải pnl");
+        assert_eq!(back.exit_price, Some(83_699.4375), "exit phải đọc được từ label");
+        assert_eq!(back.pnl_pct, Some(0.002_322_914_169_576_389_5));
     }
 }
