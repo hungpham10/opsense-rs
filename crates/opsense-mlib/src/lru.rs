@@ -370,6 +370,7 @@ where
     /// Đọc value theo key.
     pub fn get(&self, key: &K) -> Option<V> {
         let index = *self.mapping.get(key)?;
+        tracing::trace!(target: "opsense_mlib::lru", ?key, "lru get HIT");
 
         // Đọc giá trị an toàn (Node này chắc chắn tồn tại vì mapping đang giữ nó)
         let val = self.caching[index].value.as_ref()?.clone();
@@ -421,6 +422,7 @@ where
         let node = &self.caching[last_idx];
 
         // Đuổi dữ liệu cũ nếu có — giữ snapshot để persist ra ngoài lock
+        tracing::trace!(target: "opsense_mlib::lru", ?key, shard_idx, last_idx, "lru put NEW");
         let evicted = node.key.as_ref().map(|old_key| {
             let old_val = node.value.as_ref().unwrap().clone();
             self.mapping.remove(old_key);
@@ -693,6 +695,62 @@ mod tests {
         assert_eq!(
             alive, S,
             "nạp đúng `capacity` = {S} entry, phải giữ hết — thực tế chỉ còn {alive}"
+        );
+    }
+
+    /// REPRODUCE đúng ca thật: 29 block id liên tiếp của node `history-1H`
+    /// (`block_secs = 129600` ⇒ block id = `ts / 129600`), nạp vào
+    /// `LruCache<i64, Block, 32>` với `capacity = 32` — đúng cấu hình trước khi
+    /// sửa.
+    ///
+    /// Đo trên stack: node nạp 29 block, station còn **14**, mất **15**
+    /// (`13788…13796` = 9 block đầu, cộng 6 rải rác). Test này trả lời: LRU
+    /// một mình có giải thích được 15 đó không, hay còn đường ghi khác.
+    ///
+    /// Ghi LOG số entry còn lại theo từng shard để thấy ngay block nào rơi.
+    #[test]
+    fn repro_real_case_29_blocks_into_32_shards() {
+        const S: usize = 32;
+        const CAP: usize = 32;
+        // Block id thật đo được: node nạp from=1787043600 → 13788.
+        let first: i64 = 1787043600 / 129600;
+        let n = 29i64;
+
+        let cache: LruCache<i64, u32, S> = LruCache::new(CAP);
+        for i in 0..n {
+            cache.put(first + i, i as u32);
+        }
+
+        let missing: Vec<i64> = (0..n)
+            .map(|i| first + i)
+            .filter(|k| cache.get(k).is_none())
+            .collect();
+        let alive = (n as usize) - missing.len();
+
+        // Báo cáo ngay cả khi xanh — đây là phép đo, không phải assert.
+        let mut per_shard = std::collections::BTreeMap::<usize, Vec<i64>>::new();
+        let mask = S - 1;
+        for i in 0..n {
+            let k = first + i;
+            let mut h = DefaultHasher::new();
+            k.hash(&mut h);
+            per_shard
+                .entry((h.finish() as usize) & mask)
+                .or_default()
+                .push(k);
+        }
+        let crowded: Vec<_> = per_shard.iter().filter(|(_, v)| v.len() > 1).collect();
+
+        println!(
+            "REPRO: {} block vào LruCache(cap={}, S={}) → còn {}, mất {}\n               shard nhận >1 block: {}\n  block mất: {:?}\n               (đo trên stack: còn 14, mất 15 — 9 block đầu 13788..13796 + 6 rải rác)",
+            n, CAP, S, alive, missing.len(), crowded.len(), missing,
+        );
+
+        assert_eq!(
+            missing.len(),
+            0,
+            "LRU 32 shard × 1 slot giữ được 29 block: mất {:?}",
+            missing
         );
     }
 
