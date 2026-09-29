@@ -96,9 +96,25 @@ async fn station_query_filters_signal_and_label_kind() {
         .await
         .unwrap();
 
-    // 40.000 obs tick `raw` trước — đủ để lần đọc không lọc vượt trần
-    // `max_map_size` (ngưỡng nằm giữa 18k và 27k; production vỡ ở 26.680).
-    let ticks: Vec<Observation> = (0..40_000).map(|i| obs(1_700_000_000 + i, i as f64)).collect();
+    // 12.000 obs tick `raw` trước — lớn hơn ngưỡng `all > 10_000` bên dưới,
+    // nhưng **dưới** trần `max_map_size` để lệnh đọc không lọc vẫn chạy được.
+    //
+    // Trần là `eng.set_max_map_size(100_000)` (`runtime.rs:164`) và nó tính
+    // trên **mọi** map sống, mà mỗi observation là map lồng (`obs` + `labels`)
+    // ⇒ nhiều hơn một map mỗi obs. Comment cũ ghi "ngưỡng 18k–27k" là đã lỗi
+    // thời.
+    //
+    // Vì sao 40.000 là quá: đo được ngưỡng nằm **dưới 15.000 obs** (15.000 vẫn
+    // đỏ), tức ~7 map mỗi observation, nên 40.000 ⇒ ~280.000 map ≫ 100.000. Và
+    // `to_dynamic` **cố ý** ném lỗi thay vì trả UNIT rỗng (`station.rs:202-206`)
+    // — nếu trả rỗng thì script thấy "không có lệnh nào" và chiến lược im lặng
+    // hỏng, tệ hơn hẳn lỗi rõ ràng.
+    //
+    // Trước đây cỡ này **vẫn xanh** vì cache LRU làm mất bớt block
+    // (`capacity_per_shard = 1`): số obs thực sự còn lại tụt xuống dưới trần.
+    // Tức test vô tình dựa vào hành vi mất dữ liệu. Cỡ 15.000 vẫn lớn hơn
+    // ngưỡng 10.000 mà không cần dựa vào điều đó.
+    let ticks: Vec<Observation> = (0..12_000).map(|i| obs(1_700_000_000 + i, i as f64)).collect();
     station_arc
         .write()
         .await
