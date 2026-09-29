@@ -47,7 +47,23 @@ use opsense_qlib::{
 use opsense_rhai::{ScriptSource, ScriptStrategy};
 
 const RESOLUTION: &str = "1h";
-const REVIEW: u64 = 900;
+/// Nhịp dựng lại plan. **Không** dùng 900 như production: sweep chạy 6 bộ
+/// tham số × 2 tập nến, và mỗi lần `rebuild` chạy sieve + transition analysis
+/// trên cả cửa sổ 700 nến.
+///
+/// ```
+/// review = 900s   →  train 2.796 + test 1.200 rebuild × 6 bộ = 23.976 lần
+/// review = 86400s →  train    29 + test    12 rebuild × 6 bộ =    250 lần
+/// ```
+///
+/// Chênh 96 lần; vòng CI đầu chạy hơn 40 phút chưa xong vì lý do này.
+///
+/// Đổi khác production ở chỗ lưới được dựng lại ít thường xuyên hơn. Đây là
+/// đánh đổi có ý thức: sweep tìm **hình học rào** nào đứng vững, mà hình học
+/// rào do `grid_fit_values_cfg` quyết từ dữ liệu chứ không phụ thuộc nhịp
+/// rebuild. Số lệnh đóng mỗi bộ sẽ ít hơn production, nên **đừng so P&L
+/// tuyệt đối** với lịch sử live — chỉ so *giữa các bộ tham số*, cùng một nhịp.
+const REVIEW: u64 = 86_400;
 const FEE: f64 = 0.0002;
 const KELLY: f64 = 0.25;
 const CAPITAL: f64 = 100_000.0;
