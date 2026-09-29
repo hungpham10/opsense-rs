@@ -17,6 +17,18 @@ default = []
 parquet = ["opsense-mlib/parquet"]
 sqlite = ["opsense-mlib/sqlite"]
 
+# Arena LRU dùng chung giữa các shard, thay cho chia cứng.
+#
+# Bản mặc định của `opsense-mlib` cắt arena thành `S` khối × `ceil(capacity / S)`
+# node với ranh giới **đóng dấu lúc dựng**: shard tràn không mượn được node của
+# shard đang trống, nên `capacity` mất ý nghĩa tổng và mất dữ liệu khi
+# `capacity_per_shard == 1`. Đo được trên `TimeseriesStation`: nạp 29 block với
+# `capacity = 32, S = 32` chỉ còn 18; `capacity = 2000, n = 2000` vẫn mất 102.
+#
+# Bật feature này thì arena là **một** khối `capacity` node trong free-list chung,
+# nên `capacity` là sức chứa tổng thật. Bật ở `image.yml` cùng `parquet`.
+lru-shared-memory = ["opsense-mlib/lru-shared-memory"]
+
 [dependencies]
 opsense-mlib = { path = "../opsense-mlib", features = ["json"] }
 opsense-model = { path = "../opsense-model" }
