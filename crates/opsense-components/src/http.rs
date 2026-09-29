@@ -41,6 +41,26 @@ use opsense_macros::{source, transform};
 
 use crate::station::downcast_ctx;
 use crate::vector::runtime::{Component, Event, Fault, Identify, Message, Outbound, Severity};
+
+/// Node nào chu kỳ trước vừa lỗi — để chu kỳ này thành công thì báo hồi phục
+/// thay vì để `last_error` ám vĩnh viễn trong `opsense_status`.
+static NODES_WITH_FAULT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(std::collections::HashSet::new())
+});
+
+fn note_fault(node: &str, has: bool) -> bool {
+    let Ok(mut set) = NODES_WITH_FAULT.lock() else {
+        return false;
+    };
+    if has {
+        set.insert(node.to_string());
+        false
+    } else {
+        set.remove(node)
+    }
+}
 use crate::{render, signal};
 
 /// `station = true` makes the node terminal: its own station is queryable, so
@@ -684,6 +704,9 @@ impl_http_origin!(
                 .await
             {
                 Ok(obs) if !obs.is_empty() => {
+                    if note_fault(&self.id, false) {
+                        let _ = tx.event.send(Event::Recovered(id)).await;
+                    }
                     // `update_range` cần cửa sổ bọc đúng mọi obs — lấy từ chính
                     // dữ liệu thay vì từ `from_ts`/`to_ts`, vì API có thể trả
                     // ngoài cửa sổ mình yêu cầu (Binance với `limit` trả nến
@@ -703,6 +726,12 @@ impl_http_origin!(
                 // `Ok(rỗng)` = API không có gì để cho (giờ chưa có nến nào chốt).
                 // Không phải lỗi — im lặng ở `debug` để không spam mỗi nhịp.
                 Ok(_) => {
+                    // Rỗng là "API chưa có gì", không phải lỗi — nhưng **hồi
+                    // phục** sau một lần 502 thì vẫn phải báo, không thì
+                    // `last_error` ám vĩnh viễn.
+                    if note_fault(&self.id, false) {
+                        let _ = tx.event.send(Event::Recovered(id)).await;
+                    }
                     tracing::debug!(node = %self.id, "http_origin: response rỗng");
                 }
                 // Lỗi **không** làm chết node: chu kỳ sau thử lại. Nếu để `?`
@@ -723,6 +752,7 @@ impl_http_origin!(
                         error = %e,
                         "http_origin: fetch thất bại — thử lại ở nhịp sau"
                     );
+                    note_fault(&self.id, true);
                     let _ = tx
                         .event
                         .send(Event::Fault((
@@ -795,9 +825,15 @@ impl_http_source!(
                 .fetch_once(ts, interval, ts, ts, &msg.payload)
                 .await
             {
-                Ok(b) => b,
+                Ok(b) => {
+                    if note_fault(&self.id, false) {
+                        let _ = tx.event.send(Event::Recovered(id)).await;
+                    }
+                    b
+                }
                 Err(e) => {
                     tracing::warn!("http {}: {e}", self.id);
+                    note_fault(&self.id, true);
                     // Xem `HttpOrigin` — `warn!` thôi thì node âm thầm hỏng,
                     // status vẫn hiện nó đang chạy.
                     let _ = tx

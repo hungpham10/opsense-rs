@@ -28,6 +28,31 @@ use tokio::sync::{RwLock, mpsc};
 use crate::runtime::ScriptSource;
 use crate::vector::runtime::{Component, Event, Fault, Identify, Message, Outbound, Severity};
 
+/// Node nào lượt trước vừa báo lỗi — dùng để biết lượt này không lỗi thì đó
+/// **là** hồi phục chứ không phải "chưa từng lỗi".
+///
+/// State tĩnh theo tên node thay vì field trong `RhaiTransform`: macro
+/// `#[transform]` sinh `Clone`/`PartialEq`, mà `AtomicBool`/`Mutex` không có, nên
+/// thêm field sẽ không biên dịch được.
+static NODES_WITH_FAULT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(std::collections::HashSet::new())
+});
+
+/// Ghi nhớ node vừa lỗi, hoặc hỏi "lượt trước có lỗi không".
+fn note_fault(node: &str, has: bool) -> bool {
+    let Ok(mut set) = NODES_WITH_FAULT.lock() else {
+        return false;
+    };
+    if has {
+        set.insert(node.to_string());
+        false
+    } else {
+        set.remove(node)
+    }
+}
+
 /// `station = true` makes the node terminal: its own station is queryable, so it
 /// needs no downstream consumer. The station is registered either way (see
 /// `run`), this only relaxes the graph check — same as `HttpSource`.
@@ -216,8 +241,17 @@ impl_rhai_transform!(
             // bắn được `Event::Major`; chúng để lại `Fault` ở khe. Lấy ở đây —
             // **mọi** nhánh `Ok`, kể cả khi script chạy bình thường — vì lỗi
             // nằm trong native chứ không phải trong `process`.
-            if let Some(f) = crate::orders::take_fault() {
-                let _ = tx.event.send(Event::Fault((id, f))).await;
+            // Lần này không lỗi mà lần trước có ⇒ báo hồi phục, để
+            // `opsense_status` xoá `last_error` thay vì để nó ám vĩnh viễn.
+            match crate::orders::take_fault() {
+                Some(f) => {
+                    note_fault(&self.id, true);
+                    let _ = tx.event.send(Event::Fault((id, f))).await;
+                }
+                None if note_fault(&self.id, false) => {
+                    let _ = tx.event.send(Event::Recovered(id)).await;
+                }
+                None => {}
             }
 
             // Convert script output back to Observations and write to own station

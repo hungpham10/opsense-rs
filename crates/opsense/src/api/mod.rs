@@ -136,7 +136,9 @@ impl AppState {
                 let handle = Arc::clone(&handle);
                 async move {
                     // Lấy idx + loại trước: `event` bị `match` bên dưới.
+                    let recovered = matches!(event, Event::Recovered(_));
                     let (idx, fault) = match &event {
+                        Event::Recovered(i) => (*i, None),
                         Event::Minor((i, e)) => (
                             *i,
                             Some(Fault::new(Severity::Transient, "minor", e.to_string())),
@@ -158,11 +160,15 @@ impl AppState {
                         Event::Major((id, error)) => println!("Major error in node {id}: {error}"),
                         Event::Panic((id, error)) => println!("Panic in node {id}: {error}"),
                         Event::Fault((id, f)) => println!("Fault in node {id}: {}", f.summary()),
+                        Event::Recovered(id) => println!("Node {id} recovered"),
                     }
-                    if let Some(f) = fault
+                    // `Recovered` mang `None` ⇒ xoá `last_error`. Không suy được
+                    // từ "im lặng" vì im lặng cũng là trạng thái hợp lệ (node
+                    // chạy tốt ngay từ đầu), nên phải nói rõ.
+                    if (fault.is_some() || recovered)
                         && let Some(name) = handle.read().await.node_name(idx)
                     {
-                        handle.read().await.report_fault(&name, Some(f));
+                        handle.read().await.report_fault(&name, fault);
                     }
                 }
             })?;

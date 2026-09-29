@@ -11,6 +11,13 @@ pub enum Event {
     Minor((usize, Error)),
     Major((usize, Error)),
     Panic((usize, Error)),
+    /// Node **vừa hồi phục** — chạy lại thành công sau một hoặc nhiều lần lỗi.
+    ///
+    /// Vì sao cần biến thể riêng: `last_error` lưu **lần lỗi gần nhất**, nên
+    /// node đã khoẻ vẫn còn hiện lỗi cũ ⇒ status báo động giả, và người đọc
+    /// không biết đã hết chưa. Không thể suy từ "không nhận `Fault` nữa" vì
+    /// im lặng cũng là một trạng thái hợp lệ — phải nói rõ.
+    Recovered(usize),
     /// Lỗi **đã phân loại** do component tự bắn: mang cả mức độ nên handler
     /// không phải đoán từ message mà gán cấp độ.
     ///
