@@ -128,7 +128,14 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-          NEXTEST_EXPERIMENTAL_LIBTEST_HARNESS: "1"
+        # KHÔNG bật `NEXTEST_EXPERIMENTAL_LIBTEST_HARNESS`: nó ép nextest chạy
+        # libtest harness, tức **cả test binary dùng chung một process**. Một
+        # lời gọi cài crypto provider ở bất kỳ đâu trong binary đó là mọi chỗ
+        # khác được cứu — nên `Client::new()` thiếu provider vẫn xanh, và
+        # `grid_live_binance` chết 100% mà job vẫn báo xanh (vì step advisory
+        # có `continue-on-error`). Isolating thật là chậm hơn một chút nhưng
+        # lỗi lộ đúng chỗ thay vì được chỗ khác che.
+        #
         # `gossip` + `raft` bật hai module phân cụm. Cả hai mặc định tắt nên
         # phải bật ở đây, nếu không nextest sẽ bỏ qua test của chúng âm thầm.
         #
