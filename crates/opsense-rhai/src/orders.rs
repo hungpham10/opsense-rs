@@ -1243,6 +1243,77 @@ mod tests {
 }
 
 #[cfg(test)]
+mod plan_round_trip {
+    //! Plan observation phải **giữ được bộ đếm** qua vòng
+    //! `ghi observation → đọc lại từ station → ghi lại`.
+    //!
+    //! Vòng này là nghi vấn chính: `record_trade_outcome` chạy trên
+    //! `session.plan` của kernel (`portfolio.rs`), còn plan observation được
+    //! **khôi phục** từ chính observation đó rồi ghi lại (`orders.rs:367`
+    //! `from_observations` → `orders.rs:569` `plan_observation`). Nếu vòng đóng
+    //! kín và không ai mang bộ đếm của kernel vào, thì `*_cnt` đọc được **luôn
+    //! bằng 0** — đúng triệu chứng đo trên stack.
+    //!
+    //! Test này khẳng định: đặt bộ đếm khác 0 rồi đi qua đúng vòng đó, bộ đếm
+    //! phải còn nguyên. Nếu xanh thì vòng này **không** phải thủ phạm, và phải
+    //! tìm chỗ khác — đó là giá trị của test dù nó xanh.
+
+    use super::*;
+    use rhai::Array;
+
+    /// Dựng plan observation có bộ đếm cho trước, đúng như kernel sẽ ghi.
+    fn plan_obs_with_counts(ts: i64, long_win: Vec<usize>) -> Observation {
+        let grid = TradingGrid::from_levels(vec![82_000.0, 82_100.0, 82_200.0, 82_300.0])
+            .expect("levels hợp lệ")
+            .with_outcome_counts(
+                long_win.clone(),
+                vec![0; long_win.len()],
+                vec![0; long_win.len()],
+                vec![0; long_win.len()],
+            );
+        plan_observation(ts as u64, &[grid], "BTCUSDT").expect("plan phải sinh được obs")
+    }
+
+    /// Dựng `Array` **giống hệt** đường production.
+    ///
+    /// `observation_of` nhận `Dynamic` và kiểm tra `value.is_map()` — nên phải
+    /// là Rhai `Map`, không phải `Dynamic` bọc `serde_json::Value`. Bọc Value
+    /// thì `is_map()` false ⇒ mọi observation bị bỏ qua ⇒ plan không khôi phục,
+    /// và test báo đỏ vì lý do sai hoàn toàn.
+    fn to_array(obs: &[Observation]) -> Array {
+        obs.iter()
+            .map(|o| rhai::serde::to_dynamic(o).expect("observation phải serde được"))
+            .collect()
+    }
+
+    #[test]
+    fn plan_counts_survive_observation_round_trip() {
+        let obs = plan_obs_with_counts(1_790_000_000, vec![3, 0, 0, 0]);
+
+        // Vòng: observation → Session (đọc lại từ station) → observation mới.
+        let state = State::from_observations(&to_array(std::slice::from_ref(&obs)));
+        assert_eq!(state.session.plan.len(), 1, "phải khôi phục được 1 lưới");
+
+        let again = plan_observation(1_790_000_900, &state.session.plan, "BTCUSDT")
+            .expect("plan phải sinh được obs");
+
+        let cells = again
+            .labels
+            .get("cells")
+            .expect("obs phải có cells")
+            .parse::<serde_json::Value>()
+            .expect("cells phải là JSON");
+        let got = cells[0]["long_win_cnt"][0].as_u64().expect("long_win_cnt phải là số");
+
+        assert_eq!(
+            got, 3,
+            "bộ đếm không sống sót qua vòng ghi→đọc→ghi. \
+             Nếu test này đỏ thì đây chính là chỗ nuốt bộ đếm."
+        );
+    }
+}
+
+#[cfg(test)]
 mod value_semantics {
     //! `value` của obs lệnh phải là **giá vào** ở cả hai bản ghi `open`/`closed`.
     //!
