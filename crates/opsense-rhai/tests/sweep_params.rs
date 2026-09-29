@@ -66,18 +66,15 @@ const RESOLUTION: &str = "1h";
 const REVIEW: u64 = 86_400;
 const FEE: f64 = 0.0002;
 const KELLY: f64 = 0.25;
-/// `lookback_secs` của production (`config.toml:199`) = 48 giờ. **Phải khớp**:
-/// lần chạy đầu tôi đặt bằng cả tập nến (~30 ngày) và sieve ra ô rộng 9%, bước
-/// lưới 4,5% thay vì 0,27% — tức đo một chiến lược khác hẳn, không phải chiến
-/// lược đang chạy.
-const LOOKBACK_SECS: f64 = 172_800.0;
 const CAPITAL: f64 = 100_000.0;
 
-/// Bộ tham số quét. `sl_pct` × `grid_levels` là hai thứ quyết định hình học
-/// rào TP/SL, tức hai thứ quyết định lãi-thua.
-const SL_PCTS: &[f64] = &[0.002, 0.004, 0.008];
 /// 4 là `grid_levels` của production; 3 và 5 để xem lân cận.
-const LEVELS: &[i64] = &[3, 4, 5];
+/// Mức production (`config.toml:189` / `198`).
+/// Tham số production, dùng làm **cố định** để sweep chỉ đo đúng một biến
+/// (`lookback_secs`): `sl_pct` (`config.toml:198`), `grid_levels`
+/// (`:189`), `lookback_secs` (`:199`).
+const SL_PROD: f64 = 0.008;
+const LEVELS_PROD: i64 = 4;
 
 fn data(name: &str) -> Vec<CandleStick> {
     let p: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -168,6 +165,7 @@ fn slice_fetch(
 struct Run {
     sl_pct: f64,
     levels: i64,
+    lookback: f64,
     cells: usize,
     placed: usize,
     closed: usize,
@@ -180,7 +178,7 @@ struct Run {
     breakeven: f64,
 }
 
-async fn run(data: &[CandleStick], sl_pct: f64, levels: i64) -> Run {
+async fn run(data: &[CandleStick], sl_pct: f64, levels: i64, lookback: f64) -> Run {
     let pf = Portfolio::new(
         Arc::new(NoLoader),
         Arc::new(strategy(levels)),
@@ -209,8 +207,6 @@ async fn run(data: &[CandleStick], sl_pct: f64, levels: i64) -> Run {
     // `rebuild` chạy theo `REVIEW` giây, mỗi lần lấy cửa sổ
     // `[now - lookback, now]`. Cửa sổ phải phủ **toàn bộ** tập nến, nếu không
     // lượt đầu tiên không thấy nến nào.
-    let lookback = LOOKBACK_SECS;
-
     let mut session = Session::new();
     session.next_ts = data[0].t as u64;
     // Con trỏ `next_ts` luôn lệch **+1 giây** so với mốc nến (calendar cộng
@@ -246,9 +242,9 @@ async fn run(data: &[CandleStick], sl_pct: f64, levels: i64) -> Run {
     // Chờ tích lũy **nhiều hơn `lookback_secs`** rồi mới rebuild, để lượt
     // rebuild đầu đã có đủ cửa sổ 48 giờ như production — nếu không thì lượng
     // đầu dựng lưới trên cửa sổ ngắn hơn, khác hẳn hành vi thật.
-    // Chờ 48 giờ + 24 giờ dư trước lượt rebuild đầu.
-    const WARMUP_SECS: u64 = 72 * 3600;
-    session.review_at = data[0].t as u64 + WARMUP_SECS + BOUNDARY_OFFSET as u64;
+    // Chờ tích lũy đủ `lookback` trước lượt rebuild đầu, nếu không lượng đó
+    // dựng lưới trên cửa sổ ngắn hơn — khác hành vi thật.
+    session.review_at = data[0].t as u64 + lookback as u64 + 3600 + BOUNDARY_OFFSET as u64;
     // `forward` trả `Ok(false)` khi **cửa sổ hiện tại không có nến mới** — và
     // khi đó nó vẫn đẩy `next_ts` theo calendar, nghĩa là "gọi lại ở lượt sau",
     // KHÔNG phải "hết dữ liệu". Dừng ở lần `false` đầu tiên cắt replay cụt.
@@ -316,6 +312,7 @@ async fn run(data: &[CandleStick], sl_pct: f64, levels: i64) -> Run {
     Run {
         sl_pct,
         levels,
+        lookback,
         cells: session.plan.len(),
         placed: session.history.len() + session.orders.len(),
         closed: session.history.len(),
@@ -339,17 +336,30 @@ async fn sweep_sl_pct_and_levels_on_real_candles() {
         test.len()
     );
 
+    // Quét `lookback_secs` — câu hỏi: nhìn lại 48 giờ hay 30 ngày?
+    // Giữ `sl_pct`/`grid_levels` ở **mức production** để đo đúng một biến.
+    const LOOKBACKS: &[f64] = &[
+        48.0 * 3600.0,   // production hiện tại (config.toml:199)
+        72.0 * 3600.0,   // như nói "72h"
+        7.0 * 86400.0,
+        30.0 * 86400.0,
+    ];
+    let sl_pct = SL_PROD;
+    let levels = LEVELS_PROD;
+
     let mut rows: Vec<(Run, Run)> = Vec::new();
-    for &sl_pct in SL_PCTS {
-        for &levels in LEVELS {
-            let t = run(&train, sl_pct, levels).await;
-            // Tham số **đã chọn trên train**; chạy nguyên vẹn trên test.
-            let v = run(&test, sl_pct, levels).await;
-            rows.push((t, v));
-        }
+    for &lookback in LOOKBACKS {
+        let t = run(&train, sl_pct, levels, lookback).await;
+        // Tham số **đã chọn trên train**; chạy nguyên vẹn trên test.
+        let v = run(&test, sl_pct, levels, lookback).await;
+        rows.push((t, v));
     }
 
-    println!("\n{:<8} {:<7} | {:<26} | {:<26}", "sl_pct", "levels", "TRAIN (chọn)", "TEST (kiểm)");
+    println!(
+        "\nsl_pct={SL_PROD} levels={LEVELS_PROD} (mức production, cố định để chỉ đo lookback)"
+    );
+    println!("cột: ô/lệnh vào | lệnh đóng | tp/sl | P&L USD");
+    println!("{:<9} | {:<26} | {:<26}", "lookback", "TRAIN (chọn)", "TEST (kiểm)");
     println!("{}", "-".repeat(96));
     for (t, v) in &rows {
         let f = |r: &Run| {
@@ -363,13 +373,14 @@ async fn sweep_sl_pct_and_levels_on_real_candles() {
                 r.pnl_usd
             )
         };
-        println!("{:<8.3} {:<7} | {:<26} | {:<26}", t.sl_pct, t.levels, f(t), f(v));
+        println!("{:<9} | {:<26} | {:<26}", format!("{:.0}h", t.lookback / 3600.0), f(t), f(v));
     }
 
     println!("\nNgưỡng hòa vốn và bước lưới (lấy từ plan thật của lượt TRAIN):");
     for (t, _) in &rows {
         println!(
-            "  sl_pct={:.3} levels={:<2} bước lưới {:.4}%  hòa vốn cần win_p {:.2}%",
+            "  lookback={:>7.1}h sl_pct={:.3} levels={:<2} bước lưới {:.4}%  hòa vốn {:.2}%",
+            t.lookback / 3600.0,
             t.sl_pct,
             t.levels,
             t.step_frac * 100.0,
@@ -383,8 +394,8 @@ async fn sweep_sl_pct_and_levels_on_real_candles() {
     println!("\n--- xếp theo P&L TRAIN ---");
     for (t, v) in &by_train {
         println!(
-            "  sl_pct={:.3} levels={:<2}  train {:+8.2}$ ({}đ)  →  test {:+8.2}$ ({}đ)",
-            t.sl_pct, t.levels, t.pnl_usd, t.closed, v.pnl_usd, v.closed
+            "  lookback={:>7.1}h sl={:.3} lv={:<2}  train {:+8.2}$ ({}đ)  →  test {:+8.2}$ ({}đ)",
+            t.lookback / 3600.0, t.sl_pct, t.levels, t.pnl_usd, t.closed, v.pnl_usd, v.closed
         );
     }
 
