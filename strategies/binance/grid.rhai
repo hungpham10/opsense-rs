@@ -377,6 +377,38 @@ fn rebuild(candles, prev, params) {
     // nên bước đúng bằng ngưỡng cũng bị lo.
     let spacing_floor = min_profitable_step(fee, (lo + hi) / 2.0) * 1.2;
 
+    // ── Trần `win_p`: kinh tế, không phải độ tin cậy ─────────────────────
+    //
+    // TP thật của mọi mốc là **1 bước lưới** (`tp_above`/`tp_below` trả mốc
+    // kế, trừ mốc đầu/cuối). Nên `reward` = `spacing / giá`, và mọi mốc dùng
+    // chung một tỉ lệ nên tính một lần cho cả lưới.
+    //
+    // Vì sao phải tính thay vì để hằng 0,75: đo thật trên Binance cho
+    // `reward = 0,271%`, `sl_pct = 0,8%`, `fee = 0,02%/phía` ⇒ hòa vốn cần
+    // **78,5%**. Trần 0,75 nằm dưới đó ⇒ **E < 0 ở mọi tham số hợp lệ**, và
+    // không số liệu nào sửa được vì kernel tự chặn trước khi số liệu tới.
+    let mid = (lo + hi) / 2.0;
+    // Mốc dựng bằng `cell_lo + step * j / levels` ⇒ khoảng cách thật giữa hai
+    // mốc là `step / levels`. Dùng `step / (levels - 1)` (như `spacing_floor`
+    // bên dưới) sẽ **phóng đại** TP, tức làm ngưỡng hòa vốn thấp hơn thật —
+    // sai theo hướng nguy hiểm: báo rẻ hơn để đặt lệnh.
+    let spacing_frac = if levels >= 2 { (step / levels_f) / mid } else { 0.0 };
+    let sl_pct = knob(params, "sl_pct", 0.008).to_float();
+    let cap = win_ceiling(spacing_frac, sl_pct, fee);
+    if type_of(cap) == "()" {
+        // Mốc cuối không có TP phía trên ⇒ `reward = 0` ⇒ không tỉ lệ thắng nào
+        // hòa vốn. Vẫn dựng lưới (mốc khác vẫn dùng được), nhưng nói ra.
+        print("grid: TP bằng 0 (levels < 2) — không tính được ngưỡng hòa vốn, \
+              dùng trần độ-tin-cậy 0,75. Mọi mốc sẽ lỗ về mặt kỳ vọng.");
+    } else if cap > win_conf_cap() {
+        // Trần kinh tế vượt trần độ-tin-cậy: nói ra, vì đây là thứ quyết định
+        // chiến lược có thể lãi hay không, và trước đây bị giấu im lặng.
+        print("grid: ngưỡng hòa vốn " + cap + " > trần độ-tin-cậy 0,75 (TP "
+            + spacing_frac + ", SL " + sl_pct + ", phí " + fee
+            + ") ⇒ đặt trần win_p ở ngưỡng hòa vốn. Ở trần 0,75 cũ hệ thống \
+              luôn âm dù dữ liệu tốt.");
+    }
+
     let plans = [];
     for cell in 0..n_cells {
         let cell_lo = lo + cell * step;
@@ -403,8 +435,8 @@ fn rebuild(candles, prev, params) {
             // t = 0 ở bậc dưới, 1 ở bậc trên: bậc càng xa giá hiện tại càng
             // nhiều drift ⇒ long khó thắng hơn, short dễ thắng hơn (và ngược lại).
             let x = j / (levels - 1);
-            let model_long = clamp01(0.5 + drift + (1.0 - x) * amp);
-            let model_short = clamp01(0.5 - drift + x * amp);
+            let model_long = clamp_win(0.5 + drift + (1.0 - x) * amp, cap);
+            let model_short = clamp_win(0.5 - drift + x * amp, cap);
 
             let lw = wins(stats, "long_win", j);
             let ll = losses(stats, "long_lost", j);
@@ -412,8 +444,8 @@ fn rebuild(candles, prev, params) {
             let sl = losses(stats, "short_lost", j);
 
             // Đủ mẫu thì tin thực tế, chưa đủ thì tin mô hình.
-            long_win += [if lw + ll >= min_trades { clamp01(lw / (lw + ll)) } else { model_long }];
-            short_win += [if sw + sl >= min_trades { clamp01(sw / (sw + sl)) } else { model_short }];
+            long_win += [if lw + ll >= min_trades { clamp_win(lw / (lw + ll), cap) } else { model_long }];
+            short_win += [if sw + sl >= min_trades { clamp_win(sw / (sw + sl), cap) } else { model_short }];
         }
 
         plans += [#{ levels: lv,
@@ -462,8 +494,37 @@ fn losses(stats, key, j) {
     stats[key][j]
 }
 
-fn clamp01(x) {
-    if x < 0.25 { 0.25 } else if x > 0.75 { 0.75 } else { x }
+/// Sàn độ tin cậy: không tin tỉ lệ thắng nào thấp hơn 25%.
+fn win_floor() { 0.25 }
+
+/// Trần độ tin cậy: 75% — con số này là **ràng buộc độ tin cậy** ("đừng tin
+/// mô hình hay mẫu nhỏ quá đà"), KHÔNG phải ràng buộc kinh tế.
+///
+/// Trần **kinh tế** là ngưỡng hòa vốn, tính ra ở [`win_ceiling`] theo TP/SL/phí
+/// thật của lưới đang dựng. Trộn hai thứ độc lập vào một hằng 0,75 là lỗi đã
+/// gây hậu quả: ngưỡng hòa vốn đo được là 78,5% > 75% ⇒ hệ thống **luôn âm**
+/// dù dữ liệu thật tốt đến đâu.
+fn win_conf_cap() { 0.75 }
+
+/// Chặn tỉ lệ thắng trong `[win_floor(), cap]` — `cap` do [`win_ceiling`] trả về.
+fn clamp_win(x, cap) {
+    if type_of(cap) == "()" { return win_floor(); }
+    let lo = win_floor();
+    if x < lo { lo } else if x > cap { cap } else { x }
+}
+
+/// Trần thật cho `win_p`: `max(trần độ-tin-cậy, ngưỡng hòa vốn)`.
+///
+/// Ngưỡng hòa vốn phải **được phép** vượt lên trên 0,75, nếu không thì kernel
+/// tự chặn mình ở mức không thể hòa vốn và không cách nào sửa bằng dữ liệu.
+///
+/// `reward` = TP thô (tỉ lệ giá), `risk` = `sl_pct`, `fee` = phí mỗi phía.
+fn win_ceiling(reward, risk, fee) {
+    let cap = win_conf_cap();
+    let be = breakeven_win_p(reward, risk, fee);
+    if type_of(be) == "()" { return cap; }
+    if be > 1.0 { return 1.0; }
+    if be > cap { be } else { cap }
 }
 
 // ── tick: KHÔNG gộp nến ở đây nữa ──────────────────────────────────────────
