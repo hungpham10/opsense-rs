@@ -11,6 +11,21 @@ pub enum Event {
     Minor((usize, Error)),
     Major((usize, Error)),
     Panic((usize, Error)),
+    /// Node **vừa hồi phục** — chạy lại thành công sau một hoặc nhiều lần lỗi.
+    ///
+    /// Vì sao cần biến thể riêng: `last_error` lưu **lần lỗi gần nhất**, nên
+    /// node đã khoẻ vẫn còn hiện lỗi cũ ⇒ status báo động giả, và người đọc
+    /// không biết đã hết chưa. Không thể suy từ "không nhận `Fault` nữa" vì
+    /// im lặng cũng là một trạng thái hợp lệ — phải nói rõ.
+    Recovered(usize),
+    /// Lỗi **đã phân loại** do component tự bắn: mang cả mức độ nên handler
+    /// không phải đoán từ message mà gán cấp độ.
+    ///
+    /// `Major`/`Panic` là của **engine** (chính `run()` trả `Err` hoặc panic) —
+    /// engine chỉ thử lại được, không sửa được, nên không phân loại thêm. Còn
+    /// `Fault` là lỗi mà component biết rõ hậu quả và thường **đã tự hồi
+    /// phục** (`recovered`).
+    Fault((usize, Fault)),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +102,83 @@ pub struct Message {
     pub payload: Value,
 }
 
+/// Mức độ lỗi — quyết định hệ thống **tự làm gì**, không chỉ để hiển thị.
+///
+/// `Event::Minor/Major/Panic` cũ không đủ dùng ở đây: `Minor` là "lỗi bố trí"
+/// (batch lệch nối) còn pipeline vẫn chạy, còn các lỗi dưới đây đều **làm node
+/// mất chức năng** nhưng khác nhau về cách hồi phục — gộp chung thì không biết
+/// nên thử lại hay phải dựng lại.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    /// Lỗi tạm thời, thử lại ở chu kỳ sau. Mạng 5xx, chưa đủ dữ liệu, kernel
+    /// rebuild thiếu nến. Giữ nguyên state.
+    Transient,
+    /// State trong station **hỏng**. Giữ lại thì mắc vĩnh viễn — ví dụ plan
+    /// JSON hỏng thì plan rỗng và node không bao giờ đặt lệnh nữa, mà nhìn ra
+    /// vẫn "đang chạy". Cần **dựng lại** state từ nguồn sạch.
+    Corrupt,
+    /// Cấu hình sai, không tự hồi phục được: tên `strategy` không hỗ trợ,
+    /// thiếu `params.dag`, URL sai cú pháp. Retry vô ích — nhưng **không được
+    /// chết** vì lỗi cấu hình của một node không kéo chết cả pipeline.
+    Fatal,
+}
+
+/// Một lỗi đã phân loại, kèm hành động hồi phục tự động đã áp dụng (để log và
+/// status nói rõ hệ thống **đã làm gì**, không chỉ "có lỗi").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Fault {
+    pub severity: Severity,
+    /// Mã ổn định để đếm/gom theo thứ, không phải message tiếng Anh đầy đủ.
+    pub code: String,
+    pub message: String,
+    /// `None` = chưa/làm không được; `Some` = mô tả hành động đã tự áp dụng.
+    pub recovered: Option<String>,
+}
+
+impl Severity {
+    /// Tên ổn định để log và `opsense_status` hiện ra, khớp `serde` rename.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Corrupt => "corrupt",
+            Self::Fatal => "fatal",
+        }
+    }
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Fault {
+    /// `severity: code: message` — một dòng đủ để đọc trong log lẫn status.
+    pub fn summary(&self) -> String {
+        let mut s = format!("{}: {}: {}", self.severity, self.code, self.message);
+        if let Some(r) = &self.recovered {
+            s.push_str(&format!(" (đã tự hồi phục: {r})"));
+        }
+        s
+    }
+    pub fn new(severity: Severity, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            severity,
+            code: code.to_string(),
+            message: message.into(),
+            recovered: None,
+        }
+    }
+
+    /// Ghi nhận hành động hồi phục đã áp dụng.
+    #[must_use]
+    pub fn recovered(mut self, what: impl Into<String>) -> Self {
+        self.recovered = Some(what.into());
+        self
+    }
+}
+
 /// Read-only view of one node in the running pipeline, for status tooling.
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeInfo {
@@ -95,6 +187,16 @@ pub struct NodeInfo {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub running: bool,
+    /// Lỗi gần nhất của node, `None` khi node đang khoẻ.
+    ///
+    /// Vì sao cần: `run()` của hầu hết component **không** trả `Err` khi hỏng
+    /// (script lỗi chỉ `warn!` rồi bỏ batch) nên `Event::Major` của engine không
+    /// kích hoạt, và `println!` ở handler mất ngay khi container restart. Hỏi
+    /// status mới là cách duy nhất hỏi được node đang chết vì sao.
+    pub last_error: Option<Fault>,
+    /// Số lần node báo lỗi. Phân biệt "lỗi tĩnh lặp mỗi nến" với "một lần rồi
+    /// hết" — cùng một `last_error` nhưng khác sức nặng hoàn toàn.
+    pub fault_count: u64,
 }
 
 /// Context trait — type-erased container for shared application state.

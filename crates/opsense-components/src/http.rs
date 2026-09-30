@@ -40,7 +40,27 @@ use opsense_mlib::jq::JsonQuery;
 use opsense_macros::{source, transform};
 
 use crate::station::downcast_ctx;
-use crate::vector::runtime::{Component, Identify, Message, Outbound};
+use crate::vector::runtime::{Component, Event, Fault, Identify, Message, Outbound, Severity};
+
+/// Node nào chu kỳ trước vừa lỗi — để chu kỳ này thành công thì báo hồi phục
+/// thay vì để `last_error` ám vĩnh viễn trong `opsense_status`.
+static NODES_WITH_FAULT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(std::collections::HashSet::new())
+});
+
+fn note_fault(node: &str, has: bool) -> bool {
+    let Ok(mut set) = NODES_WITH_FAULT.lock() else {
+        return false;
+    };
+    if has {
+        set.insert(node.to_string());
+        false
+    } else {
+        set.remove(node)
+    }
+}
 use crate::{render, signal};
 
 /// `station = true` makes the node terminal: its own station is queryable, so
@@ -627,7 +647,7 @@ pub struct HttpOrigin {
 impl_http_origin!(
     async fn run(
         &self,
-        _id: usize,
+        id: usize,
         _rx: &mut mpsc::Receiver<Message>,
         tx: Outbound,
     ) -> Result<(), Error> {
@@ -684,6 +704,9 @@ impl_http_origin!(
                 .await
             {
                 Ok(obs) if !obs.is_empty() => {
+                    if note_fault(&self.id, false) {
+                        let _ = tx.event.send(Event::Recovered(id)).await;
+                    }
                     // `update_range` cần cửa sổ bọc đúng mọi obs — lấy từ chính
                     // dữ liệu thay vì từ `from_ts`/`to_ts`, vì API có thể trả
                     // ngoài cửa sổ mình yêu cầu (Binance với `limit` trả nến
@@ -703,10 +726,25 @@ impl_http_origin!(
                 // `Ok(rỗng)` = API không có gì để cho (giờ chưa có nến nào chốt).
                 // Không phải lỗi — im lặng ở `debug` để không spam mỗi nhịp.
                 Ok(_) => {
+                    // Rỗng là "API chưa có gì", không phải lỗi — nhưng **hồi
+                    // phục** sau một lần 502 thì vẫn phải báo, không thì
+                    // `last_error` ám vĩnh viễn.
+                    if note_fault(&self.id, false) {
+                        let _ = tx.event.send(Event::Recovered(id)).await;
+                    }
                     tracing::debug!(node = %self.id, "http_origin: response rỗng");
                 }
                 // Lỗi **không** làm chết node: chu kỳ sau thử lại. Nếu để `?`
                 // thì một lần 502 của Binance là pipeline chết vĩnh viễn.
+                //
+                // Nhưng `warn!` thôi thì node chỉ "âm thầm hỏng": status vẫn hiện
+                // nó đang chạy, và sau một lần 502 không ai biết nó đã im hàng
+                // giờ. Bắn qua kênh lỗi của engine để `opsense_status` trả về
+                // `last_error` — hỏi là biết, không phải đào log.
+                //
+                // `Event::Major` **không** làm node chết: `Bootstrap::execute`
+                // chỉ sinh event này khi chính `run()` trả `Err`, còn `run()`
+                // ở đây vẫn `Ok` và quay lại vòng quét.
                 Err(e) => {
                     tracing::warn!(
                         node = %self.id,
@@ -714,6 +752,15 @@ impl_http_origin!(
                         error = %e,
                         "http_origin: fetch thất bại — thử lại ở nhịp sau"
                     );
+                    note_fault(&self.id, true);
+                    let _ = tx
+                        .event
+                        .send(Event::Fault((
+                            id,
+                            Fault::new(Severity::Transient, "http_origin", format!("{e}"))
+                                .recovered(format!("thử lại ở nhịp sau {interval}s")),
+                        )))
+                        .await;
                 }
             }
 
@@ -725,7 +772,7 @@ impl_http_origin!(
 impl_http_source!(
     async fn run(
         &self,
-        _id: usize,
+        id: usize,
         rx: &mut mpsc::Receiver<Message>,
         tx: Outbound,
     ) -> Result<(), Error> {
@@ -778,9 +825,25 @@ impl_http_source!(
                 .fetch_once(ts, interval, ts, ts, &msg.payload)
                 .await
             {
-                Ok(b) => b,
+                Ok(b) => {
+                    if note_fault(&self.id, false) {
+                        let _ = tx.event.send(Event::Recovered(id)).await;
+                    }
+                    b
+                }
                 Err(e) => {
                     tracing::warn!("http {}: {e}", self.id);
+                    note_fault(&self.id, true);
+                    // Xem `HttpOrigin` — `warn!` thôi thì node âm thầm hỏng,
+                    // status vẫn hiện nó đang chạy.
+                    let _ = tx
+                        .event
+                        .send(Event::Fault((
+                            id,
+                            Fault::new(Severity::Transient, "http", format!("{e}"))
+                                .recovered("thử lại ở message sau"),
+                        )))
+                        .await;
                     continue;
                 }
             };

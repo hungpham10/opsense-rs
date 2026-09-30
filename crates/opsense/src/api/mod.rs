@@ -24,7 +24,7 @@ use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, Observation, StationKind};
 use opsense_mlib::vector::components::{clock, null};
-use opsense_mlib::vector::runtime::{Component, Event, Runtime};
+use opsense_mlib::vector::runtime::{Component, Event, Fault, Runtime, Severity};
 use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
 
@@ -102,6 +102,9 @@ impl AppState {
         let admin_entity = Arc::new(opsense_model::entities::admin::Admin::new(&connector));
         let oauth_metrics = Arc::new(OAuthMetrics::new());
 
+        // Clone **trước** khi  bị shadow bởi write guard bên dưới —
+        // handler cần `Arc`, không phải guard.
+        let runtime_arc = Arc::clone(&runtime);
         {
             let mut runtime = runtime.write().await;
 
@@ -117,11 +120,56 @@ impl AppState {
                         .map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
                 )
                 .map_err(|e| Error::new(ErrorKind::InvalidData, e.to_string()))?;
-            runtime.start(|event| async move {
-                match event {
-                    Event::Minor((id, error)) => println!("Minor error in node {id}: {error}"),
-                    Event::Major((id, error)) => println!("Major error in node {id}: {error}"),
-                    Event::Panic((id, error)) => println!("Panic in node {id}: {error}"),
+            // Không chỉ `println!`: lỗi phải **hỏi được** bằng `opsense_status`.
+            // `println!` mất ngay khi container restart, và node vẫn hiện là
+            // "đang chạy" trong status dù đã chết — nhầm lẫn rất dễ.
+            //
+            // Handler **không** giữ write guard: chỉ `read()` khoá lấy tên node
+            // rồi thả, và chỉ khi có `Major`/`Panic`. Nó chạy ở task riêng nên
+            // chờ guard ở khối này thả là bình thường, không phải deadlock.
+            //
+            // `Event::Minor` không ghi vào `last_error`: đó là lỗi bố trí (batch
+            // lệch nối,…) còn pipeline vẫn chạy — ghi thành lỗi node sẽ ám mọi
+            // node chỉ vì có một batch lệch.
+            let handle = Arc::clone(&runtime_arc);
+            runtime.start(move |event| {
+                let handle = Arc::clone(&handle);
+                async move {
+                    // Lấy idx + loại trước: `event` bị `match` bên dưới.
+                    let recovered = matches!(event, Event::Recovered(_));
+                    let (idx, fault) = match &event {
+                        Event::Recovered(i) => (*i, None),
+                        Event::Minor((i, e)) => (
+                            *i,
+                            Some(Fault::new(Severity::Transient, "minor", e.to_string())),
+                        ),
+                        // Lỗi của chính engine: nó chỉ retry được chứ không sửa
+                        // được, nên xếp `Fatal` — cần người/can thiệp.
+                        Event::Major((i, e)) => (
+                            *i,
+                            Some(Fault::new(Severity::Fatal, "major", e.to_string())),
+                        ),
+                        Event::Panic((i, e)) => (
+                            *i,
+                            Some(Fault::new(Severity::Fatal, "panic", e.to_string())),
+                        ),
+                        Event::Fault((i, f)) => (*i, Some(f.clone())),
+                    };
+                    match event {
+                        Event::Minor((id, error)) => println!("Minor error in node {id}: {error}"),
+                        Event::Major((id, error)) => println!("Major error in node {id}: {error}"),
+                        Event::Panic((id, error)) => println!("Panic in node {id}: {error}"),
+                        Event::Fault((id, f)) => println!("Fault in node {id}: {}", f.summary()),
+                        Event::Recovered(id) => println!("Node {id} recovered"),
+                    }
+                    // `Recovered` mang `None` ⇒ xoá `last_error`. Không suy được
+                    // từ "im lặng" vì im lặng cũng là trạng thái hợp lệ (node
+                    // chạy tốt ngay từ đầu), nên phải nói rõ.
+                    if (fault.is_some() || recovered)
+                        && let Some(name) = handle.read().await.node_name(idx)
+                    {
+                        handle.read().await.report_fault(&name, fault);
+                    }
                 }
             })?;
         }

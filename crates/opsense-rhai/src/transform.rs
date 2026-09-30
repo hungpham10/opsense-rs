@@ -26,7 +26,32 @@ use serde_json::Value;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::runtime::ScriptSource;
-use crate::vector::runtime::{Component, Identify, Message, Outbound};
+use crate::vector::runtime::{Component, Event, Fault, Identify, Message, Outbound, Severity};
+
+/// Node nào lượt trước vừa báo lỗi — dùng để biết lượt này không lỗi thì đó
+/// **là** hồi phục chứ không phải "chưa từng lỗi".
+///
+/// State tĩnh theo tên node thay vì field trong `RhaiTransform`: macro
+/// `#[transform]` sinh `Clone`/`PartialEq`, mà `AtomicBool`/`Mutex` không có, nên
+/// thêm field sẽ không biên dịch được.
+static NODES_WITH_FAULT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| {
+    std::sync::Mutex::new(std::collections::HashSet::new())
+});
+
+/// Ghi nhớ node vừa lỗi, hoặc hỏi "lượt trước có lỗi không".
+fn note_fault(node: &str, has: bool) -> bool {
+    let Ok(mut set) = NODES_WITH_FAULT.lock() else {
+        return false;
+    };
+    if has {
+        set.insert(node.to_string());
+        false
+    } else {
+        set.remove(node)
+    }
+}
 
 /// `station = true` makes the node terminal: its own station is queryable, so it
 /// needs no downstream consumer. The station is registered either way (see
@@ -88,7 +113,7 @@ impl RhaiTransform {
 impl_rhai_transform!(
     async fn run(
         &self,
-        _id: usize,
+        id: usize,
         rx: &mut mpsc::Receiver<Message>,
         tx: Outbound,
     ) -> Result<(), Error> {
@@ -127,6 +152,22 @@ impl_rhai_transform!(
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!("rhai {}: {}", self.id, e);
+                    // Báo qua kênh lỗi của engine, không chỉ log. `run()` trả
+                    // `Ok` nên `Bootstrap::execute` không bắt được — và nếu để
+                    // `run()` trả `Err` thì engine retry mỗi 1 giây, tức spam
+                    // một lỗi tĩnh. Gửi `Event::Major` giữ **nhịp thử lại theo
+                    // message** (mỗi nến/lệnh) như hiện tại, nhưng lần này lỗi
+                    // tới được handler và status.
+                    // Script không nạp/compile được là lỗi **cấu hình** (sai
+                    // đường dẫn, cú pháp): không tự hết, nhưng cũng không được
+                    // làm chết pipeline.
+                    let _ = tx
+                        .event
+                        .send(Event::Fault((
+                            id,
+                            Fault::new(Severity::Fatal, "script_source", e),
+                        )))
+                        .await;
                     continue;
                 }
             };
@@ -175,6 +216,18 @@ impl_rhai_transform!(
                 Ok(items) => items,
                 Err(e) => {
                     tracing::warn!("rhai {} skipped batch at ts {ts}: {e}", self.id);
+                    // Xem chỗ `script_source()` ở trên: log không đủ, lỗi phải
+                    // tới handler để hỏi được bằng status.
+                    // Script chạy nhưng lỗi: thường là dữ liệu đầu vào hoặc
+                    // logic, và `process` sẽ thử lại ở message kế tiếp.
+                    let _ = tx
+                        .event
+                        .send(Event::Fault((
+                            id,
+                            Fault::new(Severity::Corrupt, "script_run", e.to_string())
+                                .recovered("bỏ batch này, forward processed để không chặn xuống"),
+                        )))
+                        .await;
                     // Still forward processed to not stall downstream
                     let done = signal::tagged(signal::processed(ts), &self.id);
                     for s in &tx.streams {
@@ -183,6 +236,23 @@ impl_rhai_transform!(
                     continue;
                 }
             };
+
+            // `portfolio_feed` và các native khác không có `Outbound` nên không
+            // bắn được `Event::Major`; chúng để lại `Fault` ở khe. Lấy ở đây —
+            // **mọi** nhánh `Ok`, kể cả khi script chạy bình thường — vì lỗi
+            // nằm trong native chứ không phải trong `process`.
+            // Lần này không lỗi mà lần trước có ⇒ báo hồi phục, để
+            // `opsense_status` xoá `last_error` thay vì để nó ám vĩnh viễn.
+            match crate::orders::take_fault() {
+                Some(f) => {
+                    note_fault(&self.id, true);
+                    let _ = tx.event.send(Event::Fault((id, f))).await;
+                }
+                None if note_fault(&self.id, false) => {
+                    let _ = tx.event.send(Event::Recovered(id)).await;
+                }
+                None => {}
+            }
 
             // Convert script output back to Observations and write to own station
             let mut processed = Vec::with_capacity(items.len());

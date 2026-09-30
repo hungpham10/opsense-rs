@@ -214,7 +214,7 @@ services:
   # Dùng `aws-cli` (public.ecr.aws) thay `minio/mc` — image mc bị chặn pull
   # cùng registry với minio, còn aws-cli thì bucket create là một lệnh S3 thuần.
   rustfs-bucket:
-    image: public.ecr.aws/aws-cli/aws-cli:latest
+    image: amazon/aws-cli:latest
     depends_on:
       rustfs:
         condition: service_healthy
