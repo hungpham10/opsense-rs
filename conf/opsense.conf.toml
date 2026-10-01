@@ -1,16 +1,20 @@
 # Opsense configuration.
 # See docs/PLAN.MD for the field reference.
+#
+# Đây là config **tối giản**: chạy được ngay ở mức đơn giản nhất, để xám
+# `opsense serve` có chạy không và MCP/GraphQL có sống không. Không có ví dụ
+# cụ thể nào ở đây — *vận hành cái gì* là tuỳ người dùng, nên thêm
+# source/sink thật vào `[pipeline]` bên dưới.
 
 [engine]
 poll_interval_seconds = 60
 
-# Minimal pipeline: clock source → timeseries station sink. Required so the
-# bare `opsense serve` container (which mounts this file) has an explicit
-# `[pipeline]` instead of relying on the in-code default. Override or
-# extend this section to wire real sources/sinks for your environment.
-# Storage for the sink comes from `[storage]` below (default backend:
-# memory). Integration tests exercise non-default storage via
-# strategies/<name>/config.toml.
+# Pipeline tối giản: nhịp thời gian → in ra stdout.
+#
+# Cố ý **không** dùng `timeseries_station_sink`: `clock` chỉ phát tick điều
+# khiển, không mang observation, nên station sinh ra sẽ **luôn rỗng** mà vẫn tốn
+# một vòng ghi. Muốn có station thì thêm node `station = true` kèm component
+# thật sự ghi vào nó.
 [pipeline]
 [[pipeline.components]]
 type = "clock"
@@ -19,11 +23,11 @@ id = "clock"
 # KHÔNG phải field của component — mọi component struct có
 # `#[serde(deny_unknown_fields)]` nên key này phải được bóc ra trước khi
 # deserialize (xem `node_descriptions` trong crates/opsense/src/api/mod.rs).
-description = "Chỉ nhịp thời gian. **Tick là control signal, không mang observation** — station `tsdb` nối từ đây vì vậy không bao giờ có dữ liệu."
+description = "Chỉ nhịp thời gian. **Tick là control signal, không mang observation**."
 interval_secs = 60
 
 [[pipeline.components]]
-type = "timeseries_station_sink"
-id = "tsdb"
-description = "Ghi observation từ message vào station `tsdb`. Với nguồn là `clock` thì không gì được ghi — xem mô tả node `clock`."
+type = "print"
+id = "print"
+description = "In từng message ra stdout. Không giữ state, không cần station."
 inputs = ["clock"]
