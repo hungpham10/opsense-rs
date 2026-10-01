@@ -1304,6 +1304,118 @@ mod tests {
         );
     }
 
+    /// Lưới hẹp để `min_rr` có ý nghĩa: bước 0.5 trên giá ~110 ⇒ RR bậc kề
+    /// ≈ 0.57, còn 2 bậc ≈ 1.14. Cố ý **không** gắn `max_candles` nên mỗi mốc
+    /// là một `TradingGrid` riêng — đúng như `strategies/binance/config.toml`
+    /// (`levels - 2` mốc dùng được, mốc đầu không có TP dưới).
+    fn rr_grid() -> TradingGrid {
+        TradingGrid::from_levels(vec![110.0, 110.5, 111.0, 111.5])
+            .expect("levels hợp lệ")
+            .with_sl_pct(0.008)
+            .with_weight_matrix(vec![vec![1.0], vec![1.0], vec![1.0], vec![1.0]])
+            .with_long_win_p(vec![0.9, 0.9, 0.9, 0.9])
+            .with_short_win_p(vec![0.9, 0.9, 0.9, 0.9])
+    }
+
+    /// Station có sẵn plan hẹp + cursor chặn rebuild, để kernel dùng đúng lưới
+    /// ta dựng thay vì để script `rebuild` viết đè. ≥ 10 nến để qua guard.
+    fn rr_station() -> (State, Vec<CandleStick>) {
+        let mut obs: Array = vec![rhai::serde::to_dynamic(
+            plan_observation(1_000, &[rr_grid()], "BTCUSDT").expect("plan obs"),
+        )
+        .expect("serialize")];
+        // `review_at` xa ⇒ KHÔNG rebuild ⇒ `session.plan` giữ nguyên lưới trên.
+        obs.push(
+            rhai::serde::to_dynamic(step_cursor(1_000, 0, 9_999_999_999, 0, "BTCUSDT"))
+                .expect("serialize"),
+        );
+
+        let mut candles: Vec<CandleStick> = (0..9)
+            .map(|i| CandleStick::new(1_000 + i * 60, 113.0, 113.5, 112.5, 113.0, 10.0))
+            .collect();
+        // Chỉ chạm **mốc 0** (110.0) ⇒ đúng một lệnh long, không lẫn mốc khác.
+        candles.push(CandleStick::new(1_540, 110.0, 110.1, 109.9, 110.0, 10.0));
+
+        (
+            State::from_observations(&obs, &mut Diagnostics::default()),
+            candles,
+        )
+    }
+
+    async fn feed_rr(min_rr: f64) -> Vec<Observation> {
+        let (state, candles) = rr_station();
+        let settings = Settings {
+            min_rr,
+            ..scripted_settings()
+        };
+        feed(
+            &candles,
+            &state,
+            *candles.last().expect("có nến"),
+            &settings,
+            "BTCUSDT",
+            &mut Diagnostics::default(),
+        )
+        .await
+    }
+
+    fn tp_of(obs: &[Observation]) -> Option<f64> {
+        obs.iter()
+            .find(|o| o.signal == Signal::Order)
+            .and_then(|o| o.labels.get(L_TP))
+            .and_then(|s| s.parse::<f64>().ok())
+    }
+
+    /// `min_rr > 0` ⇒ TP nhảy bậc, và **không** rơi về bậc kề khi lưới không
+    /// bậc nào đủ.
+    ///
+    /// Đây là mắt xích cuối của `conf → Settings → PortfolioConfig → forward
+    /// → open_orders`. Trước đây chỉ có test đọc `Settings::min_rr` (parse
+    /// đúng) và test `TradingGrid::tp_for_rr` (thuật toán đúng); **không** test
+    /// nào chứng minh con số đó tới được kernel. Hợp đồng `params()` từng giữ
+    /// `min_rr` ở index 5, và việc gỡ nó ra `PortfolioConfig` cũng chỉ được
+    /// chứng minh bằng CI, không phải bằng test.
+    #[tokio::test]
+    async fn min_rr_moves_take_profit_beyond_adjacent_level() {
+        // Mốc 0: entry 110.0, risk = 110 × 0.008 = 0.88.
+        //   bậc kề 110.5 → reward 0.5  → RR 0.568  (< 1.0, không đạt)
+        //   2 bậc   111.0 → reward 1.0  → RR 1.136  (đạt)
+        let baseline = feed_rr(0.0).await;
+        assert_eq!(
+            tp_of(&baseline),
+            Some(110.5),
+            "min_rr = 0 phải giữ TP bậc kề (hành vi gốc): {baseline:?}"
+        );
+
+        let gated = feed_rr(1.0).await;
+        assert_eq!(
+            tp_of(&gated),
+            Some(111.0),
+            "min_rr = 1.0 phải nhảy lên bậc đầu tiên đủ RR: {gated:?}"
+        );
+    }
+
+    /// Không bậc nào đủ RR ⇒ **không đặt lệnh nào**, không rơi về bậc kề.
+    ///
+    /// `Rejected` không ghi thành observation (chẩn đoán, không phải sự kiện),
+    /// nên dấu hiệu quan sát được ở tầng này là **vắng mặt** lệnh — đủ để
+    /// chứng minh knob tới kernel, vì cùng thị trường với `min_rr = 0` thì có
+    /// lệnh.
+    #[tokio::test]
+    async fn min_rr_out_of_reach_places_no_orders() {
+        let baseline = feed_rr(0.0).await;
+        assert!(
+            baseline.iter().any(|o| o.signal == Signal::Order),
+            "baseline (min_rr = 0) phải đặt được lệnh: {baseline:?}"
+        );
+
+        let gated = feed_rr(99.0).await;
+        assert!(
+            !gated.iter().any(|o| o.signal == Signal::Order),
+            "min_rr = 99 vô lý ⇒ không bậc nào đủ ⇒ không được đặt lệnh nào: {gated:?}"
+        );
+    }
+
     #[tokio::test]
     async fn feed_places_orders_on_wavy_market() {
         // Giá nhấn sóng mạnh để chạm nhiều level grid.
