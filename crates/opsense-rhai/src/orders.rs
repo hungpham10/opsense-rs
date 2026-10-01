@@ -249,6 +249,10 @@ struct Settings {
     kelly_fraction: f64,
     base_capital: f64,
     settlement_candles: u64,
+    /// RR mục tiêu cho take-profit. `0` ⇒ TP ở bậc kề (hành vi gốc).
+    /// `> 0` ⇒ TP ở bậc đầu tiên đạt `reward / risk >= min_rr`, và lệnh bị
+    /// từ chối nếu không bậc nào đạt (xem `TradingGrid::tp_for_rr`).
+    min_rr: f64,
     /// Genome DAG cho `strategy = "dag"` (JSON như trong config pipeline).
     dag: Option<serde_json::Value>,
     // ── Knob cho `strategy = "rhai"` (đọc trong `fn rebuild`) ──────────────
@@ -281,6 +285,7 @@ impl Default for Settings {
             kelly_fraction: 0.25,
             base_capital: 100_000.0,
             settlement_candles: 0,
+            min_rr: 0.0,
             dag: None,
             grid_min_trades: 3,
             grid_weight_sharpness: 4.0,
@@ -343,6 +348,9 @@ impl Settings {
         if let Some(v) = num("base_capital") {
             s.base_capital = v;
         }
+        if let Some(v) = num("min_rr") {
+            s.min_rr = v;
+        }
         if let Some(v) = int("settlement_candles") {
             s.settlement_candles = v.max(0) as u64;
         }
@@ -364,9 +372,10 @@ impl Settings {
     }
 
     /// Layout params kernel + strategy: `[kelly, capital, grid_levels, sl_pct,
-    /// lookback]` — cùng layout với `Graph::init()` (index 0..4) để `Portfolio`
-    /// dùng chung không cần biết strategy nào đang chạy. Với DAG, `Graph::init()`
-    /// tự có layout riêng nên hai nhánh này không trùng nhau.
+    /// lookback, min_rr]` — **mở rộng** layout `Graph::init()` (index 0..4) để
+    /// `Portfolio` dùng chung không cần biết strategy nào đang chạy. Index 5 là
+    /// phần tử **cuối**, thêm vào không dịch index cũ nên nhánh DAG (dùng
+    /// layout riêng) không bị ảnh hưởng.
     fn params(&self) -> Vec<f64> {
         if (self.strategy == "dag" || self.strategy == "graph")
             && let Ok(graph) = self.dag() {
@@ -378,6 +387,7 @@ impl Settings {
             self.grid_levels as f64,
             self.sl_pct,
             self.lookback_secs as f64,
+            self.min_rr,
         ]
     }
 
@@ -1125,7 +1135,18 @@ mod tests {
         assert_eq!(s.grid_levels, 5);
         let s = Settings::from_map(&cfg_map());
         assert_eq!(s.grid_levels, 5);
-        assert_eq!(s.params().len(), 5, "params theo layout strategy.init()");
+        // 6 phần tử: `[kelly, capital, grid_levels, sl_pct, lookback, min_rr]`.
+        // Index 5 là phần tử CUỐI nên không dịch index 0..4 của `strategy.init()`.
+        assert_eq!(s.params().len(), 6, "params theo layout + min_rr");
+        // Mặc định phải TẮT RR ⇒ hành vi đặt lệnh y hệt trước khi có knob.
+        assert_eq!(s.min_rr, 0.0);
+        assert_eq!(s.params()[5], 0.0);
+        // Có khai thì đi qua đúng index 5, không đụng index cũ.
+        let mut with_rr = cfg_map();
+        with_rr.insert("min_rr".into(), Dynamic::from(0.75));
+        let s = Settings::from_map(&with_rr);
+        assert_eq!(s.params()[5], 0.75);
+        assert_eq!(s.params()[3], s.sl_pct, "index 3 (sl_pct) không đổi chỗ");
     }
 
     #[tokio::test]

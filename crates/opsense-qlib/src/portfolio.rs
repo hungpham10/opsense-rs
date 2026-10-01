@@ -547,6 +547,8 @@ impl Portfolio {
     ) -> Result<bool, Error> {
         const KELLY_FRACTION: usize = 0;
         const BASE_CAPITAL: usize = 1;
+        // RR mục tiêu cho TP (index 5, mới). `0` ⇒ giữ TP bậc kề như cũ.
+        const MIN_RR: usize = 5;
 
         let resolution = self.config.resolution_for_test.clone();
         // T+N: `settlement_candles == 0` → theo thị trường (StockCalendar → T+3,
@@ -560,6 +562,9 @@ impl Portfolio {
         // `params` giữa chừng, cache lại sẽ dùng giá trị cũ.
         let kelly_fraction = params(KELLY_FRACTION);
         let base_capital = params(BASE_CAPITAL);
+        // Tra mỗi nến cùng các knob sizing khác: đổi `min_rr` giữa chừng
+        // phải có hiệu lực ngay ở nến kế tiếp, không cache trong `Session`.
+        let min_rr = params(MIN_RR);
         let current = session.next_ts;
 
         // ── Nến tới hạn rebuild? ───────────────────────────────────────
@@ -697,6 +702,7 @@ impl Portfolio {
             kelly_fraction,
             base_capital,
             unlock_seq,
+            min_rr,
         );
 
         // Notify về lệnh vừa đặt / bị từ chối
@@ -905,6 +911,7 @@ impl Portfolio {
         kelly_fraction: f64,
         base_capital: f64,
         unlock_seq: u64,
+        min_rr: f64,
     ) -> Vec<OrderEvent> {
         let ts = candle.t.max(0) as u64;
         let mut events = Vec::new();
@@ -931,22 +938,57 @@ impl Portfolio {
                         continue;
                     }
 
-                    let (dtype, win_p, sl_price, tp_price) =
-                        if entry_price <= (grid.min() + grid.max()) / 2.0 {
-                            (
-                                OrderType::Long,
-                                grid.long_win_pct(il) * grid.weight(il, id),
-                                grid.sl_long(il),
-                                grid.tp_above(il),
-                            )
-                        } else {
-                            (
-                                OrderType::Short,
-                                grid.short_win_pct(il) * grid.weight(il, id),
-                                grid.sl_short(il),
-                                grid.tp_below(il),
-                            )
-                        };
+                    let is_long = entry_price <= (grid.min() + grid.max()) / 2.0;
+                    let (dtype, win_p, sl_price) = if is_long {
+                        (
+                            OrderType::Long,
+                            grid.long_win_pct(il) * grid.weight(il, id),
+                            grid.sl_long(il),
+                        )
+                    } else {
+                        (
+                            OrderType::Short,
+                            grid.short_win_pct(il) * grid.weight(il, id),
+                            grid.sl_short(il),
+                        )
+                    };
+
+                    // TP theo RR mục tiêu khi `min_rr > 0`; `0` ⇒ giữ bậc kề
+                    // như cũ (hành vi **không đổi** so với trước knob này).
+                    let tp_price = if min_rr > 0.0 {
+                        match grid.tp_for_rr(il, min_rr, is_long) {
+                            Some(tp) => tp,
+                            None => {
+                                // Không bậc nào trong lưới đạt RR yêu cầu ⇒ bỏ
+                                // lệnh. KHÔNG rơi về bậc kề: bậc kề RR thấp hơn
+                                // thì lệnh lỗ ngay khi giá chạm tới nó.
+                                let reason = format!(
+                                    "không có bậc nào đạt min_rr {min_rr:.4} (risk {:.6}, cần reward {:.6})",
+                                    grid.stoploss_pct(),
+                                    grid.stoploss_pct() * min_rr
+                                );
+                                tracing::debug!(
+                                    ts,
+                                    grid = ig,
+                                    level = il,
+                                    entry = entry_price,
+                                    dtype = ?dtype,
+                                    "bị lo vì không có bậc nào đủ RR"
+                                );
+                                events.push(OrderEvent::Rejected {
+                                    ts,
+                                    grid: ig,
+                                    level: il,
+                                    reason,
+                                });
+                                continue;
+                            }
+                        }
+                    } else if is_long {
+                        grid.tp_above(il)
+                    } else {
+                        grid.tp_below(il)
+                    };
 
                     let expected_profit_pct = if dtype == OrderType::Long {
                         (tp_price - entry_price) / entry_price
@@ -1824,6 +1866,74 @@ mod tests {
             sl_pct: 0.008,
             review_interval_secs: 900,
         })
+    }
+
+    /// Cổng RR: `min_rr = 0` ⇒ TP bậc kề (hành vi gốc); `min_rr > 0` ⇒ TP bậc
+    /// đầu tiên đủ RR, và **từ chối** khi không bậc nào đủ.
+    ///
+    /// Grid 5 mốc, mỗi mốc 0.4% giá, `sl_pct = 0.008` ⇒ RR mỗi bậc kề ≈ 0.5.
+    /// Nến chỉ chạm mốc giữa (100.8 = đúng `(min+max)/2` ⇒ Long) nên chỉ có
+    /// **một** ứng viên lệnh: đổi hành vi chỉ do `min_rr` quyết định.
+    #[test]
+    fn rr_gate_picks_level_or_rejects() {
+        let grid = TradingGrid::new(5, 100.0, 101.6)
+            .expect("grid hợp lệ")
+            .with_sl_pct(0.008);
+        let entry = grid.level_price(2);
+        assert!((entry - 100.8).abs() < 1e-9, "mốc giữa phải là 100.8");
+        let candle =
+            CandleStick::new(1_700_000_000, entry, entry + 0.01, entry - 0.01, entry, 10.0);
+        let fee = SimpleFixedFee::new(0.0002);
+        let placed = |evs: &[OrderEvent]| {
+            evs.iter()
+                .filter(|e| matches!(e, OrderEvent::Placed { .. }))
+                .count()
+        };
+
+        // (1) `min_rr = 0` ⇒ TP bậc kề 101.2, lợi sau phí vẫn dương ⇒ đặt.
+        let mut orders = Vec::new();
+        let events = Portfolio::open_orders(
+            0,
+            &candle,
+            std::slice::from_ref(&grid),
+            &mut orders,
+            &fee,
+            0.25,
+            100_000.0,
+            0,
+            0.0,
+        );
+        assert_eq!(
+            placed(&events),
+            1,
+            "min_rr = 0 phải giữ hành vi gốc: đặt lệnh ở bậc kề"
+        );
+
+        // (2) `min_rr = 2.0` ⇒ không bậc nào đủ ⇒ từ chối, KHÔNG rơi về bậc kề.
+        let mut orders = Vec::new();
+        let events = Portfolio::open_orders(
+            0,
+            &candle,
+            std::slice::from_ref(&grid),
+            &mut orders,
+            &fee,
+            0.25,
+            100_000.0,
+            0,
+            2.0,
+        );
+        assert!(orders.is_empty(), "không bậc nào đủ RR thì không đặt lệnh nào");
+        assert_eq!(
+            placed(&events),
+            0,
+            "phải từ chối thay vì đặt ở bậc kề có RR thấp hơn yêu cầu"
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, OrderEvent::Rejected { reason, .. } if reason.contains("min_rr"))
+            ),
+            "lý do từ chối phải nói rõ min_rr, không từ chối im lặng: {events:?}"
+        );
     }
 
     fn portfolio(config: PortfolioConfig) -> Portfolio {
