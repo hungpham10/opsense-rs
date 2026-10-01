@@ -123,6 +123,14 @@ services:
       # Mount the whole sql tree so release.sh can run schema (depth=1) then
       # the env-specific seed (depth=2) at boot.
       - ./sql:/app/sql:ro
+      # Rhai strategy scripts. A `rhai_transform` node opens `script_path`
+      # INSIDE the container, and the container's cwd is `/`, not the repo
+      # root — so the host's `strategies/` tree must be visible at the same
+      # path `conf/opsense.conf.toml` names (`/app/strategies/...`).
+      # Without this mount the node logs `script_run: ... No such file or
+      # directory` on every batch and the station stays empty.
+      # Read-only: the runtime only ever reads these files.
+      - ./strategies:/app/strategies:ro
       # Dex OIDC config (mounted into image for consistency with compose service).
       - ./conf/dex/config.dev.yaml:/etc/dex/config.dev.yaml:ro
     environment:
