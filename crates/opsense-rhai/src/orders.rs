@@ -1251,11 +1251,19 @@ mod tests {
 
         // SL = 109.12. `check_order_exit` xử lý **SL trước TP**, nên `low` phải
         // nằm trên 109.12 — nến nào chạm cả hai thì ra thua, không phải thắng.
-        let candles = vec![CandleStick::new(1_060, 112.0, 121.0, 110.0, 119.0, 10.0)];
+        //
+        // Cần **≥ 10 nến**: `feed` có guard `candles.len() < 10` và trả về sớm
+        // kèm đúng cái cursor trần này (đã gặp: test fail vì im lặng không
+        // đóng lệnh). 9 nến cũ chỉ để qua guard — `slice_fetch` lọc
+        // `t >= from` với `from = incoming.t` nên chỉ nến cuối được kernel xử lý.
+        let mut candles: Vec<CandleStick> = (0..9)
+            .map(|i| CandleStick::new(1_000 + i * 60, 110.0, 110.5, 109.5, 110.0, 10.0))
+            .collect();
+        candles.push(CandleStick::new(1_540, 112.0, 121.0, 110.0, 119.0, 10.0));
         let out = feed(
             &candles,
             &state,
-            candles[0],
+            *candles.last().expect("có nến"),
             &scripted_settings(),
             "BTCUSDT",
             &mut Diagnostics::default(),
