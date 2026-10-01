@@ -119,16 +119,14 @@ services:
       - "8080:8080"
     volumes:
       - ./env/secrets.dev.enc.yaml:/app/secrets/secrets.dev.enc.yaml:ro
-      # Deployment config — pipeline grid trading Binance. `conf/opsense.conf.toml`
-      # giữ làm config tối giản chuẩn và KHÔNG phải thứ container nạp.
-      - ./conf/opsense-binance-grid.toml:/app/opsense-binance-grid.toml:ro
+      - ./conf/opsense.conf.toml:/app/opsense.conf.toml:ro
       # Mount the whole sql tree so release.sh can run schema (depth=1) then
       # the env-specific seed (depth=2) at boot.
       - ./sql:/app/sql:ro
       # Rhai strategy scripts. A `rhai_transform` node opens `script_path`
       # INSIDE the container, and the container's cwd is `/`, not the repo
       # root — so the host's `strategies/` tree must be visible at the same
-      # path `conf/opsense-binance-grid.toml` names (`/app/strategies/...`).
+      # path `conf/opsense.conf.toml` names (`/app/strategies/...`).
       # Without this mount the node logs `script_run: ... No such file or
       # directory` on every batch and the station stays empty.
       # Read-only: the runtime only ever reads these files.
@@ -139,7 +137,7 @@ services:
       # App
       APP_ENV: ${APP_ENV:-dev}
       ENCRYPTED_FILE: /app/secrets/secrets.${APP_ENV:-dev}.enc.yaml
-      OPSENSE_CONFIG: /app/opsense-binance-grid.toml
+      OPSENSE_CONFIG: /app/opsense.conf.toml
       DB_DSN: postgres://opsense:opsense123@opsense-postgres:5432/opsense
       SQL_BASE: /app/sql
       RUST_LOG: info

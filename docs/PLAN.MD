@@ -1038,7 +1038,7 @@ infra:
 | 2 | `Earthfile +base` thiếu `protobuf-compiler` | ✅ xong — `+builder` đã `apt-get install protobuf-compiler` |
 | 3 | `Makefile` chưa có (PLAN.MD ghi nhầm "đã làm") | ✅ xong — 3923 bytes, 12 target (`build-local`/`build-cloud`/`up`/`down`/`ps`/`logs`/`restart`/`shell`/`encrypt`/`decrypt`/`sql-clean`/`help`) |
 | 4 | `conf/opsense.conf.toml` reference `vector:8686` không có trong compose | ⚠️ vẫn open — note gap (xem Caveats dưới; **không block CI** vì CI chạy `cargo test` không cần compose) |
-| 5 | Config mount qua `volumes:` chưa wire trong image `opsense-serve` | ✅ xong — `opsense-serve` mount `./conf/opsense-binance-grid.toml:/app/opsense-binance-grid.toml:ro` (compose chọn file này qua `OPSENSE_CONFIG`; `conf/opsense.conf.toml` giữ làm config tối giản chuẩn) |
+| 5 | Config mount qua `volumes:` chưa wire trong image `opsense-serve` | ✅ xong — `opsense-serve` mount `./conf/opsense.conf.toml:/app/opsense.conf.toml:ro` |
 
 ### Known gaps (post-Phase-5)
 
