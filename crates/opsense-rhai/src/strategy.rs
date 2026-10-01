@@ -90,9 +90,6 @@ impl ScriptStrategy {
         map.insert("grid_levels".into(), param(2).into());
         map.insert("sl_pct".into(), param(3).into());
         map.insert("lookback_secs".into(), param(4).into());
-        // Index 5 (mới). `Graph::init()` chỉ có 0..4 ⇒ `param(5)` trả `0.0`
-        // cho nhánh DAG, tức RR tắt — đúng mặc định.
-        map.insert("min_rr".into(), param(5).into());
         serde_json::Value::Object(map)
     }
 }
@@ -347,6 +344,7 @@ mod tests {
                 resolution_for_rebuild: "1m".into(),
                 settlement_candles: 0,
                 cache_enabled: false,
+                min_rr: 0.0,
             },
         )
         .unwrap();

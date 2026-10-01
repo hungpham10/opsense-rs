@@ -251,6 +251,17 @@ pub struct PortfolioConfig {
     /// cache read/write); hợp khi loader rẻ và stateless (station, file local)
     /// hoặc khi chạy một lần trên dữ liệu đã nằm sẵn trong RAM.
     pub cache_enabled: bool,
+
+    /// RR mục tiêu cho take-profit của lệnh MỚI. `0` (mặc định) ⇒ TP ở bậc
+    /// kề — hành vi gốc, giữ nguyên. `> 0` ⇒ TP ở bậc ĐẦU TIÊN có
+    /// `reward / risk >= min_rr`, và lệnh bị TỪ CHỐI nếu không bậc nào đủ.
+    ///
+    /// Cố ý **không** nằm trong `ParamFn` (`params(idx)`): layout đó là hợp
+    /// đồng theo vị trí, mọi caller index thẳng (`&|id| params[id]`) nên
+    /// thêm phần tử sẽ làm vỡ caller cũ. Knob bất biến thuộc về config.
+    /// Xem `TradingGrid::tp_for_rr`.
+    #[cfg_attr(feature = "json", serde(default))]
+    pub min_rr: f64,
 }
 
 impl Default for PortfolioConfig {
@@ -260,6 +271,7 @@ impl Default for PortfolioConfig {
             resolution_for_rebuild: "1D".to_string(),
             settlement_candles: DEFAULT_SETTLEMENT_CANDLES,
             cache_enabled: true,
+            min_rr: 0.0,
         }
     }
 }
@@ -547,8 +559,6 @@ impl Portfolio {
     ) -> Result<bool, Error> {
         const KELLY_FRACTION: usize = 0;
         const BASE_CAPITAL: usize = 1;
-        // RR mục tiêu cho TP (index 5, mới). `0` ⇒ giữ TP bậc kề như cũ.
-        const MIN_RR: usize = 5;
 
         let resolution = self.config.resolution_for_test.clone();
         // T+N: `settlement_candles == 0` → theo thị trường (StockCalendar → T+3,
@@ -562,9 +572,11 @@ impl Portfolio {
         // `params` giữa chừng, cache lại sẽ dùng giá trị cũ.
         let kelly_fraction = params(KELLY_FRACTION);
         let base_capital = params(BASE_CAPITAL);
-        // Tra mỗi nến cùng các knob sizing khác: đổi `min_rr` giữa chừng
-        // phải có hiệu lực ngay ở nến kế tiếp, không cache trong `Session`.
-        let min_rr = params(MIN_RR);
+        // RR mục tiêu cho TP nằm trong `PortfolioConfig`, KHÔNG phải `params(idx)`:
+        // layout `ParamFn` là hợp đồng theo vị trí và caller index thẳng
+        // (`&|id| params[id]`), thêm phần tử sẽ làm vỡ caller cũ. Đọc mỗi nến
+        // nên đổi `min_rr` giữa chừng có hiệu lực ngay ở nến kế tiếp.
+        let min_rr = self.config.min_rr;
         let current = session.next_ts;
 
         // ── Nến tới hạn rebuild? ───────────────────────────────────────
@@ -1954,6 +1966,7 @@ mod tests {
             resolution_for_rebuild: "1m".to_string(),
             settlement_candles: settlement,
             cache_enabled: false,
+            min_rr: 0.0,
         }
     }
 

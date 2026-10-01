@@ -190,6 +190,7 @@ async fn run(data: &[CandleStick], sl_pct: f64, levels: i64, lookback: f64) -> R
             resolution_for_rebuild: RESOLUTION.into(),
             settlement_candles: 0,
             cache_enabled: false,
+            min_rr: 0.0,
         },
     )
     .expect("Portfolio nhận strategy script");
