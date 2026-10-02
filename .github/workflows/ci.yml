@@ -365,8 +365,19 @@ jobs:
       - name: Verify container images
         run: docker images | grep opsense
 
+      # Mỗi leg — kể cả `default` — đều lấy config từ `strategies/<name>/config.toml`.
+      # `conf/opsense.conf.toml` trong repo là config **tối giản** (clock → print),
+      # cố ý không có station, nên không dùng làm fixture test được.
+      - name: Validate repo minimal conf/opsense.conf.toml
+        run: |
+          # Config tối giản mà docker-compose mount mặc định: chỉ cần parse được
+          # và dựng pipeline. Chạy TRƯỚC khi bị copy đè để file này luôn được CI
+          # cover, dù không ai chạy nó. Dùng release binary đã tải về — đúng
+          # binary nằm trong serve image — thay vì `cargo run` (compile cold profile).
+          ./target/release/opsense validate --config conf/opsense.conf.toml
+          echo "Minimal repo config validation passed"
+
       - name: Copy strategy config.toml
-        if: matrix.strategy != 'default'
         run: |
           cp "strategies/${{ matrix.strategy }}/config.toml" conf/opsense.conf.toml
           echo "=== Config for ${{ matrix.strategy }} ==="
@@ -374,11 +385,8 @@ jobs:
 
       - name: Validate config.toml (before compose starts)
         run: |
-          # Validates what opsense-serve will actually mount: for non-default
-          # strategies this is the copied strategy config; for `default` it is
-          # the repo conf/opsense.conf.toml unchanged. Uses the release binary
-          # downloaded above — the exact binary baked into the serve image —
-          # instead of `cargo run` (which would compile a cold debug profile).
+          # Validates what opsense-serve will actually mount: the strategy config
+          # copied in the previous step.
           ./target/release/opsense validate --config conf/opsense.conf.toml
           echo "Config validation passed for ${{ matrix.strategy }}"
 

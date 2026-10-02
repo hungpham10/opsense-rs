@@ -1,275 +1,33 @@
-# Opsense configuration — file that `opsense-serve` actually loads.
+# Opsense configuration.
 # See docs/PLAN.MD for the field reference.
 #
-# Mounted into the container and selected by `OPSENSE_CONFIG=/app/opsense.conf.toml`
-# (docker-compose.yml). This is the ONE config the running service reads; edits
-# here take effect on `docker compose up -d opsense-serve` or a container restart.
-#
-# ── PROVENANCE / KEEP IN SYNC ───────────────────────────────────────────────
-# The pipeline below is the Binance grid strategy, copied from
-# `strategies/binance/config.toml` — that file is the canonical template and is
-# what `crates/opsense/tests/e2e_binance_config.rs` validates, so edit IT first
-# and re-copy. Two intentional deviations from the template:
-#
-#   1. `script_path` is ABSOLUTE (`/app/strategies/binance/grid.rhai`).
-#      The template's relative path only resolves when the process cwd is the
-#      repo root. The container's cwd is `/`, so relative silently becomes
-#      `/strategies/...` and every batch fails with `script_run: No such file
-#      or directory`. docker-compose.yml mounts `./strategies:/app/strategies:ro`
-#      to make the absolute path valid inside the container. DO NOT "fix" this
-#      back to a relative path.
-#   2. `params.mode = "trading"`; the template ships `"analysis"`. See below —
-#      still SIMULATED trading, but it does emit order rows.
-#   3. Nothing else. `description` on each node is kept — it is metadata only
-#      (every component struct is `deny_unknown_fields`, so the loader strips it
-#      before deserialize via `node_descriptions`); it populates the text
-#      `opsense_status` shows, which tells an agent which station to query.
-#      It only loads at `serve` startup, so a `Mutation.reload` over MCP leaves
-#      it null.
-#
-# ── WHAT `mode = "trading"` ACTUALLY DOES ───────────────────────────────────
-# It routes each CLOSED candle through the kernel `portfolio_feed` — the same
-# kernel backtest uses — and writes `signal = "order"` rows into station `grid`.
-#
-# These are NOT Binance orders. The repo has no order-routing code at all: no
-# `/fapi/v1/order`, no `/api/v3/order`, no HMAC signing, no API-key plumbing
-# (`rg -n 'BINANCE_API|HMAC' --glob '!target'` → nothing). Binance here is only
-# a PUBLIC market-data source: `/klines` + the `aggTrade` websocket, neither of
-# which is authenticated. Order ids are internal (`o<ts>-<seq>`), PnL is
-# modelled, and nothing leaves the process. Trading mode = paper trading.
-#
-# Two real consequences, both from `backend = "memory"`:
-#   - A restart loses candles AND open orders outright. The kernel rebuilds
-#     session state from `signal = "order"` + the `trading_step` cursor in the
-#     station, so both are RAM-only here. Use parquet/sqlite to make it durable.
-#   - `fee_rate = 0.0002` (maker) is ASSUMED, not measured. The kernel has no
-#     funding-fee model either, so a position held across an 8h funding period
-#     drifts from real-world PnL. Do not read these fills as achievable.
-#
+# Đây là config **tối giản**: chạy được ngay ở mức đơn giản nhất, để xám
+# `opsense serve` có chạy không và MCP/GraphQL có sống không. Không có ví dụ
+# cụ thể nào ở đây — *vận hành cái gì* là tuỳ người dùng, nên thêm
+# source/sink thật vào `[pipeline]` bên dưới.
+
 [engine]
-poll_interval_seconds = 10
-# KHÔNG có khai cache ở đây, và cũng không có khai được: cache nóng của station
-# là hằng số `HOT_BLOCKS = 32` block (`crates/opsense-core/src/station.rs:44`).
-# Sức chứa thật = `32 × storage.block_secs`.
-#
-# `engine.cache_block_seconds` / `cache_max_blocks` từng có trong config nhưng
-# **không ai đọc** — chỉ được validate chặn giá trị 0. Đã gỡ khỏi `Config`.
-# Nếu sau này cần chỉnh sức chứa thì phải cho `HOT_BLOCKS` đọc được từ config,
-# không phải thêm lại hai field chết.
-#
-# Cửa sổ phân tích của `grid` là `history_secs` (16h). Với `backend = "memory"`
-# và `block_secs` mặc định 3600 thì cache giữ 32 × 1h = 32 giờ, đủ cho 16h.
+poll_interval_seconds = 60
 
-[storage]
-backend = "memory"
-
-# Lịch sử nến — node terminal tự quét, không cần ai đẩy nhịp.
+# Pipeline tối giản: nhịp thời gian → in ra stdout.
 #
-# `inputs = []` và là `ComponentType::Source` ⇒ node không cần node `clock`.
-# Mỗi `interval_secs` nó fetch URL rồi ghi vào station của chính nó. Nhờ vậy
-# `grid` hỏi cửa sổ 16h thì có đúng 16h nến, thay vì phải chờ process chạy tới
-# giờ để tích đủ nến từ tick.
-#
-# **Vì sao quét ở node chứ không khai khi có người đọc** (xem `HttpOrigin` trong
-# `crates/opsense-components/src/http.rs`): đường đọc station chạy trong script
-# Rhai, mà script chạy trên `spawn_blocking` và API đọc là **đồng bộ** — muốn
-# kéo HTTP được thì phải `block_on` ngay trong đó. `spawn_blocking` không hủy
-# được, nên khi runtime tắt còn script đang kéo thì tokio panic trong destructor
-# và SIGABRT giết cả process. Quét ở node giữ đường đọc thuần RAM nên hết hẳn.
-#
-# Node **không** biết cửa sổ phân tích là bao nhiêu: nó lấy đúng những gì URL trả
-# về. Phủ hay không là thuộc tính của dữ liệu, nên `history_secs` bên dưới chỉ
-# là quyết định của script, không phải thứ phải khai thêm ở node.
-#
-# Không dùng `startTime`/`endTime`: Binance đòi **milli-giây**, mà phép nhân
-# ấy là việc của script chứ không phải của transport. `limit = 1000` là trần
-# Binance ⇒ 1000 nến 1m ≈ 16.6 giờ, vừa đúng `history_secs` bên dưới.
-#
-# **Giới hạn thật**: node chỉ lấy được nến *mới nhất*, nên cửa sổ **cũ hơn
-# 16.6 giờ** sẽ không có gì — station trả phần đang có, còn phần thiếu thì rỗng.
-# Cần cửa sổ xa hơn thì phải đổi API (bỏ `limit`, tự viết binding `{{from_ts}}`
-# theo đơn vị API); đó là giới hạn của Binance, không phải của cách làm này.
-#
+# Cố ý **không** dùng `timeseries_station_sink`: `clock` chỉ phát tick điều
+# khiển, không mang observation, nên station sinh ra sẽ **luôn rỗng** mà vẫn tốn
+# một vòng ghi. Muốn có station thì thêm node `station = true` kèm component
+# thật sự ghi vào nó.
+[pipeline]
 [[pipeline.components]]
-type = "http_origin"
-id = "history"
-description = "Nến 1m lịch sử từ Binance /klines (1000 nến ≈ 16.6h), tự quét mỗi 60s. Mỗi nến = 5 obs, `labels.field` ∈ o/h/l/c/v, `metric_id` = symbol. Chỉ đọc, không phải nguồn sinh lệnh."
-url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1000"
-# Nhịp quét — đồng thời là **độ trễ tối đa** cho một lần đọc. Nhịp phải nhỏ hơn
-# `resolution` của nến để dữ liệu không tụt nhiều hơn một nến; 60s khớp nến 1m.
-# Mặc định cũng là 60, khai ra để đọc khỏi phải tra code.
+type = "clock"
+id = "clock"
+# `description` là metadata cho MCP/GraphQL: nói node này chứa dữ liệu gì.
+# KHÔNG phải field của component — mọi component struct có
+# `#[serde(deny_unknown_fields)]` nên key này phải được bóc ra trước khi
+# deserialize (xem `node_descriptions` trong crates/opsense/src/api/mod.rs).
+description = "Chỉ nhịp thời gian. **Tick là control signal, không mang observation**."
 interval_secs = 60
 
-   [pipeline.components.candles]
-   symbol = "BTCUSDT"
-   resolution = "1m"
-   # Binance `openTime` là milliseconds.
-   unit_ms = 1
-
 [[pipeline.components]]
-type = "websocket_2_json"
-id = "tick-feed"
-description = "Stream aggTrade realtime từ Binance. Pass-through, không giữ gì. `trigger` của nó là `tick` — grid bỏ qua để không đè nến do tick_2_candle gom."
-uri = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
-
-[[pipeline.components]]
-type = "json_2_json"
-id = "tick-map"
-description = "Đổi mỗi tick thành observation: `ts` = E (ms), `metric_id` = s (symbol), `value` = p (f64). Không có station riêng — chỉ là bước chuyển đổi cho tick-candle."
-inputs = ["tick-feed"]
-
-   [pipeline.components.constants]
-   kind = "metric"
-   signal = "raw"
-   trigger = "tick"
-
-   [pipeline.components.constants.labels]
-   resolution = "1m"
-
-   [pipeline.components.transforms.ts]
-   query = "E"
-
-   [pipeline.components.transforms.metric_id]
-   query = "s"
-
-   [pipeline.components.transforms.value]
-   query = "p"
-   cast_to = "f64"
-
-# Gom tick thành nến. Nhận tick từ `tick-map`, giữ nến đang mở trong RAM và
-# **chỉ ghi nến khi nến đã đóng** (đã thấy tick ở bucket kế tiếp).
-#
-# Hệ quả có chủ ý: **tick chết ⇒ không nến nào đóng ⇒ kernel không tiến**, tức
-# giao dịch dừng thay vì đặt lệnh trên dữ liệu cũ. Không có cảnh báo nếu không
-# để `stale_secs` — nên để mặc định 180s.
-#
-# `labels.field = "v"` là **số tick đã gộp**, không phải volume thật: tick stream
-# không mang khối lượng. Cần thanh khoản thì phải lấy từ kline API.
-[[pipeline.components]]
-type = "tick_2_candle"
-id = "tick-candle"
-description = "Gom tick thành nến bucket 1m, **chỉ ghi khi nến đã đóng** (thấy tick ở bucket kế tiếp). 5 obs mỗi nến, `labels.field` ∈ o/h/l/c/v với `v` = SỐ TICK đã gộp (không phải volume thật). Tick chết ⇒ không nến nào đóng."
-inputs = ["tick-map"]
-resolution = "1m"
-symbol = "BTCUSDT"
-# `ts` của tick tính bằng đơn vị gì: 1 = millisecond (Binance aggTrade).
-unit_ms = 1
-stale_secs = 180
-station = true
-
-[[pipeline.components]]
-type = "rhai_transform"
-id = "grid"
-description = "Đọc nến, dựng lưới, đặt lệnh. **Đây là station cần query.** Lọc server-side theo `signal`: `order` = lệnh (`labels.status` open/closed, `labels.dtype` long/short, `labels.tp`/`sl`/`size`); `summary` + `labelKind=trading_step` = cursor T+N; `summary` + `labelKind=plan` = lưới đang dùng (`labels.cells` = JSON); `summary` + `labelKind=snapshot` = ảnh chụp grid mỗi nến."
-script_path = "/app/strategies/binance/grid.rhai"
-inputs = ["tick-map", "tick-candle"]
-# Terminal — station của node này (lệnh, snapshot, plan, cursor) là nơi duy
-# nhất đọc lại được, nên không cần node sink để giữ graph hợp lệ.
-station = true
-
-   [pipeline.components.params]
-   # Lịch sử để seed trading range từ nến 1m đã đóng (node `history` tự nhịp).
-   history_source = "history"
-   # Nến phút hiện tại đến từ tick — nến API tới trễ và đã đóng một phần.
-   live_source = "tick-candle"
-   # Lệnh + snapshot + plan + cursor nằm ở station của chính node này.
-   own_station = "grid"
-   symbol = "BTCUSDT"
-   resolution = "1m"
-   history_secs = 57600
-   live_window_secs = 300
-
-   # mode = "analysis" (mặc định) — chỉ dựng grid + transition, phát snapshot.
-   # mode = "trading" — thêm bước đặt lệnh: candle đã đóng chạy qua kernel
-   # `portfolio_feed` (cùng kernel backtest dùng), lệnh ghi thành observation
-   # `signal = "order"` trong station `grid` (open/close theo `labels.status`).
-   # Các tham số dưới là tham số engine cho nhánh đó — đổi ở đây, không sửa script.
-   mode = "trading"
-
-   # RR mục tiêu cho take-profit. `0` ⇒ TP ở bậc kề (mặc định, hành vi gốc).
-   # `> 0` ⇒ TP ở bậc ĐẦU TIÊN đủ `reward / risk >= min_rr`, và lệnh bị TỪ CHỐI
-   # nếu không bậc nào đủ — không rơi về bậc kề (bậc kề RR thấp hơn thì lỗ ngay
-   # khi giá chạm tới). Xem `TradingGrid::tp_for_rr`.
-   #
-   # Với `sl_pct = 0.008` và `fee_rate = 0.0002`, mỗi bậc kề ≈ RR 0.43:
-   #   net win  = 0.43% - 0.04% = 0.39%  |  net loss = 0.80% + 0.04% = 0.84%
-   #   ⇒ cần tỉ lệ thắng 0.84/(0.84+0.39) = 68% — mà `grid_min_trades = 3` và
-   #   tỉ lệ thắng mô hình là **0.75 giả định**, chưa có lệnh đóng nào thay thế.
-   # `min_rr = 0.5` ⇒ TP nhảy 2 bậc: net win 0.46% ⇒ cần 65%, biên rộng hơn,
-   # đổi lại mất entry (mốc chỉ còn bậc trên thì không đủ RR thì bị từ chối).
-   min_rr = 0.0
-   calendar = "crypto"
-   # `strategy = "rhai"` (mặc định): plan lưới lệnh do chính script này dựng ở
-   # `fn rebuild(candles, prev, params)` — đổi chiến lược = sửa file .rhai, không
-   # phải viết class Rust rồi recompile (xem `opsense-rhai::ScriptStrategy`).
-   strategy = "rhai"
-   # 4 mốc/ô: mỗi ô là một TradingGrid riêng nên mốc đầu không có TP dưới,
-   # mốc cuối không có TP trên ⇒ `levels - 2` mốc dùng được thật. 2 mốc là
-   # 0 mốc dùng được; 5 mốc chỉ 3 mốc mà bán kính thì hẹp quá so với phí.
-   grid_levels = 4
-   sl_pct = 0.008
-   # Knob cho `fn rebuild`: số lệnh đóng tối thiểu trước khi tin tỉ lệ thắng
-   # thực tế, độ nhọn phân bổ vốn, sieve max_bit.
-   grid_min_trades = 3
-   grid_weight_sharpness = 4.0
-   grid_max_bit = 20
-   # Cửa sổ `fn rebuild` nhìn lại. Không có kline history nên giá trị này chỉ
-   # có tác dụng khi process đã chạy đủ lâu; trước đó sieve nhận ít nến hơn và
-   # chọn `step` hẹp.
-   lookback_secs = 172800
-   # Nhịp dựng lại plan. Cần `Session` mang `review_at` qua lời gọi, nếu không
-   # kernel rebuild mỗi nến và mốc trôi liên tục.
-   review_interval_secs = 900
-   # Phí sàn **mỗi phía** — Binance **USDⓈ-M Futures**, VIP 0:
-   #
-   #   maker (limit đặt xuống sổ, chờ khớp)  = 0.02% -> 0.0002
-   #   taker (lệnh khớp ngay)                 = 0.05% -> 0.0005  (+BNB -10% -> 0.00045)
-   #
-   # Đặt `0.0002` vì chiến lược này **chỉ đăng lệnh limit** ở mốc lưới, nên cả
-   # chân vào lẫn chân ra đều là maker. Đo được: lệnh `o1790478180-1` nằm sổ
-   # 22 phút mới khớp (mở 1790478180, đóng 1790479500) — đúng dấu hiệu limit
-   # được người khác khớp chứ không tự khớp ngay.
-   #
-   # `0.0005` là **taker**, tức xấu nhất: đặt vậy thì những lệnh khớp ngay bị
-   # tính phí cao hơn thực trả, và kernel lo cả những lệnh lẽ ra vẫn lãi
-   # (`expected_profit_pct <= roundtrip_fee_pct` ở `portfolio.rs`).
-   #
-   # Hệ quả trực tiếp, đo trên lệnh thật (entry 84481.77, TP 84392.41,
-   # notional 2341.50): gross 0.10578% —
-   #   fee 0.0005 (taker) -> pnl 0.00578% -> $0.135
-   #   fee 0.0002 (maker) -> pnl 0.06578% -> $1.54
-   #
-   # **Không có** funding fee trong mô hình: perpetual tính funding mỗi 8 giờ.
-   # Lệnh giữ 22 phút thì không đáng kể, nhưng lệnh nằm qua kỳ funding sẽ lệch
-   # khỏi PnL thật — và không có chỗ nào tính cái đó.
-   fee_rate = 0.0002
-   # Sàn kích thước ô cho sieve, theo tỉ lệ giá. **Thiếu thì tự tính**
-   # `2 × fee_rate × grid_levels × 1.2` — đúng ngưỡng để mốc lưới (cách nhau
-   # `step / grid_levels`) vượt phí trọn vòng, nhân thêm 1.2 vì kernel so
-   # nghiêm. Khai ra đây chỉ để ép lưới thô hơn, không cần thiết.
-   #
-   # Vì sao cần: sieve **không biết phí** nên ra lưới mịn nhất dữ liệu chịu
-   # được. Đo trên chính strategy này (cửa sổ 1h): sieve ra step $125.93 ⇒
-   # mốc cách nhau $31.48 < phí $33.87 ⇒ 8/8 entry bị lo, không log gì. Cùng
-   # code, cửa sổ 16h thì ra 4 ô rộng và vào được lệnh.
-   # grid_min_step_frac = 0.00192
-   # Kelly fraction. Cảnh báo: với `sl_pct = 0.008` và tỉ lệ thắng **mô hình**
-   # 0.75 (dùng khi chưa đủ `grid_min_trades` lệnh đóng), Kelly ra 0.244 ->
-   # cược 6% vốn mỗi lệnh. Tỉ lệ 0.75 là **mô hình đoán**, không phải thống kê
-   # đo được — xem `grid.rhai` (`grid_min_trades`).
-   kelly_fraction = 0.25
-   # Vốn cơ sở để định cỡ lệnh. `size` là **giá trị vị thế (notional) USD**, KHÔNG
-   # phải margin: qlib không có khái niệm leverage/margin nào, và PnL tính thẳng
-   # `size × pnl_pct` (`portfolio.rs`). Nên **đòn bẩy trên sàn không đổi PnL mà
-   # strategy tính** — nó chỉ quyết định giá thanh lýc:
-   #
-   #   cách thanh lýc ~ 1/leverage - mmr   (mmr BTCUSDT ~ 0.4%)
-   #     20x  -> 4.6%   => SL 0.8% về trước, an toàn
-   #    100x  -> 0.6%   => THANH LY TRUOC SL
-   #
-   # Nên ký <= 20x. Và đừng đọc `size` là "số tiền ký quỹ": đặt 20x với
-   # `size = 2341` nghĩa là đang cầm notional $46.830, PnL thật 20x con số
-   # trên — theo CẢ HAI chiều, lãi lẫn lỗ.
-   base_capital = 100000.0
-   # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.
-   settlement_candles = 0
+type = "print"
+id = "print"
+description = "In từng message ra stdout. Không giữ state, không cần station."
+inputs = ["clock"]
