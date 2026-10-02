@@ -747,6 +747,7 @@ async fn feed(
     let mut out = Vec::new();
     let mut next_id = state.next_id;
     let mut rebuilt = false;
+    let mut closed_any = false;
     for event in events {
         match event {
             OrderEvent::Placed { ts, order } => {
@@ -755,6 +756,7 @@ async fn feed(
                 out.push(open_observation(ts, &id, &order, symbol));
             }
             OrderEvent::Closed { ts, order } => {
+                closed_any = true;
                 // Khép vòng đời: dùng đúng id của lệnh đã mở.
                 let id = state
                     .open_ids
@@ -771,9 +773,19 @@ async fn feed(
         }
     }
 
-    // Plan mới → ghi observation riêng. Chỉ ghi khi **vừa rebuild**, không ghi
-    // mỗi nến: station append-only, ghi lại mỗi phút sẽ phình vô ích.
-    if rebuilt && let Some(obs) = plan_observation(incoming.t as u64, &session.plan, symbol) {
+    // Plan → ghi observation riêng. Ghi khi **vừa rebuild** (đổi levels) **hoặc
+    // vừa có lệnh đóng** (bộ đếm thắng/thua vừa đổi).
+    //
+    // Vì sao cần điều kiện thứ hai: `record_trade_outcome` chạy lúc lệnh đóng
+    // (nến bất kỳ), sửa `session.plan` trong RAM của lượt này. Lượt sau
+    // `from_observations` dựng `Session` mới và lấy lại plan từ station — mà
+    // station chỉ có bản ghi lúc rebuild ⇒ mọi thắng/thua ghi giữa hai lần
+    // rebuild bị xoá không dấu vết ⇒ `grid_min_trades` **không bao giờ đạt**,
+    // `win_p` vĩnh viễn là của mô hình. Đóng lệnh hiếm (không phải mỗi nến)
+    // nên ghi thêm ở nhánh này không làm phình station đáng kể.
+    if (rebuilt || closed_any)
+        && let Some(obs) = plan_observation(incoming.t as u64, &session.plan, symbol)
+    {
         out.push(obs);
     }
 
@@ -1186,6 +1198,222 @@ mod tests {
             .find(|o| o.labels.get(L_KIND).map(String::as_str) == Some(KIND_STEP))
             .expect("phải trả cursor");
         assert_eq!(cursor.signal, Signal::Summary);
+    }
+
+    /// Lệnh đóng ở nến **không rebuild** phải ghi lại bộ đếm thắng/thua vào
+    /// station — không thì `grid_min_trades` không bao giờ đạt.
+    ///
+    /// Trước đây plan chỉ được ghi lúc rebuild, còn `record_trade_outcome` chạy
+    /// lúc lệnh đóng (nến bất kỳ). Lượt sau `from_observations` dựng `Session`
+    /// mới và lấy plan từ station ⇒ thắng/thua ghi giữa hai lần rebuild bị xoá
+    /// im lặng. Test này cố tình **không** cho rebuild xảy ra (`review_at` đẩy
+    /// xa), nên nếu không có nhánh `closed_any` thì không có plan obs nào được
+    /// ghi ⇒ bộ đếm mất.
+    #[tokio::test]
+    async fn closing_an_order_persists_outcome_counts_without_rebuild() {
+        // Lưới 3 mốc; bộ đếm khởi đầu toàn 0 để thấy rõ lệnh đóng ghi vào.
+        let grid = TradingGrid::from_levels(vec![100.0, 110.0, 120.0])
+            .expect("levels hợp lệ")
+            .with_sl_pct(0.008)
+            .with_long_win_p(vec![0.9, 0.9, 0.9])
+            .with_short_win_p(vec![0.9, 0.9, 0.9]);
+
+        let order = Order {
+            dtype: OrderType::Long,
+            entry_price: 110.0,
+            size: 1_000.0,
+            sl_price: 110.0 * (1.0 - 0.008),
+            tp_price: 120.0,
+            grid_index: 0,
+            level_index: 1,
+            pnl_pct: None,
+            exit_price: None,
+            // 0 = không giới hạn: đóng được ngay, không phụ thuộc T+N.
+            unlock_seq: 0,
+        };
+
+        let mut obs: Array = vec![rhai::serde::to_dynamic(
+            plan_observation(1_000, &[grid], "BTCUSDT").expect("plan obs"),
+        )
+        .expect("serialize")];
+        obs.push(
+            rhai::serde::to_dynamic(open_observation(1_000, "o1-1", &order, "BTCUSDT"))
+                .expect("serialize"),
+        );
+        // `review_at` = 9_999_999_999 ⇒ `forward` KHÔNG rebuild ở nến này.
+        obs.push(
+            rhai::serde::to_dynamic(step_cursor(1_000, 5, 9_999_999_999, 0, "BTCUSDT"))
+                .expect("serialize"),
+        );
+
+        let state = State::from_observations(&obs, &mut Diagnostics::default());
+        assert_eq!(state.session.orders.len(), 1, "lệnh đang mở phải được khôi phục");
+
+        // SL = 109.12. `check_order_exit` xử lý **SL trước TP**, nên `low` phải
+        // nằm trên 109.12 — nến nào chạm cả hai thì ra thua, không phải thắng.
+        //
+        // Cần **≥ 10 nến**: `feed` có guard `candles.len() < 10` và trả về sớm
+        // kèm đúng cái cursor trần này (đã gặp: test fail vì im lặng không
+        // đóng lệnh). 9 nến cũ chỉ để qua guard — `slice_fetch` lọc
+        // `t >= from` với `from = incoming.t` nên chỉ nến cuối được kernel xử lý.
+        let mut candles: Vec<CandleStick> = (0..9)
+            .map(|i| CandleStick::new(1_000 + i * 60, 110.0, 110.5, 109.5, 110.0, 10.0))
+            .collect();
+        candles.push(CandleStick::new(1_540, 112.0, 121.0, 110.0, 119.0, 10.0));
+        let out = feed(
+            &candles,
+            &state,
+            *candles.last().expect("có nến"),
+            &scripted_settings(),
+            "BTCUSDT",
+            &mut Diagnostics::default(),
+        )
+        .await;
+
+        assert!(
+            out.iter().any(|o| {
+                o.signal == Signal::Order
+                    && o.labels.get(L_STATUS).map(String::as_str) == Some(STATUS_CLOSED)
+            }),
+            "nến phải chạm TP ⇒ có bản ghi đóng lệnh: {out:?}"
+        );
+
+        let plan_obs = out
+            .iter()
+            .find(|o| {
+                o.signal == Signal::Summary
+                    && o.labels.get(L_KIND).map(String::as_str) == Some(SIGNAL_PLAN)
+            })
+            .expect("lệnh đóng mà không rebuild vẫn phải ghi lại plan");
+
+        let grids = plan_of_observation(plan_obs).expect("plan obs phải parse được");
+        assert_eq!(
+            grids[0].long_win_count(1),
+            1,
+            "phải ghi 1 lần thắng long ở level 1 — mất nó thì grid_min_trades không bao giờ đạt"
+        );
+
+        // Vòng sau: khôi phục từ station ⇒ bộ đếm phải sống sót.
+        let mut round2 = obs.clone();
+        round2.push(rhai::serde::to_dynamic(plan_obs).expect("serialize"));
+        let state2 = State::from_observations(&round2, &mut Diagnostics::default());
+        assert_eq!(
+            state2.session.plan[0].long_win_count(1),
+            1,
+            "bộ đếm phải sống qua lần khôi phục station kế tiếp"
+        );
+    }
+
+    /// Lưới hẹp để `min_rr` có ý nghĩa: bước 0.5 trên giá ~110 ⇒ RR bậc kề
+    /// ≈ 0.57, còn 2 bậc ≈ 1.14. Cố ý **không** gắn `max_candles` nên mỗi mốc
+    /// là một `TradingGrid` riêng — đúng như `strategies/binance/config.toml`
+    /// (`levels - 2` mốc dùng được, mốc đầu không có TP dưới).
+    fn rr_grid() -> TradingGrid {
+        TradingGrid::from_levels(vec![110.0, 110.5, 111.0, 111.5])
+            .expect("levels hợp lệ")
+            .with_sl_pct(0.008)
+            .with_weight_matrix(vec![vec![1.0], vec![1.0], vec![1.0], vec![1.0]])
+            .with_long_win_p(vec![0.9, 0.9, 0.9, 0.9])
+            .with_short_win_p(vec![0.9, 0.9, 0.9, 0.9])
+    }
+
+    /// Station có sẵn plan hẹp + cursor chặn rebuild, để kernel dùng đúng lưới
+    /// ta dựng thay vì để script `rebuild` viết đè. ≥ 10 nến để qua guard.
+    fn rr_station() -> (State, Vec<CandleStick>) {
+        let mut obs: Array = vec![rhai::serde::to_dynamic(
+            plan_observation(1_000, &[rr_grid()], "BTCUSDT").expect("plan obs"),
+        )
+        .expect("serialize")];
+        // `review_at` xa ⇒ KHÔNG rebuild ⇒ `session.plan` giữ nguyên lưới trên.
+        obs.push(
+            rhai::serde::to_dynamic(step_cursor(1_000, 0, 9_999_999_999, 0, "BTCUSDT"))
+                .expect("serialize"),
+        );
+
+        let mut candles: Vec<CandleStick> = (0..9)
+            .map(|i| CandleStick::new(1_000 + i * 60, 113.0, 113.5, 112.5, 113.0, 10.0))
+            .collect();
+        // Chỉ chạm **mốc 0** (110.0) ⇒ đúng một lệnh long, không lẫn mốc khác.
+        candles.push(CandleStick::new(1_540, 110.0, 110.1, 109.9, 110.0, 10.0));
+
+        (
+            State::from_observations(&obs, &mut Diagnostics::default()),
+            candles,
+        )
+    }
+
+    async fn feed_rr(min_rr: f64) -> Vec<Observation> {
+        let (state, candles) = rr_station();
+        let settings = Settings {
+            min_rr,
+            ..scripted_settings()
+        };
+        feed(
+            &candles,
+            &state,
+            *candles.last().expect("có nến"),
+            &settings,
+            "BTCUSDT",
+            &mut Diagnostics::default(),
+        )
+        .await
+    }
+
+    fn tp_of(obs: &[Observation]) -> Option<f64> {
+        obs.iter()
+            .find(|o| o.signal == Signal::Order)
+            .and_then(|o| o.labels.get(L_TP))
+            .and_then(|s| s.parse::<f64>().ok())
+    }
+
+    /// `min_rr > 0` ⇒ TP nhảy bậc, và **không** rơi về bậc kề khi lưới không
+    /// bậc nào đủ.
+    ///
+    /// Đây là mắt xích cuối của `conf → Settings → PortfolioConfig → forward
+    /// → open_orders`. Trước đây chỉ có test đọc `Settings::min_rr` (parse
+    /// đúng) và test `TradingGrid::tp_for_rr` (thuật toán đúng); **không** test
+    /// nào chứng minh con số đó tới được kernel. Hợp đồng `params()` từng giữ
+    /// `min_rr` ở index 5, và việc gỡ nó ra `PortfolioConfig` cũng chỉ được
+    /// chứng minh bằng CI, không phải bằng test.
+    #[tokio::test]
+    async fn min_rr_moves_take_profit_beyond_adjacent_level() {
+        // Mốc 0: entry 110.0, risk = 110 × 0.008 = 0.88.
+        //   bậc kề 110.5 → reward 0.5  → RR 0.568  (< 1.0, không đạt)
+        //   2 bậc   111.0 → reward 1.0  → RR 1.136  (đạt)
+        let baseline = feed_rr(0.0).await;
+        assert_eq!(
+            tp_of(&baseline),
+            Some(110.5),
+            "min_rr = 0 phải giữ TP bậc kề (hành vi gốc): {baseline:?}"
+        );
+
+        let gated = feed_rr(1.0).await;
+        assert_eq!(
+            tp_of(&gated),
+            Some(111.0),
+            "min_rr = 1.0 phải nhảy lên bậc đầu tiên đủ RR: {gated:?}"
+        );
+    }
+
+    /// Không bậc nào đủ RR ⇒ **không đặt lệnh nào**, không rơi về bậc kề.
+    ///
+    /// `Rejected` không ghi thành observation (chẩn đoán, không phải sự kiện),
+    /// nên dấu hiệu quan sát được ở tầng này là **vắng mặt** lệnh — đủ để
+    /// chứng minh knob tới kernel, vì cùng thị trường với `min_rr = 0` thì có
+    /// lệnh.
+    #[tokio::test]
+    async fn min_rr_out_of_reach_places_no_orders() {
+        let baseline = feed_rr(0.0).await;
+        assert!(
+            baseline.iter().any(|o| o.signal == Signal::Order),
+            "baseline (min_rr = 0) phải đặt được lệnh: {baseline:?}"
+        );
+
+        let gated = feed_rr(99.0).await;
+        assert!(
+            !gated.iter().any(|o| o.signal == Signal::Order),
+            "min_rr = 99 vô lý ⇒ không bậc nào đủ ⇒ không được đặt lệnh nào: {gated:?}"
+        );
     }
 
     #[tokio::test]
