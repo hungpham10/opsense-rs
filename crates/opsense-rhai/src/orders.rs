@@ -249,6 +249,10 @@ struct Settings {
     kelly_fraction: f64,
     base_capital: f64,
     settlement_candles: u64,
+    /// RR mục tiêu cho take-profit. `0` ⇒ TP ở bậc kề (hành vi gốc).
+    /// `> 0` ⇒ TP ở bậc đầu tiên đạt `reward / risk >= min_rr`, và lệnh bị
+    /// từ chối nếu không bậc nào đạt (xem `TradingGrid::tp_for_rr`).
+    min_rr: f64,
     /// Genome DAG cho `strategy = "dag"` (JSON như trong config pipeline).
     dag: Option<serde_json::Value>,
     // ── Knob cho `strategy = "rhai"` (đọc trong `fn rebuild`) ──────────────
@@ -281,6 +285,7 @@ impl Default for Settings {
             kelly_fraction: 0.25,
             base_capital: 100_000.0,
             settlement_candles: 0,
+            min_rr: 0.0,
             dag: None,
             grid_min_trades: 3,
             grid_weight_sharpness: 4.0,
@@ -343,6 +348,9 @@ impl Settings {
         if let Some(v) = num("base_capital") {
             s.base_capital = v;
         }
+        if let Some(v) = num("min_rr") {
+            s.min_rr = v;
+        }
         if let Some(v) = int("settlement_candles") {
             s.settlement_candles = v.max(0) as u64;
         }
@@ -367,6 +375,10 @@ impl Settings {
     /// lookback]` — cùng layout với `Graph::init()` (index 0..4) để `Portfolio`
     /// dùng chung không cần biết strategy nào đang chạy. Với DAG, `Graph::init()`
     /// tự có layout riêng nên hai nhánh này không trùng nhau.
+    ///
+    /// **Cố ý giữ đúng 5 phần tử**: caller index thẳng (`&|id| params[id]`) nên
+    /// thêm phần tử ở giữa/cuối đều làm vỡ hợp đồng vị trí. Knob RR đi đường
+    /// riêng: `PortfolioConfig::min_rr`.
     fn params(&self) -> Vec<f64> {
         if (self.strategy == "dag" || self.strategy == "graph")
             && let Ok(graph) = self.dag() {
@@ -404,7 +416,13 @@ impl Settings {
                     // phí. Trước đây thiếu nên script rơi về default và dựng
                     // mốc quá dày ⇒ mọi entry bị kernel lo (`placed=0`).
                     .with_knob("fee_rate", self.fee_rate.into())
-                    .with_knob("grid_levels", (self.grid_levels as i64).into());
+                    .with_knob("grid_levels", (self.grid_levels as i64).into())
+                    // RR đi qua **knob** chứ không phải `params(idx)`: đổi layout
+                    // vị trí sẽ làm vỡ mọi caller index thẳng. Nhờ knob nên
+                    // `fn rebuild` của script vẫn đọc được `param_min_rr` và
+                    // round-trip nó vào `trading_cfg()` cho lần `portfolio_feed`
+                    // kế tiếp.
+                    .with_knob("min_rr", self.min_rr.into());
                 if let Some(amp) = self.grid_level_edge_amp {
                     s = s.with_knob("level_edge_amp", amp.into());
                 }
@@ -440,6 +458,9 @@ impl Settings {
                 settlement_candles: self.settlement_candles,
                 // Nến đã ở station, fetch tự phục vụ từ slice → không cần LRU.
                 cache_enabled: false,
+                // RR mục tiêu cho TP: `0` ⇒ bậc kề (gốc). Kernel đọc thẳng từ
+                // config, không đi qua layout `params()` (hợp đồng theo vị trí).
+                min_rr: self.min_rr,
             },
         )
     }
@@ -1125,7 +1146,18 @@ mod tests {
         assert_eq!(s.grid_levels, 5);
         let s = Settings::from_map(&cfg_map());
         assert_eq!(s.grid_levels, 5);
+        // Layout vị trí giữ nguyên 5 phần tử — `min_rr` đi qua
+        // `PortfolioConfig`, không chiếm index trong `params()`.
         assert_eq!(s.params().len(), 5, "params theo layout strategy.init()");
+        // Mặc định phải TẮT RR ⇒ hành vi đặt lệnh y hệt trước khi có knob.
+        assert_eq!(s.min_rr, 0.0);
+        // Có khai thì parse đúng, đồng thời layout `params()` không đổi.
+        let mut with_rr = cfg_map();
+        with_rr.insert("min_rr".into(), Dynamic::from(0.75));
+        let s = Settings::from_map(&with_rr);
+        assert_eq!(s.min_rr, 0.75);
+        assert_eq!(s.params().len(), 5, "min_rr không lấp index trong params()");
+        assert_eq!(s.params()[3], s.sl_pct, "index 3 (sl_pct) không đổi chỗ");
     }
 
     #[tokio::test]

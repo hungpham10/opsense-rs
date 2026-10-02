@@ -240,6 +240,14 @@ fn trading_cfg() {
     if is_def_var("param_settlement_candles") && type_of(param_settlement_candles) != "()" {
         settlement_candles = param_settlement_candles.to_int();
     }
+    // RR mục tiêu cho take-profit. `0` ⇒ TP ở bậc kề (mặc định, hành vi gốc).
+    // `> 0` ⇒ TP ở bậc đầu tiên đủ `reward / risk >= min_rr`; không bậc nào
+    // đủ thì kernel **từ chối lệnh** thay vì rơi về bậc kề (RR thấp hơn ⇒ lỗ
+    // ngay khi giá chạm tới). Xem `TradingGrid::tp_for_rr`.
+    let min_rr = 0.0;
+    if is_def_var("param_min_rr") && type_of(param_min_rr) != "()" {
+        min_rr = param_min_rr.to_float();
+    }
 
     let cfg = #{
         resolution: resolution,
@@ -255,7 +263,8 @@ fn trading_cfg() {
         fee_rate: fee_rate,
         kelly_fraction: kelly_fraction,
         base_capital: base_capital,
-        settlement_candles: settlement_candles
+        settlement_candles: settlement_candles,
+        min_rr: min_rr
     };
 
     // `strategy = "dag"`: genome DAG build riêng ở Python truyền vào qua

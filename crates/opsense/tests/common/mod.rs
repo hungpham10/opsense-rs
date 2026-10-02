@@ -186,7 +186,8 @@ pub async fn wait_for_stations(
 /// Station `timeseries` bất kỳ đang tồn tại, hoặc `AUDIT_STATION`.
 ///
 /// Test về guard của `queryTimeseries` cần một station **thật** — tên station do
-/// config quyết định (`conf/opsense.conf.toml` khác `strategies/binance/config.toml`),
+/// config quyết định (CI copy `strategies/<name>/config.toml` đè lên
+/// `conf/opsense.conf.toml`; `strategies/default/config.toml` khác `strategies/binance/config.toml`),
 /// nên hardcode tên sẽ chết ở "Station not found" và guard không bao giờ được kiểm.
 #[allow(dead_code)]
 pub async fn any_timeseries_station(c: &opsense::client::OpsenseClient) -> String {

@@ -229,6 +229,7 @@ async fn kernel_accepts_the_higher_win_p() {
             resolution_for_rebuild: "1m".into(),
             settlement_candles: 0,
             cache_enabled: false,
+            min_rr: 0.0,
         },
     )
     .expect("Portfolio nhận strategy script");

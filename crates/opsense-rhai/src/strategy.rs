@@ -344,6 +344,7 @@ mod tests {
                 resolution_for_rebuild: "1m".into(),
                 settlement_candles: 0,
                 cache_enabled: false,
+                min_rr: 0.0,
             },
         )
         .unwrap();

@@ -472,6 +472,41 @@ impl TradingGrid {
             .unwrap_or(self.levels[j])
     }
 
+    /// Take-profit chọn theo **tỉ lệ RR mục tiêu** thay vì bậc kề.
+    ///
+    /// Quét từ `j` ra ngoài và lấy **bậc đầu tiên** mà
+    /// `reward / risk >= target_rr`. `risk` = `entry × sl_pct` (đối xứng hai
+    /// chiều: `sl_long(j)` = `entry × (1 - sl_pct)` nên khoảng cách là
+    /// `entry × sl_pct`). Bậc nào xa hơn thì reward chỉ lớn hơn, nên bậc đầu
+    /// tiên thoả là bậc **rẻ nhất** còn đạt ⇒ không kéo TP đi xa vô ích.
+    ///
+    /// `None` = **không bậc nào trong lưới đạt** ⇒ caller phải từ chối đặt lệnh.
+    /// Quan trọng: `None` KHÔ được quy về `tp_above`/`tp_below`, vì bậc kề
+    /// có thể RR < yêu cầu ⇒ đặt lệnh thì lỗ ngay từ bậc đầu tiên chạm bậc
+    /// kề đó. "Không có bậc nào đạt" và "có bậc kề nhưng RR quá thấp" là hai
+    /// chuyện khác nhau, và chỉ cái thứ nhất mới là lý do bỏ lệnh.
+    pub fn tp_for_rr(&self, j: usize, target_rr: f64, long: bool) -> Option<f64> {
+        let entry = self.levels.get(j)?;
+        let risk = entry * self.sl_pct;
+        if !risk.is_finite() || risk <= 0.0 || !target_rr.is_finite() || target_rr <= 0.0 {
+            return None;
+        }
+        if long {
+            self.levels
+                .iter()
+                .skip(j + 1)
+                .find(|&&tp| (tp - entry) / risk >= target_rr)
+                .copied()
+        } else {
+            self.levels
+                .iter()
+                .take(j)
+                .rev()
+                .find(|&&tp| (entry - tp) / risk >= target_rr)
+                .copied()
+        }
+    }
+
     /// Giá thấp nhất (bậc 0).
     pub fn min(&self) -> f64 {
         self.levels[0]
@@ -739,5 +774,84 @@ mod breakeven_tests {
         assert!(TradingGrid::breakeven_win_p(0.0, 0.008, 0.0002).is_nan());
         assert!(TradingGrid::breakeven_win_p(0.00271, 0.0, 0.0002).is_nan());
         assert!(TradingGrid::breakeven_win_p(-1.0, 0.008, 0.0002).is_nan());
+    }
+
+    // ── `tp_for_rr`: TP chọn theo RR mục tiêu ────────────────────────────
+    //
+    // Grid thử nghiệm: 5 mốc, mỗi mốc cách nhau 0.4% giá, `sl_pct = 0.008`
+    // ⇒ risk ≈ 0.8% giá ⇒ RR mỗi bậc kề ≈ 0.5. Đúng vùng RR của strategy thật
+    // (bậc kề 0.42, hai bậc 0.85), nên test bắt được cả ca "chọn bậc kề" lẫn
+    // ca "phải nhảy bậc".
+    fn rr_grid() -> TradingGrid {
+        TradingGrid::new(5, 100.0, 101.6)
+            .expect("grid hợp lệ")
+            .with_sl_pct(0.008)
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn rr_picks_first_level_that_clears_target() {
+        let g = rr_grid();
+        // entry = mốc 1 (100.4), risk = 0.8032.
+        //   → mốc 2: reward 0.4 ⇒ RR 0.4980
+        //   → mốc 3: reward 0.8 ⇒ RR 0.9960
+        // min_rr = 0.4 ⇒ mốc 2 (bậc kề, RR đã đủ).
+        assert!(close(
+            g.tp_for_rr(1, 0.4, true).expect("mốc 2 đạt RR"),
+            100.8
+        ));
+        // min_rr = 0.6 ⇒ phải NHẢY lên mốc 3, không dừng ở mốc 2.
+        assert!(close(
+            g.tp_for_rr(1, 0.6, true).expect("mốc 3 đạt RR"),
+            101.2
+        ));
+    }
+
+    #[test]
+    fn rr_none_when_no_level_clears_target() {
+        let g = rr_grid();
+        // Mọi bậc trên đều < RR 2.0 ⇒ phải từ chối, KHÔNG rơi về bậc kề.
+        assert!(g.tp_for_rr(1, 2.0, true).is_none());
+    }
+
+    #[test]
+    fn rr_short_mirrors_long() {
+        let g = rr_grid();
+        // entry = mốc 3 (101.2), risk = 0.8096.
+        //   → mốc 2: RR 0.4941   → mốc 1: RR 0.9881
+        assert!(close(
+            g.tp_for_rr(3, 0.4, false).expect("mốc 2 đạt RR"),
+            100.8
+        ));
+        assert!(close(
+            g.tp_for_rr(3, 0.6, false).expect("mốc 1 đạt RR"),
+            100.4
+        ));
+        assert!(g.tp_for_rr(3, 2.0, false).is_none());
+    }
+
+    #[test]
+    fn rr_edge_levels_have_no_room_in_that_direction() {
+        let g = rr_grid();
+        // Mốc cuối không có mốc nào cao hơn ⇒ TP phía trên không tồn tại.
+        assert!(g.tp_for_rr(4, 0.1, true).is_none());
+        // Mốc đầu không có mốc nào thấp hơn ⇒ TP phía dưới không tồn tại.
+        assert!(g.tp_for_rr(0, 0.1, false).is_none());
+        // Ngược chiều thì vẫn tìm thấy (mốc đầu có mốc cao hơn).
+        assert!(g.tp_for_rr(0, 0.1, true).is_some());
+    }
+
+    #[test]
+    fn rr_rejects_nonpositive_target() {
+        let g = rr_grid();
+        // `min_rr = 0` là "tắt RR" ở kernel (rơi về `tp_above`), nên hàm này
+        // trả `None` thay vì âm thầm trả bậc đầu tiên — hai ngữ nghĩa khác nhau.
+        assert!(g.tp_for_rr(1, 0.0, true).is_none());
+        assert!(g.tp_for_rr(1, -1.0, true).is_none());
+        // `j` ngoài dải cũng phải an toàn, không panic.
+        assert!(g.tp_for_rr(99, 0.5, true).is_none());
     }
 }
