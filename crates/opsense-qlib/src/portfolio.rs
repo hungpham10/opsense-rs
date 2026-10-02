@@ -1,7 +1,9 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::future::Future;
 use std::io::{Error, ErrorKind};
+use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,19 +48,48 @@ struct BlockCache {
     covered_first: u64,
     /// Timestamp nến cuối cùng + 1 trong block này (actual, exclusive)
     covered_last: u64,
+    /// Khoảng cách (giây) nhỏ nhất giữa hai nến liền kề. `0` = chưa đo được.
+    ///
+    /// Nhánh live của `update_blocks` cần step để tính `covered_last` mà
+    /// không mở rộng coverage quá mốc thật. Trước đây phải quét
+    /// `windows(2)` **toàn bộ** block mỗi lần update (10k phần tử với nến
+    /// 1m) chỉ để lấy một con số; giờ tính một lần lúc merge.
+    min_gap: u64,
 }
 
 impl BlockCache {
     /// Extract candles trong [from, to) từ block này.
-    fn subrange(&self, from: u64, to: u64) -> Vec<CandleStick> {
+    fn subrange(&self, from: u64, to: u64) -> &[CandleStick] {
         let start = self.candles.partition_point(|c| (c.t as u64) < from);
         let end = self.candles.partition_point(|c| (c.t as u64) < to);
-        self.candles[start..end].to_vec()
+        &self.candles[start..end]
+    }
+
+    /// Bước giá dùng cho `covered_last` của nhánh live. Block chỉ có một nến
+    /// (hoặc toàn nến trùng `t`) thì không đo được → lấy fallback 5 phút,
+    /// đúng như cũ.
+    fn step_secs(&self) -> u64 {
+        if self.min_gap > 0 { self.min_gap } else { 300 }
     }
 }
 
+/// Khoảng cách (giây) nhỏ nhất giữa hai nến liền kề; `0` = không đo được.
+fn min_gap(candles: &[CandleStick]) -> u64 {
+    candles
+        .windows(2)
+        .map(|w| (w[1].t - w[0].t).unsigned_abs())
+        .filter(|&d| d > 0)
+        .min()
+        .unwrap_or(0)
+}
+
 /// LRU cache cho một cache key (ví dụ "1H:analysis"), keyed by block_id.
-type BlockLru = opsense_mlib::lru::LruCache<i64, BlockCache, 32>;
+///
+/// Value là `Arc<BlockCache>` **cố ý**: `LruCache::get` clone value (`lru.rs`),
+/// nên value là `BlockCache` thì mỗi lần đọc block sẽ deep-copy cả
+/// `Vec<CandleStick>` (~10k nến ≈ 484 KB với nến 1m). `Arc` biến lần clone đó
+/// thành 8 byte; chỉ `update_blocks` mới dựng block mới khi thật sự có nến mới.
+type BlockLru = opsense_mlib::lru::LruCache<i64, Arc<BlockCache>, 32>;
 
 /// Future một fetch closure trả về (`'static` — closure tự sở hữu capture).
 type LoaderFuture = Pin<Box<dyn Future<Output = Result<Vec<CandleStick>, Error>> + Send + 'static>>;
@@ -485,16 +516,16 @@ impl Portfolio {
             self.prefetch_cache(lookback, from, to).await?;
         }
 
-        let resolution = self.config.resolution_for_test.clone();
+        let resolution = &self.config.resolution_for_test;
 
         // Con trỏ khởi tạo: `next_ts == 0` nghĩa là session chưa chạy. Chỉ khởi
         // tạo một lần — nếu không, lần `evaluate` thứ hai (chạy tiếp) sẽ nhảy
         // con trỏ về đầu và xử lý lại nến cũ.
         if session.next_ts == 0 {
-            let step_ts = to_timestamp_secs(&resolution);
+            let step_ts = to_timestamp_secs(resolution);
             let first_valid = self
                 .calendar
-                .next(from.saturating_sub(step_ts), &resolution);
+                .next(from.saturating_sub(step_ts), resolution);
             session.next_ts = if first_valid > from && first_valid < to {
                 first_valid
             } else {
@@ -560,7 +591,10 @@ impl Portfolio {
         const KELLY_FRACTION: usize = 0;
         const BASE_CAPITAL: usize = 1;
 
-        let resolution = self.config.resolution_for_test.clone();
+        // Mượn thay vì `.clone()`: `forward` chạy **mỗi nến**, nên một
+        // `String` clone ở đây là một malloc mỗi nến chỉ để đưa cho
+        // `calendar.next` ở cuối hàm.
+        let resolution = &self.config.resolution_for_test;
         // T+N: `settlement_candles == 0` → theo thị trường (StockCalendar → T+3,
         // Crypto/Forex → T+0); giá trị >0 → ép T+N cố định.
         let settlement = if self.config.settlement_candles > 0 {
@@ -653,7 +687,7 @@ impl Portfolio {
         else {
             // Chưa có nến mới trong cửa sổ này. Đẩy con trỏ theo calendar để
             // lần gọi sau không hỏi lại đúng mốc cũ.
-            session.next_ts = self.calendar.next(current, &resolution);
+            session.next_ts = self.calendar.next(current, resolution);
             tracing::debug!(
                 ts = current,
                 next_ts = session.next_ts,
@@ -734,7 +768,7 @@ impl Portfolio {
         // vì `review_at`, mà nến tại đúng `review_at` thì nằm ngoài khoảng
         // `[current, review_at)` bán mở ⇒ **bị bỏ sót, không bao giờ được xử lý**.
         // Đo được: 20 nến chỉ advance 19, và chỉ có 3 lần rebuild thay vì 2.
-        session.next_ts = self.calendar.next(candle.t.max(0) as u64, &resolution);
+        session.next_ts = self.calendar.next(candle.t.max(0) as u64, resolution);
 
         tracing::debug!(
             ts = candle.t,
@@ -758,8 +792,12 @@ impl Portfolio {
         let loader = self.loader.clone();
         let cache = self.cache.clone();
         let calendar = self.calendar.clone();
-        let resolution = resolution.to_string();
-        let cache_key = format!("{resolution}:{kind}");
+        // `Arc<str>` chứ không `String`: `FetchFn` trả future `'static` nên mỗi
+        // lượt gọi phải **sở hữu** capture. Với `String` đó là 2 malloc mỗi
+        // fetch — mà `forward` gọi `fetch` **mỗi nến**, nên backtest phải trả
+        // 2 chuỗi/nến chỉ để đọc lại rồi vứt đi. `Arc<str>` clone là 8 byte.
+        let resolution: Arc<str> = Arc::from(resolution);
+        let cache_key: Arc<str> = Arc::from(format!("{resolution}:{kind}").as_str());
         let cache_enabled = self.config.cache_enabled;
 
         Box::new(move |from: u64, to: u64| {
@@ -928,6 +966,9 @@ impl Portfolio {
         let ts = candle.t.max(0) as u64;
         let mut events = Vec::new();
         let mut grids_touched = 0usize;
+        // Bậc nào đã có lệnh mở, dạng bit theo **chỉ số tương đối** trong cửa
+        // sổ bậc của grid. Dùng lại qua các grid ⇒ cấp phát tối đa 1 lần/lượt.
+        let mut taken: Vec<u64> = Vec::new();
 
         for (ig, grid) in plan.iter().enumerate() {
             if candle.h < grid.min() || candle.l > grid.max() {
@@ -939,131 +980,152 @@ impl Portfolio {
             // đều chỉ biểu hiện là "không có lệnh".
 
             grids_touched += 1;
-            for il in 0..grid.num_levels() {
+
+            // Cửa sổ bậc bị nến phủ: `levels` tăng dần (TradingGrid::new
+            // luôn sort), nên tập `{ il : candle.l ≤ levels[il] ≤ candle.h }`
+            // là một đoạn **liên tiếp** — `lower_bound(l)` đến
+            // `upper_bound(h)`. Trước đây quét cả K bậc rồi mới lọc, tức
+            // O(K) cho mỗi grid mỗi nến; giờ O(log K) và vòng lặp chỉ chạy
+            // trên đúng các bậc cần xét.
+            let levels = grid.levels();
+            let window = Self::touched_levels(levels, candle.l, candle.h);
+            let (lo, hi) = (window.start, window.end);
+            if lo >= hi {
+                continue;
+            }
+
+            // Một lượt duyệt `orders` cho cả cửa sổ, thay vì `.any()` **mỗi
+            // bậc**: O(cửa sổ × lệnh mở) → O(lệnh mở).
+            let words = hi - lo;
+            taken.clear();
+            taken.resize(words.div_ceil(64), 0);
+            for o in orders.iter() {
+                if o.grid_index == ig && o.level_index >= lo && o.level_index < hi {
+                    let bit = o.level_index - lo;
+                    taken[bit / 64] |= 1 << (bit % 64);
+                }
+            }
+
+            for il in lo..hi {
+                let bit = il - lo;
+                if taken[bit / 64] >> (bit % 64) & 1 == 1 {
+                    continue;
+                }
                 let entry_price = grid.level_price(il);
 
-                if entry_price >= candle.l && entry_price <= candle.h {
-                    if orders
-                        .iter()
-                        .any(|o| o.grid_index == ig && o.level_index == il)
-                    {
-                        continue;
-                    }
+                let is_long = entry_price <= (grid.min() + grid.max()) / 2.0;
+                let (dtype, win_p, sl_price) = if is_long {
+                    (
+                        OrderType::Long,
+                        grid.long_win_pct(il) * grid.weight(il, id),
+                        grid.sl_long(il),
+                    )
+                } else {
+                    (
+                        OrderType::Short,
+                        grid.short_win_pct(il) * grid.weight(il, id),
+                        grid.sl_short(il),
+                    )
+                };
 
-                    let is_long = entry_price <= (grid.min() + grid.max()) / 2.0;
-                    let (dtype, win_p, sl_price) = if is_long {
-                        (
-                            OrderType::Long,
-                            grid.long_win_pct(il) * grid.weight(il, id),
-                            grid.sl_long(il),
-                        )
-                    } else {
-                        (
-                            OrderType::Short,
-                            grid.short_win_pct(il) * grid.weight(il, id),
-                            grid.sl_short(il),
-                        )
-                    };
-
-                    // TP theo RR mục tiêu khi `min_rr > 0`; `0` ⇒ giữ bậc kề
-                    // như cũ (hành vi **không đổi** so với trước knob này).
-                    let tp_price = if min_rr > 0.0 {
-                        match grid.tp_for_rr(il, min_rr, is_long) {
-                            Some(tp) => tp,
-                            None => {
-                                // Không bậc nào trong lưới đạt RR yêu cầu ⇒ bỏ
-                                // lệnh. KHÔNG rơi về bậc kề: bậc kề RR thấp hơn
-                                // thì lệnh lỗ ngay khi giá chạm tới nó.
-                                let reason = format!(
-                                    "không có bậc nào đạt min_rr {min_rr:.4} (risk {:.6}, cần reward {:.6})",
-                                    grid.stoploss_pct(),
-                                    grid.stoploss_pct() * min_rr
-                                );
-                                tracing::debug!(
-                                    ts,
-                                    grid = ig,
-                                    level = il,
-                                    entry = entry_price,
-                                    dtype = ?dtype,
-                                    "bị lo vì không có bậc nào đủ RR"
-                                );
-                                events.push(OrderEvent::Rejected {
-                                    ts,
-                                    grid: ig,
-                                    level: il,
-                                    reason,
-                                });
-                                continue;
-                            }
+                // TP theo RR mục tiêu khi `min_rr > 0`; `0` ⇒ giữ bậc kề
+                // như cũ (hành vi **không đổi** so với trước knob này).
+                let tp_price = if min_rr > 0.0 {
+                    match grid.tp_for_rr(il, min_rr, is_long) {
+                        Some(tp) => tp,
+                        None => {
+                            // Không bậc nào trong lưới đạt RR yêu cầu ⇒ bỏ
+                            // lệnh. KHÔNG rơi về bậc kề: bậc kề RR thấp hơn
+                            // thì lệnh lỗ ngay khi giá chạm tới nó.
+                            let reason = format!(
+                                "không có bậc nào đạt min_rr {min_rr:.4} (risk {:.6}, cần reward {:.6})",
+                                grid.stoploss_pct(),
+                                grid.stoploss_pct() * min_rr
+                            );
+                            tracing::debug!(
+                                ts,
+                                grid = ig,
+                                level = il,
+                                entry = entry_price,
+                                dtype = ?dtype,
+                                "bị lo vì không có bậc nào đủ RR"
+                            );
+                            events.push(OrderEvent::Rejected {
+                                ts,
+                                grid: ig,
+                                level: il,
+                                reason,
+                            });
+                            continue;
                         }
-                    } else if is_long {
-                        grid.tp_above(il)
-                    } else {
-                        grid.tp_below(il)
-                    };
-
-                    let expected_profit_pct = if dtype == OrderType::Long {
-                        (tp_price - entry_price) / entry_price
-                    } else {
-                        (entry_price - tp_price) / entry_price
-                    };
-
-                    // Một lệnh limit vào rồi đóng ở TP trả **hai** lần phí sàn
-                    // (vào + ra), nên lợi nhuận thực là
-                    // `expected_profit_pct − 2 × fee_rate`. Cổng lọc trước đây
-                    // chỉ so với **một** `fee_rate` ⇒ lọt qua những lệnh lỗ
-                    // sau phí. Dùng đúng `TradingGrid::min_profitable_step`
-                    // (2 × fee × giá) cho khớp, và để con số này là nguồn
-                    // duy nhất thay vì lặp lại ở script.
-                    let roundtrip_fee_pct = fee.round_trip_rate();
-                    if expected_profit_pct <= roundtrip_fee_pct {
-                        let reason = format!(
-                            "expected_profit_pct {expected_profit_pct:.6} <= roundtrip fee \
-                             {roundtrip_fee_pct:.6}"
-                        );
-                        // Log lý do + số tiền: `expected_profit_pct <= fee_rate`
-                        // là khi bước giữa hai mốc nhỏ hơn `fee × giá`, nên
-                        // biểu diễn bằng USD sẽ thấy ngay mốc quá dày.
-                        tracing::debug!(
-                            ts,
-                            grid = ig,
-                            level = il,
-                            entry = entry_price,
-                            tp = tp_price,
-                            step_cash = (tp_price - entry_price).abs(),
-                            need_cash = roundtrip_fee_pct * entry_price,
-                            dtype = ?dtype,
-                            "bị lo vì lời sau phí không đủ"
-                        );
-                        events.push(OrderEvent::Rejected {
-                            ts,
-                            grid: ig,
-                            level: il,
-                            reason,
-                        });
-                        continue;
                     }
+                } else if is_long {
+                    grid.tp_above(il)
+                } else {
+                    grid.tp_below(il)
+                };
 
-                    let order = Order {
-                        size: Self::calculate_order_size(
-                            win_p,
-                            grid.stoploss_pct(),
-                            kelly_fraction,
-                            base_capital,
-                        ),
-                        grid_index: ig,
-                        level_index: il,
-                        dtype,
-                        entry_price,
-                        sl_price,
-                        tp_price,
-                        unlock_seq,
-                        ..Default::default()
-                    };
+                let expected_profit_pct = if dtype == OrderType::Long {
+                    (tp_price - entry_price) / entry_price
+                } else {
+                    (entry_price - tp_price) / entry_price
+                };
 
-                    orders.push(order);
-                    events.push(OrderEvent::Placed { ts, order });
+                // Một lệnh limit vào rồi đóng ở TP trả **hai** lần phí sàn
+                // (vào + ra), nên lợi nhuận thực là
+                // `expected_profit_pct − 2 × fee_rate`. Cổng lọc trước đây
+                // chỉ so với **một** `fee_rate` ⇒ lọt qua những lệnh lỗ
+                // sau phí. Dùng đúng `TradingGrid::min_profitable_step`
+                // (2 × fee × giá) cho khớp, và để con số này là nguồn
+                // duy nhất thay vì lặp lại ở script.
+                let roundtrip_fee_pct = fee.round_trip_rate();
+                if expected_profit_pct <= roundtrip_fee_pct {
+                    let reason = format!(
+                        "expected_profit_pct {expected_profit_pct:.6} <= roundtrip fee \
+                         {roundtrip_fee_pct:.6}"
+                    );
+                    // Log lý do + số tiền: `expected_profit_pct <= fee_rate`
+                    // là khi bước giữa hai mốc nhỏ hơn `fee × giá`, nên
+                    // biểu diễn bằng USD sẽ thấy ngay mốc quá dày.
+                    tracing::debug!(
+                        ts,
+                        grid = ig,
+                        level = il,
+                        entry = entry_price,
+                        tp = tp_price,
+                        step_cash = (tp_price - entry_price).abs(),
+                        need_cash = roundtrip_fee_pct * entry_price,
+                        dtype = ?dtype,
+                        "bị lo vì lời sau phí không đủ"
+                    );
+                    events.push(OrderEvent::Rejected {
+                        ts,
+                        grid: ig,
+                        level: il,
+                        reason,
+                    });
+                    continue;
                 }
+
+                let order = Order {
+                    size: Self::calculate_order_size(
+                        win_p,
+                        grid.stoploss_pct(),
+                        kelly_fraction,
+                        base_capital,
+                    ),
+                    grid_index: ig,
+                    level_index: il,
+                    dtype,
+                    entry_price,
+                    sl_price,
+                    tp_price,
+                    unlock_seq,
+                    ..Default::default()
+                };
+
+                orders.push(order);
+                events.push(OrderEvent::Placed { ts, order });
             }
         }
 
@@ -1229,7 +1291,12 @@ impl Portfolio {
             }
         }
 
-        let total_trades = orders.len();
+        // Đếm theo `pnl_list` (lệnh **đã có** `pnl_pct`), không theo
+        // `orders.len()`: mọi metric bên dưới — win rate, mean, std, downside
+        // std — đều chia cho `total_trades`, nên mẫu số phải khớp đúng tập
+        // `pnl_list`. `orders.len()` lệch khi history chứa lệnh chưa có
+        // `pnl_pct` ⇒ `std_dev` bị chia nhỏ quá mức và Sharpe phóng lên.
+        let total_trades = pnl_list.len();
         let losses = total_trades - wins;
         let win_rate = wins as f64 / total_trades as f64;
 
@@ -1333,6 +1400,23 @@ impl Portfolio {
         base_capital * safe_kelly
     }
 
+    /// Cửa sổ chỉ số bậc mà nến `[low, high]` phủ — tức tập
+    /// `{ il : low ≤ levels[il] ≤ high }`.
+    ///
+    /// `levels` **phải tăng dần**: `TradingGrid::from_levels` luôn sort nên mọi
+    /// grid dựng từ plan đều thoả. Với mảng tăng dần, tập trên là một đoạn
+    /// liên tiếp nên tìm bằng hai binary search thay vì quét cả K bậc.
+    #[inline]
+    fn touched_levels(levels: &[f64], low: f64, high: f64) -> Range<usize> {
+        // `f64` **không** implement `Ord` (chỉ `PartialOrd`), nên phải tự quyết
+        // thứ tự khi NaN. `unwrap_or(Equal)` là đúng thứ `from_levels` dùng
+        // để sort ⇒ binary search ở đây nhìn cùng thứ tự với lúc dựng grid.
+        let cmp = |price: &f64, level: &f64| price.partial_cmp(level).unwrap_or(Ordering::Equal);
+        let lo = opsense_mlib::binarysearch::lower_bound(levels, &low, cmp);
+        let hi = opsense_mlib::binarysearch::upper_bound(levels, &high, cmp);
+        lo..hi
+    }
+
     /// Tính block_id cho timestamp.
     #[inline]
     fn block_id(ts: u64) -> i64 {
@@ -1363,14 +1447,16 @@ impl Portfolio {
                 return None;
             }
 
-            result.extend(block.subrange(needed_start, needed_end));
+            result.extend_from_slice(block.subrange(needed_start, needed_end));
         }
 
         if result.is_empty() && from < to {
             return Some(vec![]);
         }
 
-        result.sort_by_key(|c| c.t);
+        // Block duyệt tăng dần và `subrange` trả slice đã sort ⇒ `result` đã
+        // tăng nghiêm ngặt, không cần `sort_by_key` lại trên mọi lần đọc cache.
+        // `dedup_by_key` giữ lại làm lưới an toàn (O(n), không sắp xếp lại).
         result.dedup_by_key(|c| c.t);
         Some(result)
     }
@@ -1389,29 +1475,50 @@ impl Portfolio {
         original_to: u64,
         now: u64,
     ) {
-        // Nhóm candles theo block
-        let mut groups: std::collections::HashMap<i64, Vec<CandleStick>> =
-            std::collections::HashMap::new();
-        for c in candles {
-            let bid = Self::block_id(c.t as u64);
-            groups.entry(bid).or_default().push(*c);
-        }
+        // Nhóm candles theo block **bằng chỉ số**, không bằng
+        // `HashMap<i64, Vec<CandleStick>>`: `t` quyết định `block_id` nên mỗi
+        // block là một đoạn **liên tiếp** — chỉ cần hai `partition_point`
+        // (O(log n)) là cắt được. `HashMap` trước đây cấp phát một `Vec` riêng
+        // cho *từng* block rồi copy thêm lần nữa lúc merge.
+        //
+        // `candles` **phải tăng dần** — caller đã sort sẵn (và cũng cần thứ tự
+        // đó cho `partition_point` của chính nó), nên ở đây không copy lần nữa.
+        debug_assert!(
+            candles.windows(2).all(|w| w[0].t <= w[1].t),
+            "update_blocks cần nến tăng dần"
+        );
 
         let start_bid = Self::block_id(query_from);
         let end_bid = Self::block_id(query_to.saturating_sub(1));
 
         for bid in start_bid..=end_bid {
-            let mut block = lru.get(&bid).unwrap_or(BlockCache {
-                candles: vec![],
-                covered_first: u64::MAX,
-                covered_last: u64::MIN,
-            });
+            let block_start = (bid * BLOCK_SECS) as u64;
+            let block_end = ((bid + 1) * BLOCK_SECS) as u64;
+            let fresh = &candles[
+                candles.partition_point(|c| (c.t as u64) < block_start)
+                    ..candles.partition_point(|c| (c.t as u64) < block_end)
+            ];
+
+            let mut block = lru.get(&bid).map_or_else(
+                || BlockCache {
+                    candles: vec![],
+                    covered_first: u64::MAX,
+                    covered_last: u64::MIN,
+                    min_gap: 0,
+                },
+                |cached| BlockCache::clone(&cached),
+            );
+            let old_first = block.covered_first;
+            let old_last = block.covered_last;
 
             // Merge candles mới (nếu có)
-            if let Some(new_cands) = groups.get_mut(&bid) {
-                block.candles.append(new_cands);
+            if !fresh.is_empty() {
+                block.candles.extend_from_slice(fresh);
                 block.candles.sort_by_key(|c| c.t);
                 block.candles.dedup_by_key(|c| c.t);
+                // `windows(2)` chỉ chạy ở đây — lúc merge có nến mới — thay
+                // vì mỗi lần update block như trước đây.
+                block.min_gap = min_gap(&block.candles);
             }
 
             // Cập nhật coverage cho block này dùng query boundary.
@@ -1425,14 +1532,10 @@ impl Portfolio {
             //   KHÔNG dùng `effective_to` — tránh false HIT khi API chưa có
             //   nến cuối (live data lag). Nếu block rỗng (không candle), dùng
             //   `effective_to` để claim coverage cho khoảng empty đã query.
-            let block_start = (bid * BLOCK_SECS) as u64;
-            let block_end = ((bid + 1) * BLOCK_SECS) as u64;
             let effective_from = query_from.max(block_start);
             let effective_to = query_to.min(block_end);
 
             // covered_first: luôn extend về phía query_from
-            #[cfg(debug_assertions)]
-            let old_first = block.covered_first;
             block.covered_first = block.covered_first.min(effective_from);
 
             // covered_last:
@@ -1441,36 +1544,27 @@ impl Portfolio {
             //     cuối cùng do non-trading gap (weekend, after-hours).
             //   - Live (now < original_to): cap tại last_t + step để tránh
             //     false HIT khi API chưa có nến cuối (data lag).
-            #[cfg(debug_assertions)]
-            let old_last = block.covered_last;
-
-            if let (Some(_), Some(last)) = (block.candles.first(), block.candles.last()) {
+            if let Some(&last) = block.candles.last() {
                 if now >= original_to {
                     // Historical — dữ liệu hoàn chỉnh, extend toàn bộ query range
                     block.covered_last = block.covered_last.max(effective_to);
                 } else {
                     // Live — cap tại candle extent để tránh false HIT
-                    let step = block
-                        .candles
-                        .windows(2)
-                        .map(|w| (w[1].t - w[0].t).unsigned_abs())
-                        .filter(|&d| d > 0)
-                        .min()
-                        .unwrap_or(300); // fallback 5 phút
-                    let extent = (last.t as u64).saturating_add(step);
+                    let extent = (last.t as u64).saturating_add(block.step_secs());
                     block.covered_last = block.covered_last.max(extent).min(effective_to);
                 }
             } else {
                 // Block rỗng — claim coverage từ query range
-                if block.covered_first == u64::MAX {
-                    block.covered_first = effective_from;
-                    block.covered_last = effective_to;
-                } else {
-                    block.covered_last = block.covered_last.max(effective_to);
-                }
+                //
+                // Trước đây có nhánh `if covered_first == u64::MAX` gán thẳng
+                // `covered_first = effective_from`, nhưng `covered_first` đã bị
+                // `min(effective_from)` ở trên nên nhánh đó **không bao giờ
+                // vào** — và cả hai nhánh cho ra cùng kết quả. Giữ một nhánh.
+                block.covered_last = block.covered_last.max(effective_to);
             }
 
-            lru.put(bid, block.clone());
+            let new_first = block.covered_first;
+            let new_last = block.covered_last;
 
             #[cfg(debug_assertions)]
             if old_first != block.covered_first || old_last != block.covered_last {
@@ -1483,6 +1577,13 @@ impl Portfolio {
                     block.covered_last,
                     block.candles.len(),
                 );
+            }
+
+            // Block không có nến mới **và** coverage không đổi ⇒ không có gì
+            // để ghi. Trước đây vẫn `put` mọi block trong dải query, nên mỗi
+            // lần cache miss đều tốn một clone toàn block cho một thay đổi rỗng.
+            if !fresh.is_empty() || new_first != old_first || new_last != old_last {
+                lru.put(bid, Arc::new(block));
             }
         }
     }
@@ -1609,8 +1710,16 @@ impl Portfolio {
         #[cfg(debug_assertions)]
         let t_fetch = std::time::Instant::now();
 
-        let candles_full =
+        let mut candles_full =
             Self::fetch_direct(loader, resolution, block_from, block_to, now).await?;
+
+        // Sort **một lần** ngay tại đây. `update_blocks` dùng `partition_point`
+        // để cắt block, và chính dòng `partition_point` cuối hàm cũng cần nến
+        // tăng dần — trước đây hai chỗ đó đều **âm thầm giả định** loader trả
+        // nến đã sort, và chỉ `update_blocks` mới sort lại (theo block). Giờ thứ
+        // tự được bảo đảm ở đúng một chỗ, và sort trên dữ liệu gần như đã
+        // tăng dần thì gần như O(n).
+        candles_full.sort_by_key(|c| c.t);
 
         #[cfg(debug_assertions)]
         println!(
@@ -1946,6 +2055,49 @@ mod tests {
             ),
             "lý do từ chối phải nói rõ min_rr, không từ chối im lặng: {events:?}"
         );
+    }
+
+    /// `touched_levels` (binary search) phải cho **đúng** tập bậc mà
+    /// `open_orders` trước đây tìm bằng cách quét hết K bậc rồi lọc
+    /// `low ≤ levels[il] ≤ high`.
+    ///
+    /// Đây là hợp đồng của tối ưu: lệnh phải được đặt ở **y hệt** những bậc cũ
+    /// đặt, nếu không thì backtest và live lệch nhau — mà backtest thì luôn
+    /// "xanh" nên không ai phát hiện. Vì vậy test so trực tiếp với cách quét
+    /// tuyến tính trên nhiều khoảng, gồm cả biên (dưới/trùng/trên hết bậc và
+    /// nến nuốt trọn grid).
+    #[test]
+    fn touched_levels_matches_linear_scan() {
+        let grid = TradingGrid::from_levels((0..64).map(|i| 100.0 + i as f64 * 0.25).collect())
+            .expect("grid hợp lệ");
+        let levels = grid.levels().to_vec();
+
+        let linear = |low: f64, high: f64| -> Vec<usize> {
+            levels
+                .iter()
+                .enumerate()
+                .filter(|&(_, &lvl)| lvl >= low && lvl <= high)
+                .map(|(i, _)| i)
+                .collect()
+        };
+
+        let spans = [
+            (99.0, 200.0),      // phủ trọn grid
+            (200.0, 300.0),     // nằm trên toàn bộ grid
+            (0.0, 1.0),         // nằm dưới toàn bộ grid
+            (100.0, 100.0),     // trùng đúng bậc đầu
+            (115.75, 115.75),   // trùng đúng bậc cuối
+            (110.0, 110.0),     // trùng bậc giữa, chỉ số lẻ
+            (104.0, 106.5),     // cắt qua nhiều bậc
+            (115.9, 116.1),     // quanh bậc cuối
+            (99.9, 100.1),      // quanh bậc đầu
+            (100.125, 100.125), // trùng giữa hai bậc, chỉ số lẻ
+        ];
+        for (low, high) in spans {
+            let expected = linear(low, high);
+            let got: Vec<usize> = Portfolio::touched_levels(&levels, low, high).collect();
+            assert_eq!(got, expected, "cửa sổ lệch ở span [{low}, {high}]");
+        }
     }
 
     fn portfolio(config: PortfolioConfig) -> Portfolio {
