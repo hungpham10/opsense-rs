@@ -516,16 +516,16 @@ impl Portfolio {
             self.prefetch_cache(lookback, from, to).await?;
         }
 
-        let resolution = self.config.resolution_for_test.clone();
+        let resolution = &self.config.resolution_for_test;
 
         // Con trỏ khởi tạo: `next_ts == 0` nghĩa là session chưa chạy. Chỉ khởi
         // tạo một lần — nếu không, lần `evaluate` thứ hai (chạy tiếp) sẽ nhảy
         // con trỏ về đầu và xử lý lại nến cũ.
         if session.next_ts == 0 {
-            let step_ts = to_timestamp_secs(&resolution);
+            let step_ts = to_timestamp_secs(resolution);
             let first_valid = self
                 .calendar
-                .next(from.saturating_sub(step_ts), &resolution);
+                .next(from.saturating_sub(step_ts), resolution);
             session.next_ts = if first_valid > from && first_valid < to {
                 first_valid
             } else {
@@ -591,7 +591,10 @@ impl Portfolio {
         const KELLY_FRACTION: usize = 0;
         const BASE_CAPITAL: usize = 1;
 
-        let resolution = self.config.resolution_for_test.clone();
+        // Mượn thay vì `.clone()`: `forward` chạy **mỗi nến**, nên một
+        // `String` clone ở đây là một malloc mỗi nến chỉ để đưa cho
+        // `calendar.next` ở cuối hàm.
+        let resolution = &self.config.resolution_for_test;
         // T+N: `settlement_candles == 0` → theo thị trường (StockCalendar → T+3,
         // Crypto/Forex → T+0); giá trị >0 → ép T+N cố định.
         let settlement = if self.config.settlement_candles > 0 {
@@ -684,7 +687,7 @@ impl Portfolio {
         else {
             // Chưa có nến mới trong cửa sổ này. Đẩy con trỏ theo calendar để
             // lần gọi sau không hỏi lại đúng mốc cũ.
-            session.next_ts = self.calendar.next(current, &resolution);
+            session.next_ts = self.calendar.next(current, resolution);
             tracing::debug!(
                 ts = current,
                 next_ts = session.next_ts,
@@ -765,7 +768,7 @@ impl Portfolio {
         // vì `review_at`, mà nến tại đúng `review_at` thì nằm ngoài khoảng
         // `[current, review_at)` bán mở ⇒ **bị bỏ sót, không bao giờ được xử lý**.
         // Đo được: 20 nến chỉ advance 19, và chỉ có 3 lần rebuild thay vì 2.
-        session.next_ts = self.calendar.next(candle.t.max(0) as u64, &resolution);
+        session.next_ts = self.calendar.next(candle.t.max(0) as u64, resolution);
 
         tracing::debug!(
             ts = candle.t,
@@ -789,8 +792,12 @@ impl Portfolio {
         let loader = self.loader.clone();
         let cache = self.cache.clone();
         let calendar = self.calendar.clone();
-        let resolution = resolution.to_string();
-        let cache_key = format!("{resolution}:{kind}");
+        // `Arc<str>` chứ không `String`: `FetchFn` trả future `'static` nên mỗi
+        // lượt gọi phải **sở hữu** capture. Với `String` đó là 2 malloc mỗi
+        // fetch — mà `forward` gọi `fetch` **mỗi nến**, nên backtest phải trả
+        // 2 chuỗi/nến chỉ để đọc lại rồi vứt đi. `Arc<str>` clone là 8 byte.
+        let resolution: Arc<str> = Arc::from(resolution);
+        let cache_key: Arc<str> = Arc::from(format!("{resolution}:{kind}").as_str());
         let cache_enabled = self.config.cache_enabled;
 
         Box::new(move |from: u64, to: u64| {
@@ -1469,13 +1476,17 @@ impl Portfolio {
         now: u64,
     ) {
         // Nhóm candles theo block **bằng chỉ số**, không bằng
-        // `HashMap<i64, Vec<CandleStick>>`: `t` quyết định `block_id` nên sau
-        // khi sort, mỗi block là một đoạn **liên tiếp** — chỉ cần hai
-        // `partition_point` (O(log n)) là cắt được. `HashMap` trước đây cấp
-        // phát một `Vec` riêng cho *từng* block rồi copy thêm lần nữa lúc
-        // merge.
-        let mut sorted: Vec<CandleStick> = candles.to_vec();
-        sorted.sort_by_key(|c| c.t);
+        // `HashMap<i64, Vec<CandleStick>>`: `t` quyết định `block_id` nên mỗi
+        // block là một đoạn **liên tiếp** — chỉ cần hai `partition_point`
+        // (O(log n)) là cắt được. `HashMap` trước đây cấp phát một `Vec` riêng
+        // cho *từng* block rồi copy thêm lần nữa lúc merge.
+        //
+        // `candles` **phải tăng dần** — caller đã sort sẵn (và cũng cần thứ tự
+        // đó cho `partition_point` của chính nó), nên ở đây không copy lần nữa.
+        debug_assert!(
+            candles.windows(2).all(|w| w[0].t <= w[1].t),
+            "update_blocks cần nến tăng dần"
+        );
 
         let start_bid = Self::block_id(query_from);
         let end_bid = Self::block_id(query_to.saturating_sub(1));
@@ -1483,9 +1494,9 @@ impl Portfolio {
         for bid in start_bid..=end_bid {
             let block_start = (bid * BLOCK_SECS) as u64;
             let block_end = ((bid + 1) * BLOCK_SECS) as u64;
-            let fresh = &sorted[
-                sorted.partition_point(|c| (c.t as u64) < block_start)
-                    ..sorted.partition_point(|c| (c.t as u64) < block_end)
+            let fresh = &candles[
+                candles.partition_point(|c| (c.t as u64) < block_start)
+                    ..candles.partition_point(|c| (c.t as u64) < block_end)
             ];
 
             let mut block = lru.get(&bid).map_or_else(
@@ -1699,8 +1710,16 @@ impl Portfolio {
         #[cfg(debug_assertions)]
         let t_fetch = std::time::Instant::now();
 
-        let candles_full =
+        let mut candles_full =
             Self::fetch_direct(loader, resolution, block_from, block_to, now).await?;
+
+        // Sort **một lần** ngay tại đây. `update_blocks` dùng `partition_point`
+        // để cắt block, và chính dòng `partition_point` cuối hàm cũng cần nến
+        // tăng dần — trước đây hai chỗ đó đều **âm thầm giả định** loader trả
+        // nến đã sort, và chỉ `update_blocks` mới sort lại (theo block). Giờ thứ
+        // tự được bảo đảm ở đúng một chỗ, và sort trên dữ liệu gần như đã
+        // tăng dần thì gần như O(n).
+        candles_full.sort_by_key(|c| c.t);
 
         #[cfg(debug_assertions)]
         println!(
