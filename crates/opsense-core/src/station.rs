@@ -340,6 +340,11 @@ impl TimeseriesStation {
     /// task: flush buffer ra lake parquet + snapshot/compact + retention trim
     /// định kỳ, để S3 luôn tiến tới trạng thái mới nhất.
     pub async fn from_storage(id: &str, cfg: &StorageConfig) -> Result<Self, Error> {
+        // Ghi đè per-station (`[storage.stations.<id>]`) phải resolve TRƯỚC khi
+        // đọc `block_secs`, mở backend và cấu hình lịch nền — nếu không, cả 3
+        // đều đi bằng cấu hình cấp ngoài và override im lặng không có tác dụng.
+        let resolved = cfg.for_station(id);
+        let cfg: &StorageConfig = &resolved;
         let mut station = Self::new(HOT_BLOCKS, Some(cfg.block_secs as i64));
 
         if let Some(ts) = open_backend(id, cfg, "timeseries").await?.into_timeseries() {
@@ -425,6 +430,16 @@ impl TimeseriesStation {
         if let Some(bg) = &self.bg {
             bg.abort();
         }
+    }
+
+    /// Storage backend của station (nếu có) — `None` cho station memory.
+    ///
+    /// Đối xứng với [`CategoryStation::storage`]. Cần để kiểm chứng
+    /// `[storage.stations.<id>]` **thật sự** đổi backend, chứ không chỉ đổi
+    /// con số trên config.
+    #[must_use]
+    pub fn storage(&self) -> Option<&Arc<dyn TimeseriesStorage>> {
+        self.storage.as_ref()
     }
 
     #[inline]
@@ -695,6 +710,8 @@ impl PatternStation {
     /// pattern đã đăng ký rồi rebuild automaton. Backend `"memory"` (mặc định)
     /// là station thuần memory.
     pub async fn from_storage(id: &str, cfg: &StorageConfig) -> Result<Self, Error> {
+        let resolved = cfg.for_station(id);
+        let cfg: &StorageConfig = &resolved;
         let station = Self::new();
 
         let Some(storage) = open_backend(id, cfg, "pattern").await?.into_pattern() else {
@@ -786,6 +803,8 @@ impl CategoryStation {
     /// theo cơ chế riêng), `backend = "sqlite"` → file sqlite
     /// riêng, còn lại (mặc định `"memory"`) memory-only.
     pub async fn from_storage(id: &str, cfg: &StorageConfig) -> Result<Self, Error> {
+        let resolved = cfg.for_station(id);
+        let cfg: &StorageConfig = &resolved;
         let Some(storage) = open_backend(id, cfg, "category").await?.into_category() else {
             return Ok(Self::new());
         };

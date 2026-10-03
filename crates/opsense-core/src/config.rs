@@ -9,6 +9,7 @@
 //! dc = "hcm"
 //! ```
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error as StdError;
 use std::path::Path;
@@ -98,6 +99,16 @@ pub struct StorageConfig {
     pub backend: String,
     pub data_dir: String,
 
+    /// Ghi đè `[storage]` cho **từng station**, khoá là station id — xem
+    /// [`StorageConfig::for_station`].
+    ///
+    /// Cần vì một pipeline thật có nhiều loại station: `tick-candle` ghi mỗi
+    /// tick (thuần bộ nhớ tạm, đẩy lên S3 chỉ là phí), còn `grid` giữ plan +
+    /// lệnh open (mất là mất tiền). Một `[storage]` chung buộc phải chọn: bật
+    /// persist cho tất cả thì cháy I/O, hoặc không bật gì thì mất lệnh.
+    #[serde(default)]
+    pub stations: HashMap<String, StationStorageOverride>,
+
     /// When > 0, a background task trims the main store every minute: whole
     /// `ts/blk=<id>…` partitions whose data is older than `now - retention_secs`
     /// are dropped. 0 keeps history forever.
@@ -137,6 +148,31 @@ fn default_s3_snapshot_interval_secs() -> u64 {
     600
 }
 
+/// Ghi đè storage cho **một** station — khai dưới `[storage.stations.<id>]`,
+/// xem [`StorageConfig::stations`].
+///
+/// Mọi field là `Option`: `None` = kế thừa từ `[storage]` cấp ngoài, nên khai
+/// một station không phải lặp lại 7 field của cấp ngoài.
+///
+/// `deny_unknown_fields` là cố ý, cùng lý do với [`S3Config`]: key sai chính
+/// tả (`retention_sec`, `block_second`) **phải nổi lúc parse**. Không có deny
+/// thì serde bỏ im lặng và station đó lặng lẽ chạy bằng cấu hình cấp ngoài —
+/// đúng kiểu lỗi đã xảy ra thật với `s3_flush_interval_secs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StationStorageOverride {
+    pub backend: Option<String>,
+    pub data_dir: Option<String>,
+    pub retention_secs: Option<u64>,
+    pub block_secs: Option<u64>,
+
+    /// S3 riêng cho station này. Thường **không** cần: prefix trên S3 đã có
+    /// sẵn station id (`{bucket}/{prefix}/{station}/...`) nên các station không
+    /// đè nhau. Chỉ khai khi muốn một station lên bucket khác hẳn.
+    #[serde(default)]
+    pub s3: Option<S3Config>,
+}
+
 /// Kết nối S3 cho Parquet storage — nơi đặt lake: toàn bộ data-parquet sống ở
 /// `s3://{bucket}/{prefix}/{station}/ts/…` (timeseries, đọc được bởi
 /// Spark/Polars/DuckDB) và `…/{station}/state/…` (checkpoint để mở lại). Các
@@ -171,12 +207,49 @@ impl Default for StorageConfig {
         Self {
             backend: "memory".to_string(),
             data_dir: ".opsense/parquet".to_string(),
+            stations: HashMap::new(),
             retention_secs: 0,
             block_secs: 3600,
             s3: None,
             s3_flush_interval_secs: default_s3_flush_interval_secs(),
             s3_snapshot_interval_secs: default_s3_snapshot_interval_secs(),
         }
+    }
+}
+
+impl StorageConfig {
+    /// Storage áp dụng cho station `id`: cấp ngoài `[storage]` bị phủ bởi
+    /// `[storage.stations.<id>]` nếu có.
+    ///
+    /// Trả `Cow` để **không có override thì không copy gì** — phần lớn station
+    /// không ghi đè, mà `from_storage` gọi hàm này mỗi lần dựng station. Chỉ
+    /// khi thật sự có override mới clone, tức một lần lúc khởi động chứ không
+    /// phải mỗi nến.
+    ///
+    /// Map `stations` bị clear trong bản clone vì đã hết ý nghĩa sau khi hợp
+    /// nhất: hàm này không gọi đệ quy, giữ lại map chỉ tốn bộ nhớ.
+    pub fn for_station(&self, id: &str) -> Cow<'_, StorageConfig> {
+        let Some(over) = self.stations.get(id) else {
+            return Cow::Borrowed(self);
+        };
+        let mut merged = self.clone();
+        if let Some(v) = &over.backend {
+            merged.backend = v.clone();
+        }
+        if let Some(v) = &over.data_dir {
+            merged.data_dir = v.clone();
+        }
+        if let Some(v) = over.retention_secs {
+            merged.retention_secs = v;
+        }
+        if let Some(v) = over.block_secs {
+            merged.block_secs = v;
+        }
+        if over.s3.is_some() {
+            merged.s3 = over.s3.clone();
+        }
+        merged.stations.clear();
+        Cow::Owned(merged)
     }
 }
 
@@ -410,6 +483,21 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "storage.block_secs must be > 0 (parquet block partition width)".into(),
             ));
+        }
+        // Override per-station: cùng hai bất biến, nhưng phải báo **kèm tên
+        // station** — không thì thông báo chung trỏ nhầm về `[storage]` và
+        // người đọc đi sửa cấp ngoài rồi lỗi không hết.
+        for (id, over) in &self.storage.stations {
+            if over.backend.as_deref().is_some_and(|b| b.trim().is_empty()) {
+                return Err(ConfigError::Invalid(format!(
+                    "storage.stations.{id}.backend must not be empty"
+                )));
+            }
+            if over.block_secs == Some(0) {
+                return Err(ConfigError::Invalid(format!(
+                    "storage.stations.{id}.block_secs must be > 0 (parquet block partition width)"
+                )));
+            }
         }
         // Kiểm trên bản **đã áp env**: `OPSENSE_GOSSIP_*` có thể làm hỏng cấu
         // hình sau khi file đã hợp lệ, và lỗi đó phải lộ ra lúc khởi động chứ
@@ -825,5 +913,161 @@ token = "s3cret"
         let _env = GossipEnv::set(&[("OPSENSE_GOSSIP_OWN_URL", "not-a-url")]);
         let err = cfg.validate().expect_err("env phá own_url thì phải báo");
         assert!(err.to_string().contains("must be http(s)"), "{err}");
+    }
+
+    /// Override per-station chỉ ghi đè field nó khai; field còn lại kế thừa
+    /// nguyên vẹn từ cấp ngoài. Nhờ vậy khai `[storage.stations.grid]` chỉ với
+    /// `backend` mà không phải lặp lại 7 field của `[storage]`.
+    #[test]
+    fn station_override_merges_over_global_and_keeps_the_rest() {
+        let cfg = gossip_toml(
+            r#"
+[storage]
+backend = "memory"
+retention_secs = 30
+block_secs = 900
+
+[storage.stations.grid]
+backend = "parquet"
+retention_secs = 0
+"#,
+        );
+        let g = cfg.storage.for_station("grid");
+        assert_eq!(g.backend, "parquet");
+        assert_eq!(g.retention_secs, 0, "0 là giá trị thật, không phải thiếu");
+        // Không khai ở override => kế thừa nguyên vẹn.
+        assert_eq!(g.block_secs, 900);
+        assert_eq!(g.data_dir, cfg.storage.data_dir);
+    }
+
+    /// Station không có override phải đi qua nguyên vẹn — đây là đường đi của
+    /// đa số station trong mọi pipeline, và nó phải **rẻ**: `for_station` trả
+    /// `Cow::Borrowed` nên không copy `StorageConfig` lúc khởi động.
+    #[test]
+    fn station_without_override_is_unchanged() {
+        let cfg = gossip_toml(
+            r#"
+[storage]
+backend = "parquet"
+retention_secs = 7
+
+[storage.stations.grid]
+backend = "memory"
+"#,
+        );
+        let other = cfg.storage.for_station("tick-candle");
+        assert_eq!(other.backend, "parquet");
+        assert_eq!(other.retention_secs, 7);
+        assert!(
+            matches!(other, Cow::Borrowed(_)),
+            "không override thì không được copy"
+        );
+        assert!(matches!(
+            cfg.storage.for_station("grid"),
+            Cow::Owned(_)
+        ));
+    }
+
+    /// Key sai chính tả trong override phải nổi lúc parse. Nếu serde bỏ qua
+    /// im lặng thì station chạy bằng cấu hình cấp ngoài — người viết config
+    /// tin là đã bật persist thực ra không có, đúng kiểu lỗi đã xảy ra với
+    /// `s3_flush_interval_secs`.
+    #[test]
+    fn rejects_typo_inside_station_override() {
+        let raw = config_crate::Config::builder()
+            .add_source(config_crate::File::from_str(
+                r#"
+[engine]
+poll_interval_seconds = 60
+
+[storage]
+backend = "memory"
+
+[storage.stations.grid]
+retention_sec = 0
+"#,
+                FileFormat::Toml,
+            ))
+            .build()
+            .unwrap();
+        let err = raw.try_deserialize::<Config>().expect_err(
+            "key sai trong override phải bị từ chối, không được bỏ qua im lặng",
+        );
+        assert!(
+            err.to_string().contains("retention_sec"),
+            "lỗi phải nêu đúng tên key, thực tế: {err}"
+        );
+    }
+
+    /// Lỗi override phải **nêu tên station** — thông báo chung trỏ về
+    /// `[storage]` khiến người đọc đi sửa cấp ngoài rồi lỗi không hết.
+    #[test]
+    fn validate_names_the_station_that_broke_invariant() {
+        let cfg = gossip_toml(
+            r#"
+[storage]
+backend = "memory"
+
+[storage.stations.grid]
+block_secs = 0
+"#,
+        );
+        let err = cfg.validate().expect_err("block_secs = 0 phải bị chặn");
+        assert!(
+            err.to_string().contains("storage.stations.grid.block_secs"),
+            "{err}"
+        );
+
+        let empty = gossip_toml(
+            r#"
+[storage]
+backend = "memory"
+
+[storage.stations.tick-candle]
+backend = ""
+"#,
+        );
+        assert!(
+            empty
+                .validate()
+                .expect_err("backend rỗng phải bị chặn")
+                .to_string()
+                .contains("storage.stations.tick-candle.backend"),
+        );
+    }
+
+    /// Override phải đổi **backend thật**, không chỉ đổi con số trên config:
+    /// `plain` (không override) không có storage đọc-through, còn `kept` thì có.
+    /// Đây là test bảo vệ toàn bộ ý nghĩa của tính năng.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn station_override_changes_which_backend_opens() {
+        let dir = std::env::temp_dir().join(format!("opsense-ovr-{}", std::process::id()));
+        let mut cfg = StorageConfig::default();
+        cfg.stations.insert(
+            "kept".to_string(),
+            StationStorageOverride {
+                backend: Some("sqlite".to_string()),
+                data_dir: Some(dir.to_string_lossy().into_owned()),
+                ..StationStorageOverride::default()
+            },
+        );
+
+        let plain = crate::station::TimeseriesStation::from_storage("plain", &cfg)
+            .await
+            .unwrap();
+        assert!(
+            plain.storage().is_none(),
+            "station không override phải giữ backend memory"
+        );
+
+        let kept = crate::station::TimeseriesStation::from_storage("kept", &cfg)
+            .await
+            .unwrap();
+        assert!(
+            kept.storage().is_some(),
+            "override backend phải thật sự mở storage khác"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
