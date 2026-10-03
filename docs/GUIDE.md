@@ -195,6 +195,23 @@ opsense components grid | jq .config.params   # xác nhận
   sync là `s3_flush_interval_secs` / `s3_snapshot_interval_secs` ở `[storage]`.
   Creds fallback `OPSENSE_S3_*` rồi `AWS_*`. Local dev: `docker compose up -d rustfs
   rustfs-bucket`.
+- Ghi đè theo từng station: `[storage.stations.<station-id>]` phủ lên `[storage]`,
+  chỉ field khai (`backend` / `data_dir` / `retention_secs` / `block_secs` / `s3`),
+  field còn lại kế thừa. Hữu ích khi pipeline có cả station bộ nhớ tạm lẫn station
+  cần bền — `tick-candle` (ghi mỗi tick) để `memory`, còn `grid` (giữ plan +
+  lệnh open) để `parquet` + S3:
+  ```toml
+  [storage]
+  backend = "memory"
+
+  [storage.stations.grid]
+  backend = "parquet"
+  retention_secs = 0
+
+  [storage.s3]
+  bucket = "opsense-lake"
+  ```
+  Key sai chính tả trong override sẽ báo lỗi lúc parse, không bị bỏ qua im lặng.
 
 ---
 
