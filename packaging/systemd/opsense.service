@@ -1,0 +1,65 @@
+[Unit]
+Description=opsense — realtime analytics / trading gateway
+Documentation=https://github.com/hungpham10/opsense-rs
+# `network-online.target` vì pipeline có node `http_origin` / `websocket_2_json`
+# tự quét ngay khi start — chờ `network.target` là chạy trước khi có DNS.
+After=network-online.target
+Wants=network-online.target
+#
+# Giới hạn restart **ở [Unit]**, không phải [Service] — systemd chỉ đọc hai
+# khoá `StartLimit*` trong [Unit]. Đặt nhầm chỗ thì systemd báo
+# "Unknown key name 'StartLimitBurst' in section 'Service'" và bỏ qua, tức
+# mất luôn lớp chống restart-loop khi config sai.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# User riêng, KHÔNG phải root: `serve` mở Unix socket `/run/axum` và các
+# node có thể spawn kernel (`opsense-kernel-*`) — cả hai đều không cần quyền
+# đặc biệt. User này do `packaging/scripts/postinstall.sh` tạo.
+User=opsense
+Group=opsense
+
+# `EnvironmentFile` có dấu `-` phía trước ⇒ **không** chết service nếu file
+# không tồn tại (VD lần cài đầu, hoặc admin xoá để dùng mặc định).
+EnvironmentFile=-/etc/opsense/opsense.env
+Environment=OPSENSE_CONFIG=/etc/opsense/opsense.toml
+
+# CWD = nơi `.opsense/` tương đối sẽ rơi. Không dùng `/` để file rác không
+# rơi lên filesystem gốc.
+WorkingDirectory=/var/lib/opsense
+ExecStart=/usr/bin/opsense serve
+
+Restart=on-failure
+RestartSec=5s
+
+# ── Hardening ───────────────────────────────────────────────────────────
+# `strict` = mọi filesystem read-only trừ `/dev`, `/proc`, `/sys`. Phải mở
+# lại đúng hai chỗ app thật sự ghi: state ở `/var/lib/opsense` và Unix socket
+# `/run/axum` (đường dẫn này **hardcode** trong crates/opsense/src/serve.rs).
+# Thêm chỗ ghi mà không cần ⇒ chặn nhầm; bỏ chỗ cần ⇒ service chết với
+# `Read-only file system` và không nói rõ là chỗ nào.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opsense /run
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+NoNewPrivileges=true
+
+# KHÔNG đặt `MemoryDenyWriteExecute`: runtime ONNX (`tract`, xem
+# opsense-qlib) sinh code lúc chạy nên cần quyền ghi trang thực thi.
+
+# Không log secret: journald mặc định đã ở `journal`, không cần `StandardOutput`.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opsense
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,109 @@
+# nfpm — định nghĩa gói Debian cho opsense.
+#
+# Build:  scripts/build-deb.sh            (tự tải nfpm + binary từ release)
+# Docs:   packaging/README.md
+#
+# `@VERSION@` / `@ARCH@` / `@BIN_DIR@` được `build-deb.sh` thay bằng `sed` —
+# nfpm không tự nội suy field trong config file, nên template là cách chắc
+# chắn hơn là trông chờ env expansion của Viper.
+
+name: opsense
+arch: "@ARCH@"
+platform: linux
+version: "@VERSION@"
+section: net
+priority: optional
+maintainer: Hung Nguyen Xuan Pham <hung0913208@gmail.com>
+vendor: opsense
+license: "MIT"   # khớp `license` trong Cargo.toml (workspace)
+description: |
+  opsense — realtime analytics / trading gateway.
+  Chạy `opsense serve` như một systemd service, phục vụ HTTP/GraphQL/MCP qua
+  nginx reverse proxy tới Unix socket /run/axum.
+depends:
+  # `nginx` là **dependency thật**: postinstall bật site trong
+  # sites-enabled và reload nginx, nên thiếu nginx thì phần proxy không dùng
+  # được ⇒ để `Recommends` sẽ ra bản cài không có reverse proxy mà không ai
+  # báo.
+  - nginx
+  - systemd
+  # `libsqlite3-0`: các backend khác (sqlite) cần; cài sẵn rẻ hơn để sau này
+  # bật feature không phải sửa gói.
+  - libsqlite3-0
+recommends:
+  # Valkey chỉ cần khi `[storage] backend = "redis"`, nhưng để `Recommends` vì
+  # apt cài mặc định và nó là con đường dễ nhất để lấy state bền qua restart.
+  - valkey-server
+  - ca-certificates
+
+# ── File đi kèm ─────────────────────────────────────────────────────────
+contents:
+  # Binary. Phải cài **cả nhóm**: `opsense` spawn kernel riêng và tìm nó theo
+  # thứ tự `OPSENSE_KERNEL` → cạnh `opsense` → `target/debug` → PATH
+  # (crates/opsense-runner/src/config.rs). Chỉ copy `opsense` thì lệnh
+  # trading fail lúc chạy, không phải lúc cài — rất khó đoán.
+  - src: "@BIN_DIR@/opsense"
+    dst: /usr/bin/opsense
+    file_info: { mode: 0755 }
+  - src: "@BIN_DIR@/opsense-kernel-echo"
+    dst: /usr/bin/opsense-kernel-echo
+    file_info: { mode: 0755 }
+  - src: "@BIN_DIR@/opsense-kernel-python"
+    dst: /usr/bin/opsense-kernel-python
+    file_info: { mode: 0755 }
+  - src: "@BIN_DIR@/opsense-kernel-julia"
+    dst: /usr/bin/opsense-kernel-julia
+    file_info: { mode: 0755 }
+
+  # systemd unit. `/lib/systemd/system` là chỗ nfpm mặc định đặt và systemd
+  # vẫn đọc (trên Ubuntu merged-usr, `/lib` -> `/usr/lib`).
+  - src: packaging/systemd/opsense.service
+    dst: /lib/systemd/system/opsense.service
+    file_info: { mode: 0644 }
+
+  # nginx: chỉ đặt vào sites-available. `sites-enabled` là symlink mà
+  # postinstall tạo — nfpm không nên tự tạo symlink trong thư mục do package
+  # khác quản lý.
+  - src: packaging/nginx/opsense.conf
+    dst: /etc/nginx/sites-available/opsense.conf
+    file_info: { mode: 0644 }
+
+  # Config + env: `type: config` = conffile, dpkg **giữ nguyên** khi admin
+  # sửa qua các lần upgrade. Thiếu khai này thì mỗi `apt upgrade` ghi đè
+  # config đang chạy.
+  - src: packaging/config/opsense.toml
+    dst: /etc/opsense/opsense.toml
+    type: config
+    file_info: { mode: 0644 }
+  - src: packaging/config/opsense.env
+    dst: /etc/opsense/opsense.env
+    type: config
+    file_info: { mode: 0644 }
+
+  # Thư mục. Không khai `owner`/`group` vì user `opsense` do postinstall tạo
+  # **sau** khi dpkg giải nén — chown tới user chưa có làm fail toàn package.
+  # postinstall sửa lại ownership/mode bằng `install -d -o opsense -g opsense`.
+  - dst: /etc/opsense
+    type: dir
+    file_info: { mode: 0755 }
+  - dst: /var/lib/opsense
+    type: dir
+    file_info: { mode: 0755 }
+
+# ── Maintainer scripts ──────────────────────────────────────────────────
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
+
+# Debian-only. `overrides.rpm` **không** khai: gói này nhắm Ubuntu, mà
+# `overrides.<packager>.contents` của nfpm **thay thế** danh sách contents gốc
+# chứ không nối thêm — nên khai sai một tên là mất sạch binary khỏi gói rpm mà
+# không có lỗi nào báo. Thêm rpm thì bắt đầu từ một file riêng.
+overrides:
+  deb:
+    # Không có gì thêm so với mặc định. Để nguyên khối này để chỗ dành sẵn
+    # và để tài liệu nói rõ: hook `preremove` đã khai ở `scripts` ở trên và áp
+    # dụng cho cả deb, **không** khai lại thành `preinst` — hai hook khác
+    # nhau và chạy ở hai thời điểm khác nhau.
+    {} 
