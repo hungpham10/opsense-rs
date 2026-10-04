@@ -1333,6 +1333,12 @@ port = 6379
 "#,
         )
         .expect_err("key lạ dưới [storage.redis] phải bị từ chối");
-        assert!(err.to_string().contains("host"), "lỗi: {err}");
+        // Không khẳng định tên field cụ thể: ở đây có **hai** key lạ (`host` và
+        // `port`) mà serde chỉ báo một cái, và cái nào là chi tiết của toml crate
+        // chứ không phải hợp đồng ta muốn giữ. Cái muốn giữ là: lỗi nói
+        // "unknown field" và **chỉ đúng bảng** `[storage.redis]`.
+        let msg = err.to_string();
+        assert!(msg.contains("unknown field"), "lỗi: {msg}");
+        assert!(msg.contains("storage.redis"), "lỗi: {msg}");
     }
 }
