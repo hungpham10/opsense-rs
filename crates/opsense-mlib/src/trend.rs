@@ -814,7 +814,13 @@ mod tests {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let p = t.project(bad);
             assert!(p.trend.is_finite(), "trend NaN với {bad}");
-            assert!(p.ts.is_finite(), "ts hỏng với {bad}");
+            // `ts` là **i64** nên không có `.is_finite()` — và kiểm tra "hữu
+            // hạn" cũng vô nghĩa cho nó. `project` gộp horizon không hữu hạn
+            // về 0.0 (`src/trend.rs:456`) nên `ts` phải **bằng** anchor chứ
+            // không phải "gần" anchor: đây là assert chặt hơn, và bắt được cả
+            // trường hợp `(f64::INFINITY * 3600.0) as i64` bão hoà về `i64::MAX`
+            // rồi `saturating_add` làm lệch đi một chút.
+            assert_eq!(p.ts, t.anchor_ts(), "ts lệch anchor với {bad}");
             assert!((p.hours - 0.0).abs() < 1e-12);
         }
     }
