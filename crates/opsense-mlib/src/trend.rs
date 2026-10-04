@@ -743,9 +743,20 @@ mod tests {
         // Phân vị 95% của |sóng| < biên cực đại (đỉnh bị lấy mẫu thưa).
         assert!(t.amplitude() > 0.8 * AMP, "amplitude = {}", t.amplitude());
         assert!(t.amplitude() < AMP, "amplitude = {}", t.amplitude());
-        // Chuẩn hoá theo `max − min` của **cả dữ liệu** (~18: gồm cả xu hướng
-        // 50→54 lẫn dao động ±4), nên tỉ lệ nhỏ hơn biên độ/8 một cách đúng.
-        assert!(t.amplitude_rel() > 0.15 && t.amplitude_rel() < 0.30, "rel = {}", t.amplitude_rel());
+        // Chuẩn hoá theo `max − min` của **cả dữ liệu**. Ở đây rate = 0 nên
+        // dữ liệu là sóng thuần: `max − min = 2×AMP = 8`, còn `amplitude` là
+        // phân vị 95% của |sóng| ≈ 3.9588 ⇒ `rel ≈ 0.4948`, tức gần **nửa**
+        // peak-to-peak — đúng nghĩa của "nửa bề rộng biên đường chéo".
+        //
+        // Trước đây ngưỡng là `(0.15, 0.30)`: đó là con số của chuỗi **có** xu
+        // hướng (`rate = RATE` ⇒ `max − min = 18`), nhưng test gọi
+        // `series(50.0, 0.0, …)` — rate 0 — nên rel = 0.4948 và test **không
+        // bao giờ xanh**, dù thuật toán đúng.
+        assert!(
+            (t.amplitude_rel() - 0.5).abs() < 0.01,
+            "sóng thuần phải cho rel ≈ 0.5 (nửa peak-to-peak), thực tế {}",
+            t.amplitude_rel()
+        );
     }
 
     #[test]
