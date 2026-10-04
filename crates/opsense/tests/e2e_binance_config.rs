@@ -481,6 +481,8 @@ async fn full_pipeline_trading_emits_orders() {
         .try_init();
 
     let mut cfg = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
+    // Storage về memory — job này build không bật feature `opsense-core/redis`.
+    memonly(&mut cfg);
     let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
     let script = dir.join("grid.rhai");
 
@@ -650,6 +652,8 @@ async fn trading_orders_readable_via_graphql() {
     }
 
     let mut cfg = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
+    // Storage về memory — job này build không bật feature `opsense-core/redis`.
+    memonly(&mut cfg);
     let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
     let script = dir.join("grid.rhai");
 
