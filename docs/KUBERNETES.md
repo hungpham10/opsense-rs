@@ -195,8 +195,11 @@ cache_max_blocks = 288
 
 # Storage = Parquet (canonical, backend name "parquet"). `backend` hợp lệ (xem
 # crates/opsense-core/src/station.rs `open_backend`):
-#   memory (mặc định, thuần RAM) | parquet | sqlite
+#   memory (mặc định, thuần RAM) | parquet | sqlite | redis
 #   "duckdb"/"s3"/"lakehouse" là alias cũ → vẫn mở Parquet storage; lmdb ĐÃ BỊ GỠ.
+#
+# "redis" = Redis/Valkey, cấu hình qua [storage.redis] (url + prefix); không
+# đụng data_dir, không đụng [storage.s3]. Cần feature `opsense-core/redis`.
 #
 # Layout parquet (mỗi station một thư mục <data_dir>/<id>-<kind>/):
 #   wal.log                      mutation JSON-lines (crash-safe, kiểu Delta)
@@ -288,7 +291,17 @@ bindings = {                                       # from = ts−interval, to = 
 > cargo build --workspace --release --locked --features opsense-core/parquet
 > ```
 >
-> (xem mục 14.6). Tương tự, `backend = "sqlite"` cần feature `sqlite`.
+> (xem mục 14.6). Tương tự, `backend = "sqlite"` cần feature `sqlite`, và
+> `backend = "redis"` cần feature `redis` — image release đã bật
+> (`--features …,opsense-core/redis`).
+>
+> **Redis có hai giới hạn cần biết trước khi dùng cho state lâu dài:**
+> `retention_secs` không có tác dụng (`RedisStorage` chưa hiện thực
+> `retain_older_than`, nên lịch trim chạy và làm rỗng), và mỗi lần **update**
+> một block sẽ `ZADD` thêm một bản mới thay vì ghi đè — read-path lấy bản mới
+> nhất nên **đúng** về dữ liệu, nhưng write amplification bằng số lần update
+> trong block. Hợp với pipeline tần phút (nến 1m), không hợp với ingest
+> tick-by-tick.
 
 #### 5.1.4 Nhét qua ConfigMap
 

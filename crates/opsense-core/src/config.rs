@@ -89,7 +89,8 @@ pub struct PipelineConfig {
 ///
 /// `backend` selects the main store: `"memory"` (LRU, default — easiest for
 /// tests), `"parquet"` (Parquet storage — canonical; local filesystem hoặc
-/// object store khi `data_dir` là `s3://…`) hoặc `"sqlite"` (local file).
+/// object store khi `data_dir` là `s3://…`), `"sqlite"` (local file) hoặc
+/// `"redis"` (Redis/Valkey server, cấu hình qua `[storage.redis]`).
 /// Tên backend cũ `"duckdb"`/`"s3"`/`"lakehouse"` vẫn được chấp nhận trong code
 /// như alias deprecated (tất cả mở cùng Parquet storage) nhưng không nên dùng
 /// trong config mới.
@@ -138,6 +139,13 @@ pub struct StorageConfig {
     /// Mặc định 600.
     #[serde(default = "default_s3_snapshot_interval_secs")]
     pub s3_snapshot_interval_secs: u64,
+
+    /// Kết nối Redis cho backend `"redis"` — xem [`RedisConfig`].
+    ///
+    /// Không phải địa chỉ tới S3: `backend = "redis"` không đụng `data_dir`
+    /// hay `[storage.s3]` cho tới phần này.
+    #[serde(default)]
+    pub redis: Option<RedisConfig>,
 }
 
 fn default_s3_flush_interval_secs() -> u64 {
@@ -171,6 +179,12 @@ pub struct StationStorageOverride {
     /// đè nhau. Chỉ khai khi muốn một station lên bucket khác hẳn.
     #[serde(default)]
     pub s3: Option<S3Config>,
+
+    /// Redis riêng cho station này. Cùng lý do với `s3`: prefix trên Redis đã
+    /// mang sẵn station id nên các station không đè nhau — chỉ khai khi muốn
+    /// một station sang server/prefix khác hẳn.
+    #[serde(default)]
+    pub redis: Option<RedisConfig>,
 }
 
 /// Kết nối S3 cho Parquet storage — nơi đặt lake: toàn bộ data-parquet sống ở
@@ -202,6 +216,59 @@ pub struct S3Config {
     pub url_style: Option<String>,
 }
 
+/// Kết nối Redis/Valkey cho backend `"redis"` — nơi đặt state của station.
+///
+/// Station không ghi ra file: toàn bộ block, order và cursor nằm trên server
+/// Redis, nên **restart process không mất lệnh đang mở** (khác `backend =
+/// "memory"`). Đổi lại là mỗi lần đọc/evict block là một vòng round-trip mạng.
+///
+/// `deny_unknown_fields` là cố ý, cùng lý do với [`S3Config`]: key sai chính
+/// tả (`host` thay vì `url`) phải nổi lúc parse chứ không lặng lẽ rơi về mặc
+/// định rồi đổi mất state cũ.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RedisConfig {
+    /// DSN đầy đủ, VD `"redis://opsense-valkey:6379"` hoặc
+    /// `"redis://:secret@host:6379/0"`. Bù bằng env `OPSENSE_REDIS_URL` rồi
+    /// `REDIS_URL`. Rỗng cả hai ⇒ validate báo lỗi — không có host mặc định,
+    /// vì đoán sai host là mất state chứ không phải chỉ chậm.
+    pub url: String,
+
+    /// Prefix key gốc, mặc định `"opsense"`. Station `grid` sẽ nằm dưới
+    /// `opsense:grid-timeseries`, `…-pattern`, `…-category` (xem
+    /// `open_backend` trong `src/station.rs`).
+    pub prefix: String,
+}
+
+impl RedisConfig {
+    /// DSN đã bù env, theo thứ tự: `[storage.redis].url` → `OPSENSE_REDIS_URL`
+    /// → `REDIS_URL`.
+    ///
+    /// Không có fallback "localhost" — xem [`RedisConfig::url`].
+    #[must_use]
+    pub fn resolved_url(&self) -> String {
+        if !self.url.trim().is_empty() {
+            return self.url.trim().to_string();
+        }
+        std::env::var("OPSENSE_REDIS_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    /// Prefix key gốc sau khi bù mặc định.
+    #[must_use]
+    pub fn resolved_prefix(&self) -> String {
+        let prefix = self.prefix.trim();
+        if prefix.is_empty() {
+            "opsense".to_string()
+        } else {
+            prefix.to_string()
+        }
+    }
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -213,6 +280,7 @@ impl Default for StorageConfig {
             s3: None,
             s3_flush_interval_secs: default_s3_flush_interval_secs(),
             s3_snapshot_interval_secs: default_s3_snapshot_interval_secs(),
+            redis: None,
         }
     }
 }
@@ -247,6 +315,9 @@ impl StorageConfig {
         }
         if over.s3.is_some() {
             merged.s3 = over.s3.clone();
+        }
+        if over.redis.is_some() {
+            merged.redis = over.redis.clone();
         }
         merged.stations.clear();
         Cow::Owned(merged)
@@ -497,6 +568,40 @@ impl Config {
                 return Err(ConfigError::Invalid(format!(
                     "storage.stations.{id}.block_secs must be > 0 (parquet block partition width)"
                 )));
+            }
+            // Station ép backend = "redis" mà không có DSN nào để mở ⇒ lỗi phải
+            // nói **kèm tên station**, và phải nhìn cả DSN ở cấp ngoài: override
+            // chỉ đổi `backend`, phần `[storage.redis]` vẫn kế thừa từ trên.
+            // So khớp **chính xác** như `open_backend`, không phải
+            // case-insensitive: nếu validate nhận "Redis" mà `open_backend`
+            // chỉ match "redis" thì config qua validate rồi chết lúc mở
+            // station — lỗi ở chỗ khó truy hơn nhiều.
+            let picks_redis = over.backend.as_deref().is_some_and(|b| b.trim() == "redis");
+            if picks_redis {
+                let r = over.redis.as_ref().or(self.storage.redis.as_ref());
+                let has_url = r.is_some_and(|r| !r.resolved_url().is_empty());
+                if !has_url {
+                    return Err(ConfigError::Invalid(format!(
+                        "storage.stations.{id}.backend = \"redis\" cần DSN: khai \
+                         [storage.redis].url, hoặc env OPSENSE_REDIS_URL / REDIS_URL"
+                    )));
+                }
+            }
+        }
+        // Backend cấp ngoài cũng cần DSN. Đặt **sau** vòng lặp station để khi
+        // cả hai đều sai thì thông báo chi tiết theo tên station hiện trước.
+        if self.storage.backend.trim() == "redis" {
+            let has_url = self
+                .storage
+                .redis
+                .as_ref()
+                .is_some_and(|r| !r.resolved_url().is_empty());
+            if !has_url {
+                return Err(ConfigError::Invalid(
+                    "storage.backend = \"redis\" cần DSN: khai [storage.redis].url, \
+                     hoặc env OPSENSE_REDIS_URL / REDIS_URL"
+                        .into(),
+                ));
             }
         }
         // Kiểm trên bản **đã áp env**: `OPSENSE_GOSSIP_*` có thể làm hỏng cấu
@@ -1069,5 +1174,165 @@ backend = ""
             "override backend phải thật sự mở storage khác"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==================== Backend "redis" ====================
+
+    fn parse(toml: &str) -> Result<Config, config_crate::ConfigError> {
+        let raw = config_crate::Config::builder()
+            .add_source(config_crate::File::from_str(toml, FileFormat::Toml))
+            .build()
+            .unwrap();
+        raw.try_deserialize()
+    }
+
+    /// `backend = "redis"` + `[storage.redis].url` phải parse và validate qua —
+    /// đây là hình dạng `strategies/binance/config.toml` dùng.
+    #[test]
+    fn redis_backend_parses_with_url() {
+        let cfg = parse(
+            r#"
+[storage]
+backend = "redis"
+
+[storage.redis]
+url = "redis://opsense-valkey:6379"
+"#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let r = cfg.storage.redis.as_ref().expect("phải có [storage.redis]");
+        assert_eq!(r.resolved_url(), "redis://opsense-valkey:6379");
+        assert_eq!(r.resolved_prefix(), "opsense", "prefix rỗng = mặc định");
+    }
+
+    /// Không có DSN ở đâu thì phải **nổi lúc validate**, không phải lúc mở
+    /// station — lúc đó pipeline đã chạy và log chỉ có `station '<id>'`.
+    #[test]
+    fn redis_backend_without_url_is_rejected() {
+        let cfg = parse(
+            r#"
+[storage]
+backend = "redis"
+"#,
+        )
+        .unwrap();
+        let err = cfg.validate().expect_err("redis mà không DSN thì phải bị chặn");
+        assert!(err.to_string().contains("OPSENSE_REDIS_URL"), "lỗi: {err}");
+    }
+
+    /// Đặt `OPSENSE_REDIS_URL` trong scope test rồi xoá, kể cả khi assert
+    /// panic — cùng lý do và cùng cách làm với [`GossipEnv`].
+    struct RedisUrlEnv;
+
+    impl RedisUrlEnv {
+        fn set(v: &str) -> Self {
+            unsafe { std::env::set_var("OPSENSE_REDIS_URL", v) };
+            Self
+        }
+    }
+
+    impl Drop for RedisUrlEnv {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("OPSENSE_REDIS_URL") };
+        }
+    }
+
+    /// Env là nguồn DSN hợp lệ — `docker-compose.yml` đặt `REDIS_HOST`/`REDIS_PORT`
+    /// nên container không cần hardcode DSN trong file config.
+    #[test]
+    fn redis_url_falls_back_to_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let r = RedisConfig {
+            url: String::new(),
+            prefix: String::new(),
+        };
+        // Không có env ⇒ vẫn rỗng: không đoán "localhost", vì đoán sai host là
+        // mất state chứ không phải chỉ chậm.
+        assert!(r.resolved_url().is_empty(), "không có env thì không đoán host");
+
+        let _env = RedisUrlEnv::set("redis://from-env:6379");
+        assert_eq!(r.resolved_url(), "redis://from-env:6379");
+    }
+
+    /// `url` khai trong config phải **thắng** env — không phải bị env đè.
+    #[test]
+    fn redis_config_url_beats_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = RedisUrlEnv::set("redis://from-env:6379");
+        let r = RedisConfig {
+            url: "redis://from-config:6379".to_string(),
+            prefix: "custom".to_string(),
+        };
+        assert_eq!(r.resolved_url(), "redis://from-config:6379");
+        assert_eq!(r.resolved_prefix(), "custom");
+    }
+
+    /// Station ép `backend = "redis"` mà không khai DSN phải báo **kèm tên
+    /// station** — thông báo chung trỏ nhầm về `[storage]` rồi người đọc sửa
+    /// cấp ngoài mà lỗi không hết.
+    #[test]
+    fn redis_station_override_without_url_names_the_station() {
+        let cfg = parse(
+            r#"
+[storage]
+backend = "memory"
+
+[storage.stations.grid]
+backend = "redis"
+"#,
+        )
+        .unwrap();
+        let err = cfg.validate().expect_err("station redis thiếu DSN phải bị chặn");
+        assert!(
+            err.to_string().contains("storage.stations.grid.backend"),
+            "lỗi: {err}"
+        );
+    }
+
+    /// Override chỉ đổi `backend` — phần `[storage.redis]` **kế thừa từ trên**,
+    /// nên cấu hình này phải hợp lệ.
+    #[test]
+    fn redis_station_override_inherits_url_from_outer_level() {
+        let cfg = parse(
+            r#"
+[storage]
+backend = "memory"
+
+[storage.redis]
+url = "redis://outer:6379"
+
+[storage.stations.grid]
+backend = "redis"
+"#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        let merged = cfg.storage.for_station("grid");
+        assert_eq!(merged.backend, "redis");
+        assert_eq!(
+            merged.redis.as_ref().map(|r| r.resolved_url()),
+            Some("redis://outer:6379".to_string()),
+            "DSN phải kế thừa từ [storage.redis] cấp ngoài"
+        );
+    }
+
+    /// `[storage.redis]` phải `deny_unknown_fields` như `[storage.s3]`: khai
+    /// `host` thay vì `url` phải nổi lúc parse, không lặng lẽ rơi về `url` rỗng
+    /// rồi đổi mất state cũ.
+    #[test]
+    fn rejects_unknown_key_under_storage_redis() {
+        let err = parse(
+            r#"
+[storage]
+backend = "redis"
+
+[storage.redis]
+host = "opsense-valkey"
+port = 6379
+"#,
+        )
+        .expect_err("key lạ dưới [storage.redis] phải bị từ chối");
+        assert!(err.to_string().contains("host"), "lỗi: {err}");
     }
 }

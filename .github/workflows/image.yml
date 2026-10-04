@@ -74,7 +74,13 @@ jobs:
         # shard đang trống, và station mất dữ liệu thật khi
         # `capacity_per_shard == 1` (đo: nạp 29 block, `capacity = 32, S = 32`
         # chỉ còn 18).
-        run: cargo zigbuild --release --locked --features opsense-core/parquet,opsense-core/lru-shared-memory --target ${{ matrix.target }}
+        #
+        # `opsense-core/redis` bật backend Redis/Valkey: không bật thì config
+        # khai `backend = "redis"` (VD `strategies/binance/config.toml`) chết
+        # ngay lúc mở station với `requires opsense-core feature 'redis'`.
+        # `sqlite` cố ý **không** bật ở đây — nó kéo `libsqlite3-sys` (compile C)
+        # vào cross-build, đổi lấy feature mà image này không dùng.
+        run: cargo zigbuild --release --locked --features opsense-core/parquet,opsense-core/redis,opsense-core/lru-shared-memory --target ${{ matrix.target }}
 
       # Stage binaries in a neutral dir so the artifact layout is flat
       # (same pattern as .github/workflows/ci.yml, which is proven to work).
