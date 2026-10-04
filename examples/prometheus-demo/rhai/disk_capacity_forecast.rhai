@@ -97,10 +97,10 @@ fn process(observations) {
             continue;
         }
 
-        // `100.0` vì input là **phần trăm** đã dùng. Đổi sang byte thì truyền
-        // tổng dung lượng thay vì hằng số này.
+        // `100.0` vì input của script này là **phần trăm** đã dùng. Chỉ số khác
+        // thì truyền trần của chính nó, cùng đơn vị với `value`.
         let f = capacity_forecast(pts, 100.0, 0, cells, min_samples);
-        if type_of(f) == "() {
+        if type_of(f) == "()" {
             continue;   // không đủ dữ liệu để nói bất cứ điều gì
         }
 
@@ -115,7 +115,7 @@ fn process(observations) {
         let cell_now = capacity_current_cell(f);
         let cell_top = capacity_top_cell(f);
 
-        // `()` = disk không đi lên, nên không có mốc chạm trần. Ép -1 để
+        // `()` = chỉ số không đi lên, nên không có mốc chạm trần. Ép -1 để
         // observation vẫn tồn tại (thiếu series thì alert không bắt được).
         let h_full = capacity_hours_to_full(f);
         let h_trend = capacity_hours_to_trend_full(f);

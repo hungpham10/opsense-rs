@@ -143,7 +143,10 @@ async fn rising_disk_gets_a_finite_eta_and_flat_disk_does_not() {
 
 #[tokio::test]
 async fn band_is_reported_in_grid_cells() {
-    let input = windows(&[("/", wave(50.0, 0.0, 4.0))]);
+    // Phải là chuỗi **có** xu hướng: sieve nhìn giá trị thô, và chuỗi đứng yên
+    // quanh một mức thì ngưỡng dừng cho lưới mịn hơn hẳn (step 1.5625 / 64 dải
+    // thay vì 12.5 / 8 dải) — biên cùng 4 đơn vị đó trải ra 2.5 dải thay vì 0.3.
+    let input = windows(&[("/", wave(50.0, 0.5, 4.0))]);
     let out = call_process(script(), input).await.expect("script chạy được");
 
     let band = num(&find(&out, "disk_capacity_band:/")["value"]);

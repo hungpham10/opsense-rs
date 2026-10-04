@@ -471,8 +471,19 @@ impl TrendAnalysis {
     /// `None` khi đang đi xuống / đứng yên, hoặc chưa đủ dữ liệu để nói.
     /// `Some(0.0)` = đã chạm rồi.
     fn hours_until(&self, target: f64) -> Option<f64> {
+        // Chặn theo **hướng**, không theo dấu slope. Chuỗi đi ngang nhưng dao
+        // động vẫn có slope hồi quy nhỏ và **vô tình** dương — lấy số đó chia
+        // ra được một con số hàng nghìn giờ nghe rất có vẻ chính xác, trong khi
+        // thực ra là nhiễu của một sóng không trùng chu kỳ với cửa sổ. `Flat` đã
+        // là câu trả lời "không nói được bao lâu nữa", nên phải trả `None` đúng
+        // như vậy. Đây cũng là lý do `significance` tồn tại: nó định nghĩa
+        // "hướng" một cách có ngưỡng, thay vì để dấu slope quyết định.
+        if self.direction != Direction::Rising {
+            return None;
+        }
         let slope_hour = self.slope_per_hour();
-        // `!(x > 0)` thay vì `x <= 0` để NaN cũng rơi vào nhánh này.
+        // `Rising` đã kéo theo slope dương, nhưng giữ chặn để NaN không lọt
+        // qua phép chia.
         if !(slope_hour > 0.0) {
             return None;
         }
@@ -854,6 +865,26 @@ mod tests {
             assert_eq!(t.hours_to(100.0), None, "rate = {rate}");
             assert_eq!(t.hours_to_upper_envelope(100.0), None, "rate = {rate}");
         }
+    }
+
+    #[test]
+    fn flat_series_with_a_positive_slope_still_has_no_eta() {
+        // Cửa sổ **không** trùng chu kỳ sóng: bỏ điểm đầu thì 96 điểm = 23.75h,
+        // còn chu kỳ là 8h. Hồi quy lệch một phần ba chu kỳ nên slope thành
+        // +0.0104/giờ — **dương**, dù chuỗi không hề đi đâu. Nếu `hours_to` chỉ
+        // chặn theo dấu slope thì ở đây nó trả về 6335h (~9 tháng) cho một
+        // chỉ số đi ngang: con số nghe rất chính xác và hoàn toàn là nhiễu.
+        //
+        // Không thể chỉ kiểm `direction` rồi coi như xong — phải khẳng định
+        // slope thật sự dương, nếu không test này rơi vào trường hợp mà cả
+        // chặn theo hướng lẫn chặn theo dấu đều đưa về `None`.
+        let full = series(30.0, 0.0, AMP, PERIOD);
+        let pts = &full[1..];
+        let t = TrendAnalysis::new(pts, &cfg()).expect("đủ");
+        assert_eq!(t.direction(), Direction::Flat, "{t}");
+        assert!(t.slope_per_hour() > 0.0, "slope = {}", t.slope_per_hour());
+        assert_eq!(t.hours_to(100.0), None);
+        assert_eq!(t.hours_to_upper_envelope(100.0), None);
     }
 
     #[test]
