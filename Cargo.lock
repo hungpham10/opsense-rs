@@ -3963,7 +3963,7 @@ dependencies = [
 
 [[package]]
 name = "opsense"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "anyhow",
  "arrow-csv",
@@ -4025,7 +4025,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-components"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "async-trait",
  "csv",
@@ -4045,7 +4045,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-core"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -4062,7 +4062,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-echo"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4074,7 +4074,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-julia"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4084,7 +4084,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-python"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4094,7 +4094,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-macros"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "inventory",
  "proc-macro2",
@@ -4105,7 +4105,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-mlib"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "aes-gcm",
  "arrow-array",
@@ -4136,7 +4136,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-model"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -4159,7 +4159,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-proto"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4175,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-qlib"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "async-trait",
  "csv",
@@ -4193,7 +4193,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-rhai"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "async-trait",
  "inventory",
@@ -4215,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-runner"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -7085,7 +7085,7 @@ checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-ident"
-version = "1.0.26"
+version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
