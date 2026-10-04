@@ -1,0 +1,53 @@
+# opsense — config mặc định do package Debian cài vào /etc/opsense/.
+#
+# File này là **conffile**: dpkg giữ nguyên khi bạn sửa, nên đổi ở đây an toàn
+# qua các lần `apt upgrade`.
+#
+# Đây là config tối thiểu chạy được ngay: một nhịp thời gian 60s đi qua
+# pipeline, gateway HTTP + GraphQL + MCP sống. Chưa vận hành cái gì cụ thể —
+# *vận hành gì* là tuỳ chỗi, nên thêm `[[pipeline.components]]` thật vào đây.
+#
+# Tham chiếu field: docs/PLAN.MD.
+
+[engine]
+poll_interval_seconds = 60
+
+# ── Storage ─────────────────────────────────────────────────────────────
+# `memory` = station nằm trong RAM process. Restart là mất sạch lệnh đang mở
+# và nến ⇒ **chỉ dùng khi chạy thử**, không dùng cho pipeline trading.
+#
+# Backend còn lại cần feature tương ứng **trong binary** — danh sách hợp lệ
+# và hệ quả của từng cái xem `docs/KUBERNETES.md`. Ví dụ backend Parquet +
+# file local (không đụng S3):
+#
+#   backend = "parquet"
+#   data_dir = "/var/lib/opsense/parquet"
+#
+# Ghi rõ: đổi `backend` ở đây mà binary không có feature tương ứng thì
+# `open_backend` báo `requires opsense-core feature '...'` **lúc khởi động**,
+# không phải lúc validate config.
+[storage]
+backend = "memory"
+
+# ── Pipeline tối giểu ───────────────────────────────────────────────────
+#
+# Cố ý **không** dùng `timeseries_station_sink` ở đây: node `clock` chỉ phát
+# tick điều khiển, không mang observation, nên station sinh ra sẽ **luôn rỗng**
+# mà vẫn tốn một vòng ghi mỗi nhịp. Muốn có station thì thêm node
+# `station = true` kèm component thật sự ghi vào nó.
+[pipeline]
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+# `description` là metadata cho MCP/GraphQL: nói node này chứa dữ liệu gì.
+# KHÔNG phải field của component — mọi component struct có
+# `#[serde(deny_unknown_fields)]` nên key này phải được bóc ra trước khi
+# deserialize (xem `node_descriptions` trong crates/opsense/src/api/mod.rs).
+description = "Chỉ nhịp thời gian. **Tick là control signal, không mang observation**."
+interval_secs = 60
+
+[[pipeline.components]]
+type = "print"
+id = "print"
+description = "In từng message ra journal. Không giữ state, không cần station."
+inputs = ["clock"]
