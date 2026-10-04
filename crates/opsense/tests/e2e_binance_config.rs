@@ -12,7 +12,12 @@
 //!      OHLCV từ klines, station `grid` có candle từ tick VÀ snapshot grid
 //!      (`labels.kind="snapshot"`, `grid_step > 0`), sink terminal nhận data.
 //!
-//! **Không dùng object store** — `[storage] backend = "memory"`: v1 runtime-only.
+//! **Test này ép `[storage] backend = "memory"`** trước khi dựng runtime. Config
+//! thật khai `redis` (xem `strategies/binance/config.toml`), nhưng job unit test
+//! build **không** bật feature `opsense-core/redis` — nên `open_backend` sẽ trả
+//! `requires opsense-core feature 'redis'` và chết lúc `rt.reload`. Cần thì
+//! đổi: khai `redis` + compose, rồi bỏ dòng override trong `memonly()`.
+//!
 //! `cargo test -p opsense --test e2e_binance_config -- --nocapture`
 
 use std::path::Path;
@@ -53,14 +58,45 @@ const NODE_TICK_MAP: &str = "tick-map";
 /// Số nến mock phát ra. ≥ 10 vì `AnalysisGrid` cần tối thiểu 10 nến.
 const CANDLE_ROUNDS: i64 = 40;
 
+/// Ép storage về memory cho test — lý do xem module doc.
+///
+/// Bỏ hết override theo station: `open_backend` chỉ đọc `cfg.storage.backend`
+/// **sau** khi `for_station(id)` đã hợp nhất, nên phải xoá luôn
+/// `[storage.stations.history]` (không phải override của test này — nó là
+/// override trong config thật).
+fn memonly(cfg: &mut Config) {
+    cfg.storage.backend = "memory".to_string();
+    cfg.storage.stations.clear();
+}
+
 /// ── Tầng 1: config contract ────────────────────────────────────────────────
 #[test]
 fn config_file_contract() {
     let cfg = Config::load(Path::new(CONFIG_PATH))
         .expect("strategies/binance/config.toml phải parse + validate");
+    // Config thật persist qua Redis/Valkey — xem `strategies/binance/config.toml`.
+    // Test này **không** mở backend (chỉ contract), nên assert trên chính
+    // config thật thay vì trên bản `memonly()`.
     assert_eq!(
-        cfg.storage.backend, "memory",
-        "v1 runtime-only: không persist, không RustFS"
+        cfg.storage.backend, "redis",
+        "config thật phải persist qua Redis/Valkey"
+    );
+    assert_eq!(
+        cfg.storage
+            .redis
+            .as_ref()
+            .map(|r| r.resolved_prefix())
+            .as_deref(),
+        Some("opsense"),
+        "prefix key phải khai rõ, không để mặc định"
+    );
+    assert_eq!(
+        cfg.storage
+            .stations
+            .get(STATION_HISTORY)
+            .and_then(|o| o.backend.as_deref()),
+        Some("memory"),
+        "`history` là gương Binance /klines nên vẫn để RAM"
     );
 
     // Graph **5** node:
@@ -263,6 +299,9 @@ async fn full_pipeline_ticks_and_snapshot() {
         .to_path_buf();
     let script = dir.join("grid.rhai");
 
+    // Storage về memory — job unit test không bật feature `opsense-core/redis`.
+    memonly(&mut cfg);
+
     // 2) Mock deterministic: aggTrade realtime qua websocket. Không còn node
     //    `history` (kline HTTP) nên không mock HTTP nữa.
     let ws_uri = spawn_ws_mock();
@@ -442,6 +481,8 @@ async fn full_pipeline_trading_emits_orders() {
         .try_init();
 
     let mut cfg = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
+    // Storage về memory — job này build không bật feature `opsense-core/redis`.
+    memonly(&mut cfg);
     let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
     let script = dir.join("grid.rhai");
 
@@ -611,6 +652,8 @@ async fn trading_orders_readable_via_graphql() {
     }
 
     let mut cfg = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
+    // Storage về memory — job này build không bật feature `opsense-core/redis`.
+    memonly(&mut cfg);
     let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
     let script = dir.join("grid.rhai");
 

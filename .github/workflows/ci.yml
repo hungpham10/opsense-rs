@@ -72,6 +72,50 @@ jobs:
           path: dist-bin/*
           retention-days: 1
 
+  # Nhánh `open_backend` (crates/opsense-core/src/station.rs) được gate bằng
+  # `cfg(feature)` theo từng backend, và các helper quanh nó cũng vậy
+  # (`safe_segment`, `backend_error`, `unsupported`). Job `build` dùng feature
+  # mặc định nên **không** biên dịch arm parquet/sqlite/redis — lỗi ở đó im
+  # lặng tới tận lúc release build trong image.yml.
+  #
+  # Ma trận ở đây cố ý gồm cả tổ hợp "bật A+B, tắt C": đó là tổ hợp mà
+  # `#[cfg(not(all(...)))]` của `unsupported()` dễ rơi sót — build parquet +
+  # sqlite mà không có redis thì `unsupported` **không** được sinh ra trong khi
+  # nhánh `"redis"` vẫn gọi nó.
+  storage-backends:
+    name: Storage Backends (compile matrix)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: parquet+redis
+            feats: opsense-core/parquet,opsense-core/redis
+          - label: parquet+sqlite-no-redis
+            feats: opsense-core/parquet,opsense-core/sqlite
+          - label: all backends
+            feats: opsense-core/parquet,opsense-core/sqlite,opsense-core/redis,opsense-core/lru-shared-memory
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-storage-${{ matrix.label }}
+
+      # `cargo check` + `-p opsense-core` chứ không `cargo build --workspace`:
+      # job này chỉ hỏi "arm nào biên dịch được", không cần artifact, nên không
+      # đụng tới build.rs cần protoc của `opsense-proto`.
+      - name: Check ${{ matrix.label }}
+        run: cargo check -p opsense-core --locked --features "${{ matrix.feats }}"
+
   # Unit tests — no docker compose needed
   #
   # Matrix `lru`: chạy cả hai hành vi arena của `LruCache`.

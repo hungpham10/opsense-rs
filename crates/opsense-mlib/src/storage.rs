@@ -15,7 +15,7 @@ use std::fmt;
 mod sqlite;
 
 #[cfg(feature = "redis")]
-mod redis;
+pub mod redis;
 
 #[cfg(feature = "parquet")]
 pub mod parquet;
@@ -27,6 +27,9 @@ pub use parquet::LakehouseStorage;
 
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStorage;
+
+#[cfg(feature = "redis")]
+pub use redis::RedisStorage;
 
 /// Re-export để `InMemoryStorage` vẫn reachable tại `crate::storage` (impl đã
 /// chuyển vào `storage::in_memory`).

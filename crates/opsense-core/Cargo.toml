@@ -12,10 +12,14 @@ warnings = "deny"
 default = []
 # Forwards the optional opsense-mlib persistence backends so `cfg(feature)`
 # works inside this crate. `parquet` maps to the Parquet storage (canonical
-# backend name là "parquet"); `sqlite` maps to a local SQLite file. "memory"
-# needs no feature.
+# backend name là "parquet"); `sqlite` maps to a local SQLite file; `redis` maps
+# to the Redis/Valkey storage. "memory" needs no feature.
 parquet = ["opsense-mlib/parquet"]
 sqlite = ["opsense-mlib/sqlite"]
+# `dep:redis` bắt buộc: khai optional dependency đã ẩn feature ẩn danh `redis`,
+# nên chỉ forward sang crate khác sẽ không bao giờ bật dep — cargo báo
+# "optional dependency `redis` is not included in any feature".
+redis = ["dep:redis", "opsense-mlib/redis"]
 
 # Arena LRU dùng chung giữa các shard, thay cho chia cứng.
 #
@@ -49,6 +53,11 @@ config_crate = { package = "config", version = "0.15", default-features = false,
 tokio = { workspace = true }
 async-graphql = { workspace = true }
 
+# Dựng `redis::Client` cho backend `"redis"` trong `src/station.rs`. Optional,
+# bật cùng feature `redis` (xem [features] trên).
+redis = { workspace = true, optional = true }
+
 # Store backends are optional and feature-forwarded from opsense-mlib (see
 # [features] above): "memory" uses only the bounded in-memory LRU; "parquet"
-# uses Parquet storage; "sqlite" uses one file per station.
+# uses Parquet storage; "sqlite" uses one file per station; "redis" uses a
+# Redis/Valkey server.

@@ -14,6 +14,8 @@ use opsense_mlib::search::Search;
 use opsense_mlib::snowflake_id::SnowflakeId;
 #[cfg(feature = "parquet")]
 use opsense_mlib::storage::LakehouseStorage;
+#[cfg(feature = "redis")]
+use opsense_mlib::storage::RedisStorage;
 #[cfg(feature = "sqlite")]
 use opsense_mlib::storage::SqliteStorage;
 use opsense_mlib::storage::{CategoryStorage, PatternStorage, TimeseriesStorage};
@@ -35,7 +37,8 @@ use crate::config::StorageConfig;
 // Dựng storage backend từ `[storage]` config, dùng chung cho cả 3 station
 // (timeseries / pattern / category). Backend `"memory"` (mặc định) trả về
 // station thuần memory; `"parquet"` (canonical) mở Parquet storage;
-// `"sqlite"` mở một file riêng cho từng station. Backend nhận diện nhưng
+// `"sqlite"` mở một file riêng cho từng station; `"redis"` mở một
+// Redis/Valkey server. Backend nhận diện nhưng
 // chưa được biên dịch (feature tắt) báo lỗi rõ ràng thay vì lặng lẽ hạ cấp.
 // Tên cũ `"duckdb"`/`"s3"`/`"lakehouse"` vẫn được chấp nhận như alias
 // deprecated — tất cả đều mở cùng một Parquet storage (xem `open_backend`).
@@ -44,7 +47,7 @@ use crate::config::StorageConfig;
 const HOT_BLOCKS: usize = 32;
 
 /// Sanitize station `id` thành path segment an toàn (thay ký tự đường dẫn).
-#[cfg(any(feature = "parquet", feature = "sqlite"))]
+#[cfg(any(feature = "parquet", feature = "sqlite", feature = "redis"))]
 fn safe_segment(id: &str) -> String {
     id.chars()
         .map(|c| match c {
@@ -64,6 +67,9 @@ enum BackendStorage {
     Parquet(LakehouseStorage),
     #[cfg(feature = "sqlite")]
     Sqlite(SqliteStorage),
+    /// Redis/Valkey — state nằm trên server nên restart process không mất.
+    #[cfg(feature = "redis")]
+    Redis(RedisStorage),
 }
 
 impl BackendStorage {
@@ -74,6 +80,8 @@ impl BackendStorage {
             BackendStorage::Parquet(s) => Some(Arc::new(s)),
             #[cfg(feature = "sqlite")]
             BackendStorage::Sqlite(s) => Some(Arc::new(s)),
+            #[cfg(feature = "redis")]
+            BackendStorage::Redis(s) => Some(Arc::new(s)),
         }
     }
 
@@ -84,6 +92,8 @@ impl BackendStorage {
             BackendStorage::Parquet(s) => Some(Arc::new(s)),
             #[cfg(feature = "sqlite")]
             BackendStorage::Sqlite(s) => Some(Arc::new(s)),
+            #[cfg(feature = "redis")]
+            BackendStorage::Redis(s) => Some(Arc::new(s)),
         }
     }
 
@@ -94,12 +104,14 @@ impl BackendStorage {
             BackendStorage::Parquet(s) => Some(Arc::new(RwLock::new(s))),
             #[cfg(feature = "sqlite")]
             BackendStorage::Sqlite(s) => Some(Arc::new(RwLock::new(s))),
+            #[cfg(feature = "redis")]
+            BackendStorage::Redis(s) => Some(Arc::new(RwLock::new(s))),
         }
     }
 }
 
 /// Lỗi khi mở backend thất bại (chỉ xuất hiện khi có backend persistent).
-#[cfg(any(feature = "parquet", feature = "sqlite"))]
+#[cfg(any(feature = "parquet", feature = "sqlite", feature = "redis"))]
 fn backend_error(id: &str, backend: &str, e: impl std::fmt::Display) -> Error {
     Error::other(format!(
         "failed to open storage backend '{backend}' for station '{id}': {e}"
@@ -107,7 +119,11 @@ fn backend_error(id: &str, backend: &str, e: impl std::fmt::Display) -> Error {
 }
 
 /// Lỗi khi backend được yêu cầu nhưng feature chưa được biên dịch.
-#[cfg(not(all(feature = "parquet", feature = "sqlite")))]
+///
+/// Gate phải liệt kê **mọi** backend có feature: build với parquet + sqlite mà
+/// tắt redis vẫn cần hàm này cho nhánh `"redis"` bên dưới. Bỏ sót một feature
+/// ở đây ⇒ `cannot find function unsupported` chứ không phải lỗi dễ hiểu.
+#[cfg(not(all(feature = "parquet", feature = "sqlite", feature = "redis")))]
 fn unsupported(id: &str, backend: &str, feature: &str) -> Error {
     Error::new(
         ErrorKind::Unsupported,
@@ -121,7 +137,10 @@ async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<Backe
     let backend = cfg.backend.trim();
     #[cfg(any(feature = "parquet", feature = "sqlite"))]
     let data_dir = cfg.data_dir.trim_end_matches('/');
-    #[cfg(any(feature = "parquet", feature = "sqlite"))]
+    // `segment` dùng cho prefix key Redis lẫn tên thư mục/file của parquet
+    // và sqlite — cùng một cách sanitize, để một station không đổi tên chỉ vì
+    // đổi backend.
+    #[cfg(any(feature = "parquet", feature = "sqlite", feature = "redis"))]
     let segment = safe_segment(id);
 
     match backend {
@@ -191,6 +210,39 @@ async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<Backe
             Ok(BackendStorage::Sqlite(storage))
         }
 
+        // Redis/Valkey — state trên server, **không** đụng `data_dir`. DSN đã
+        // được `Config::validate` kiểm là có; thiếu ở đây là config dựng bằng
+        // tay (test, `Config::default`) nên vẫn phải báo rõ thay vì để
+        // `redis::Client::open("")` fail bằng thông báo khó đọc.
+        #[cfg(feature = "redis")]
+        "redis" => {
+            let Some(r) = cfg.redis.as_ref() else {
+                return Err(backend_error(
+                    id,
+                    backend,
+                    "thiếu [storage.redis].url (hoặc env OPSENSE_REDIS_URL / REDIS_URL)",
+                ));
+            };
+            let url = r.resolved_url();
+            if url.is_empty() {
+                return Err(backend_error(
+                    id,
+                    backend,
+                    "[storage.redis].url rỗng và env OPSENSE_REDIS_URL / REDIS_URL cũng không có",
+                ));
+            }
+            let client = redis::Client::open(url.as_str())
+                .map_err(|e| backend_error(id, backend, format!("DSN '{url}': {e}")))?;
+            // Prefix mang tên station + loại station: `opsense:grid-timeseries`.
+            // Nhờ vậy nhiều station trên cùng server không đè key lẫn nhau mà
+            // vẫn xoá được cả cụm bằng một prefix.
+            let prefix = format!("{}:{segment}-{kind}", r.resolved_prefix());
+            let storage = RedisStorage::new(client, &prefix)
+                .await
+                .map_err(|e| backend_error(id, backend, e))?;
+            Ok(BackendStorage::Redis(storage))
+        }
+
         // Backend nhận diện nhưng feature tương ứng chưa được biên dịch.
         #[cfg(not(feature = "parquet"))]
         "parquet" | "duckdb" | "s3" | "lakehouse" => {
@@ -198,6 +250,8 @@ async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<Backe
         }
         #[cfg(not(feature = "sqlite"))]
         "sqlite" => Err(unsupported(id, backend, "opsense-core feature 'sqlite'")),
+        #[cfg(not(feature = "redis"))]
+        "redis" => Err(unsupported(id, backend, "opsense-core feature 'redis'")),
 
         other => Err(Error::new(
             ErrorKind::InvalidInput,

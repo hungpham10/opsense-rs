@@ -4053,6 +4053,7 @@ dependencies = [
  "opsense-mlib",
  "opsense-model",
  "opsense-qlib",
+ "redis",
  "serde",
  "serde_json",
  "tokio",

@@ -36,8 +36,13 @@
 # chồng lấn ở phút hiện tại; `merge_candles` cho nến live ghi đè, vì nến API tới
 # trễ và đã đóng một phần.
 #
-# Storage memory-only: station là nơi duy nhất giữ state, nằm trong RAM process.
-# Restart là mất sạch lệnh và nến.
+# Storage: Redis/Valkey cho station `grid` + `tick-candle` (lệnh, plan, cursor và
+# nến đã đóng), RAM cho `history`.
+#
+# Lý do tách vậy: `grid` giữ **tiền** — lệnh đang mở, cursor T+N, plan lưới. Mất
+# nó khi restart là mất sạch vị thế, nên nó phải sống ngoài process. Còn `history`
+# chỉ là gương của API Binance, cứ 60s quét lại là có đủ ⇒ để RAM, khỏi tốn
+# round-trip ghi mà không đổi được gì.
 
 [engine]
 poll_interval_seconds = 10
@@ -50,11 +55,50 @@ poll_interval_seconds = 10
 # Nếu sau này cần chỉnh sức chứa thì phải cho `HOT_BLOCKS` đọc được từ config,
 # không phải thêm lại hai field chết.
 #
-# Cửa sổ phân tích của `grid` là `history_secs` (16h). Với `backend = "memory"`
-# và `block_secs` mặc định 3600 thì cache giữ 32 × 1h = 32 giờ, đủ cho 16h.
+# Cửa sổ phân tích của `grid` là `history_secs` (16h). Với `block_secs` mặc định
+# 3600 thì cache nóng giữ `HOT_BLOCKS = 32` × 1h = 32 giờ, đủ cho 16h — và đây
+# là giới hạn cứng của engine, không chỉnh được bằng config (xem comment trên).
 
 [storage]
-backend = "memory"
+# "redis" = state nằm trên server Redis/Valkey, **không** đụng `data_dir` và
+# không đụng `[storage.s3]`. Đổi từ "memory" sang backend này là đổi bản chất:
+# restart process không còn xoá lệnh đang mở.
+#
+# Cần binary build có feature `opsense-core/redis` — image release đã bật
+# (xem `.github/workflows/image.yml`), bản `cargo run` mặc định thì không có và
+# sẽ báo `storage backend 'redis' ... requires opsense-core feature 'redis'`.
+backend = "redis"
+#
+# **Không có retention cho backend này.** `storage.retention_secs` gọi
+# `TimeseriesStorage::retain_older_than`, mà `RedisStorage` chưa hiện thực nên
+# lịch trim chạy và làm rỗng — key cũ nằm lại mãi. Dọn bằng tay khi cần:
+#   docker exec opsense-valkey valkey-cli --scan --pattern 'opsense:grid-*' \
+#     | xargs -r docker exec -i opsense-valkey valkey-cli del
+#
+# `s3_flush_interval_secs` / `s3_snapshot_interval_secs` cũng vô nghĩa ở đây:
+# chúng gọi `flush()` / `checkpoint()`, mà Redis ghi thẳng từng entry nên hai
+# hàm đó là no-op.
+
+   [storage.redis]
+   # DSN. Khai ở đây thắng env; bỏ trống thì đọc `OPSENSE_REDIS_URL` rồi
+   # `REDIS_URL`. **Không có giá trị mặc định** — không có env thì `validate()`
+   # chặn ngay lúc khởi động, vì đoán sai host là mất state chứ không chỉ chậm.
+   #
+   # `opsense-valkey` là container trong `docker-compose.yml` (cùng host mà
+   # `REDIS_HOST` đặt cho model cache). Chạy ngoài compose thì sửa thành host
+   # thật, VD `redis://127.0.0.1:6379`.
+   url = "redis://opsense-valkey:6379"
+   # Prefix key gốc. Station cuối cùng đặt ở `opsense:<station>-<kind>` —
+   # VD `opsense:grid-timeseries`, `opsense:grid-pattern`, `opsense:grid-category`.
+   # Nhờ vậy các station không đè key lẫn nhau, và xoá sạch thì
+   # `valkey-cli --scan --pattern 'opsense:*'`.
+   prefix = "opsense"
+
+   # `history` để RAM: nó là gương của Binance /klines, mỗi 60s quét lại là có
+   # đủ 16h ⇒ persist chỉ tốn ~5000 obs × 2 round-trip mỗi phút mà không thay
+   # đổi được gì sau restart.
+   [storage.stations.history]
+   backend = "memory"
 
 # Lịch sử nến — node terminal tự quét, không cần ai đẩy nhịp.
 #
