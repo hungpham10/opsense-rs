@@ -16,7 +16,10 @@ default = []
 # to the Redis/Valkey storage. "memory" needs no feature.
 parquet = ["opsense-mlib/parquet"]
 sqlite = ["opsense-mlib/sqlite"]
-redis = ["opsense-mlib/redis"]
+# `dep:redis` bắt buộc: khai optional dependency đã ẩn feature ẩn danh `redis`,
+# nên chỉ forward sang crate khác sẽ không bao giờ bật dep — cargo báo
+# "optional dependency `redis` is not included in any feature".
+redis = ["dep:redis", "opsense-mlib/redis"]
 
 # Arena LRU dùng chung giữa các shard, thay cho chia cứng.
 #
