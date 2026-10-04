@@ -1,5 +1,12 @@
 # Disk Full Projection Using Markov Chains
 
+> **Trạng thái:** tài liệu này mô tả bản thiết kế gốc (kernel Python).
+> Bản chạy trong pipeline Rhai đã ra code: `opsense-mlib/src/trend.rs`
+> (hồi quy + biên đường chéo) và `opsense-rhai/src/capacity.rs` (ghép với
+> `grid.rs` + `transition.rs`). Xem [`RHAI.md`](RHAI.md) mục 5 cho bề mặt API
+> và [`examples/prometheus-demo/rhai/disk_capacity_forecast.rhai`](../examples/prometheus-demo/rhai/disk_capacity_forecast.rhai)
+> cho script mẫu.
+
 This document explains the detailed approach for projecting when disk space will become full using a combination of AnalysisGrid for minimum viable range detection and Markov chain probability calculation for forecasting boundary breaches.
 
 ## 1. Mathematical Foundation

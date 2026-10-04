@@ -18,6 +18,7 @@ pub mod search;
 pub mod sgd;
 pub mod snowflake_id;
 pub mod tls;
+pub mod trend;
 pub mod transition;
 
 // Plan §1: public so external crates (opsense-store, opsense-components) can

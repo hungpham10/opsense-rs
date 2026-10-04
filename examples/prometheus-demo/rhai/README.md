@@ -139,7 +139,40 @@ fn process(observations) {
 ```
 
 Xem ví dụ đầy đủ: [`scripts/disk_spike_check.rhai`](disk_spike_check.rhai),
-[`scripts/disk_usage_grid.rhai`](disk_usage_grid.rhai).
+[`scripts/disk_usage_grid.rhai`](disk_usage_grid.rhai),
+[`scripts/disk_capacity_forecast.rhai`](disk_capacity_forecast.rhai).
+
+## Dự đoán capacity disk
+
+[`disk_capacity_forecast.rhai`](disk_capacity_forecast.rhai) dùng
+`capacity_forecast` — lớp ghép `TrendAnalysis` + `AnalysisGrid` +
+`TransitionAnalysis` — để trả lời **hướng đi** và **biên đường chéo** của mỗi
+đĩa: nó đang đi lên hay đi ngang, dao động quanh xu hướng cỡ nào, và còn bao
+lâu nữa thì đầy.
+
+Mỗi đĩa cho ra 3 observation:
+
+| `metric_id` | value | dùng để |
+|---|---|---|
+| `disk_capacity_hours:<mp>` | giờ tới khi **mép trên** chạm 100% | **cảnh báo** (tính cả dao động) |
+| `disk_capacity_trend:<mp>` | giờ tới khi **đường xu hướng** chạm 100% | lập kế hoạch (bỏ dao động) |
+| `disk_capacity_band:<mp>` | biên độ tính bằng **ô lưới** | độ rộng dải dao động |
+
+Hai mốc đầu lệch nhau đúng `amplitude / slope` — tức "dao động cắt ngang bao
+nhiêu phần thời gian còn lại". Nếu đĩa đã ổn định, hai số gần bằng nhau và
+`disk_capacity_band` nhỏ; nếu đĩa dao động mạnh, hai số tách xa và band lớn —
+lúc đó đừng lập kế hoạch theo số nhỏ.
+
+```toml
+[pipeline.components.params]
+cells       = 12     # max_bit của grid (2^cells ô tối đa)
+recent_secs = 86400  # cửa sổ quan sát
+min_samples = 12     # dưới ngưỡng thì bỏ qua đĩa đó
+```
+
+Script chạy trên **phần trăm** đã dùng (`capacity = 100`). Với input tính bằng
+byte thì sửa tham số `capacity_forecast(..., 100.0, ...)` cho khớp tổng dung
+lượng. Chi tiết về toán thuật: [`docs/RHAI.md`](../../../docs/RHAI.md) mục 5.
 
 ## Cào API ngoài bằng `http_source`
 
