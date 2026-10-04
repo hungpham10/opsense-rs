@@ -25,7 +25,10 @@
 
 use opsense_mlib::grid::AnalysisGrid;
 use opsense_mlib::script::RhaiBindings;
+use opsense_mlib::trend::TrendAnalysis;
 use opsense_mlib::transition::TransitionAnalysis;
+
+use crate::capacity::CapacityForecast;
 
 /// Install every script-facing native function.
 pub fn register_all(eng: &mut rhai::Engine, attributes: std::collections::BTreeMap<String, String>) {
@@ -34,6 +37,8 @@ pub fn register_all(eng: &mut rhai::Engine, attributes: std::collections::BTreeM
     // instance (macro đặt `register_type` trước accessor trong cùng block).
     AnalysisGrid::register(eng);
     TransitionAnalysis::register(eng);
+    TrendAnalysis::register(eng);
+    CapacityForecast::register(eng);
 
     // Free functions qua macro (`#[rhai_func]` + `inventory`).
     crate::time_fns::register(eng);
@@ -57,6 +62,8 @@ pub fn register_all(eng: &mut rhai::Engine, attributes: std::collections::BTreeM
 pub(crate) fn register_strategy_tools(eng: &mut rhai::Engine) {
     AnalysisGrid::register(eng);
     TransitionAnalysis::register(eng);
+    TrendAnalysis::register(eng);
+    CapacityForecast::register(eng);
     crate::time_fns::register(eng);
     crate::ts_ops::register(eng);
     crate::attributes::register(eng, std::collections::BTreeMap::new());

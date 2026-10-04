@@ -22,6 +22,7 @@
 //! `examples/prometheus-demo/rhai/` for example scripts.
 
 mod attributes;
+mod capacity;
 mod orders;
 mod rhai_collect;
 mod runtime;
@@ -44,4 +45,13 @@ pub use transform::RhaiTransform;
 /// this crate exactly as they are from `opsense-components`.
 pub mod vector {
     pub use opsense_mlib::vector::runtime;
+}
+
+/// Mirror of `opsense-mlib`'s script helpers under `crate::script`.
+///
+/// `#[rhai_class]` expands to `impl crate::script::RhaiBindings for ..`, and that
+/// path is hard-coded in the macro — so any crate using it needs a `crate::script`
+/// that resolves. Same trick, same reason, as the `vector` mirror above.
+pub mod script {
+    pub use opsense_mlib::script::{parse_points, RhaiBindings};
 }

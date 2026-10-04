@@ -168,7 +168,7 @@ id = "checked-store"
 inputs = ["disk-spike"]
 ```
 
-## 5. grid + transition (`grid_*`, `transition_*`)
+## 5. Phân tích chuỗi (`grid_*`, `transition_*`, `trend_*`, `capacity_*`)
 
 > Cả hai type + toàn bộ accessor được đăng ký **một block duy nhất** bởi macro
 > `#[rhai]` — script **không cần khai constructor tay**: macro validate
@@ -227,6 +227,104 @@ fn process(points) {
     ]
 }
 ```
+
+### TrendAnalysis (`trend_*`)
+
+Hồi quy tuyến tính trên `(t, value)` của một chuỗi bất kỳ: **đi đâu**, **dao
+động cỡ nào** quanh xu hướng, và **bao lâu nữa chạm** một mốc ngang. Không cần
+biên vật lý — xem `opsense-mlib/src/trend.rs`.
+
+Biên độ (`trend_amplitude`) là nửa bề rộng của **biên đường chéo**: dữ liệu thật
+đi thành dải dốc `trend(h) ± amplitude`, không phải một đường thẳng.
+
+| Hàm | Ý nghĩa |
+|---|---|
+| `trend_fit(points, min_samples, amplitude_quantile, significance, min_amplitude)` | **constructor** — instance `TrendAnalysis` (hoặc `()` nếu không đủ dữ liệu) |
+| `trend_direction(t)` | `"rising"` / `"falling"` / `"flat"` |
+| `trend_current(t)` / `trend_samples(t)` / `trend_span_secs(t)` | quan sát cuối / số điểm / bề rộng cửa sổ |
+| `trend_origin_ts(t)` / `trend_anchor_ts(t)` | mốc gốc đường hồi quy / mốc neo của phép chiếu |
+| `trend_slope_per_sec(t)` / `..._per_hour(t)` / `..._per_day(t)` | độ dốc, 3 thang đọc được |
+| `trend_r2(t)` / `trend_residual_std(t)` | chất lượng fit và độ lệch của phần dư |
+| `trend_amplitude(t)` / `trend_amplitude_rel(t)` | biên độ tuyệt đối / theo tỉ lệ `max − min` của dữ liệu |
+| `trend_offset(t)` | quan sát cuối lệch bao nhiêu so với đường hồi quy (chẩn đoán) |
+| `trend_value_at(t, ts)` | giá trị **đường hồi quy** tại `ts` |
+| `trend_project(t, hours)` | `#{hours, ts, trend, low, high}` — chiếu và hai mép biên |
+| `trend_hours_to(t, target)` | giờ tới khi **đường xu hướng** chạm `target` (hoặc `()`) |
+| `trend_hours_to_upper_envelope(t, target)` | giờ tới khi **mép trên** chạm `target` — luôn ≤ trên |
+
+Hai ngưỡng cần hiểu:
+
+- `amplitude_quantile` (mặc định `0.95`) — dao động thật thường **nhọn** (đỉnh
+  rồi đáy), nên biên độ lấy phân vị chứ không lấy độ lệch chuẩn.
+- `significance` (mặc định `2.0`) — chỉ gọi là `Rising`/`Falling` khi **tổng
+  độ dốc cả cửa sổ** vượt `significance × amplitude`. Chuỗi đi ngang nhưng dao
+  động mạnh vẫn là `flat`: đường hồi quy lúc đó chỉ là nhiễu.
+
+### CapacityForecast (`capacity_*`)
+
+Lớp ghép: `TrendAnalysis` + `AnalysisGrid` + `TransitionAnalysis`, trả lời
+"bao nhiêu thì đáng lo so với capacity". Xem `opsense-rhai/src/capacity.rs`.
+
+| Hàm | Ý nghĩa |
+|---|---|
+| `capacity_forecast(points, capacity, interval_secs, max_bit, min_samples)` | **constructor** (hoặc `()`). `capacity` = biên vật lý **cùng đơn vị** `value`: `100.0` cho phần trăm, `52591026176.0` cho byte |
+| `capacity(f)` / `capacity_current(f)` | biên vật lý / quan sát cuối |
+| `capacity_headroom(f)` / `capacity_headroom_rel(f)` | còn trống, tuyệt đối / theo tỉ lệ |
+| `capacity_direction(f)` / `capacity_oscillating(f)` | hướng đi / có dao động đáng kể **so với capacity** không |
+| `capacity_amplitude(f)` / `capacity_amplitude_rel(f)` | biên độ, tuyệt đối / theo tỉ lệ `capacity` |
+| `capacity_envelope_cells(f)` | **biên độ tính bằng ô lưới** — `0.4` nghĩa là mép trên/dưới lệch nhau chưa tới một dải |
+| `capacity_current_cell(f)` / `capacity_top_cell(f)` | đang ở dải nào / dải "sắp đầy" |
+| `capacity_drift(f)` | `P(lên) − P(xuống)` theo transition, trong `[-1, 1]` |
+| `capacity_samples(f)` / `capacity_span_secs(f)` / `capacity_interval_secs(f)` | kích thước cửa sổ và nhịp bucket |
+| `capacity_trend(f)` | trả về `TrendAnalysis` bên trong — đọc tiếp bằng `trend_*` |
+| `capacity_grid(f)` / `capacity_transition(f)` | trả về `AnalysisGrid` / `TransitionAnalysis` — đọc tiếp bằng `grid_*` / `transition_*` |
+| `capacity_hours_to_full(f)` | mép trên chạm `capacity` — **dùng để cảnh báo** (hoặc `()`) |
+| `capacity_hours_to_trend_full(f)` | đường xu hướng chạm `capacity` — **dùng để lập kế hoạch** |
+| `capacity_hours_to_top_cell(f)` | mép trên chạm biên dưới dải trên cùng |
+| `capacity_project(f, hours)` | `#{hours, ts, trend, low, high}` |
+
+Ba mốc "còn bao lâu nữa" xếp đúng thứ tự:
+
+```
+hours_to_top_cell  ≤  hours_to_full  ≤  hours_to_trend_full
+```
+
+Chênh lệch giữa hai mốc cuối chính là `amplitude / slope` — tức **"dao động cắt
+ngang bao nhiêu phần thời gian còn lại"**. Chỉ nhìn đường hồi quy thì không thấy
+con số này, và đó là lý do cả ba cùng tồn tại.
+
+Script điển hình:
+
+```rhai
+fn process(observations) {
+    let f = capacity_forecast(observations, 100.0, 0, 12, 12);
+    if type_of(f) == "() { return []; }
+
+    let h_full   = capacity_hours_to_full(f);
+    let h_trend  = capacity_hours_to_trend_full(f);
+    // () = chỉ số không đi lên → không có mốc chạm trần. Ép -1 để series không
+    // biến mất (thiếu series thì alert không bắt được).
+    let hours    = if type_of(h_full)  == "()" { -1.0 } else { h_full };
+    let hours_tr = if type_of(h_trend) == "()" { -1.0 } else { h_trend };
+
+    [ #{
+        ts: now_secs(),
+        metric_id: "disk_capacity_hours",
+        kind: "metric", signal: "raw",
+        value: hours,
+        labels: #{
+            direction: capacity_direction(f),
+            oscillating: if capacity_oscillating(f) { "yes" } else { "no" },
+            hours_trend: hours_tr.to_string(),
+            band_cells: capacity_envelope_cells(f).to_string(),
+            drift: capacity_drift(f).to_string(),
+        },
+    } ]
+}
+```
+
+Xem script chạy thật, một observation cho mỗi chỉ số:
+[`examples/prometheus-demo/rhai/disk_capacity_forecast.rhai`](../examples/prometheus-demo/rhai/disk_capacity_forecast.rhai).
 
 ## 6. Pattern matching & catalog (`pattern_*` / `catalog_*`)
 
