@@ -142,13 +142,19 @@ Xem ví dụ đầy đủ: [`scripts/disk_spike_check.rhai`](disk_spike_check.rh
 [`scripts/disk_usage_grid.rhai`](disk_usage_grid.rhai),
 [`scripts/disk_capacity_forecast.rhai`](disk_capacity_forecast.rhai).
 
-## Dự đoán capacity disk
+## Dự đoán chỉ số có trần
 
 [`disk_capacity_forecast.rhai`](disk_capacity_forecast.rhai) dùng
 `capacity_forecast` — lớp ghép `TrendAnalysis` + `AnalysisGrid` +
-`TransitionAnalysis` — để trả lời **hướng đi** và **biên đường chéo** của mỗi
-đĩa: nó đang đi lên hay đi ngang, dao động quanh xu hướng cỡ nào, và còn bao
-lâu nữa thì đầy.
+`TransitionAnalysis` — để trả lời **hướng đi** và **biên đường chéo** của một
+chỉ số bò dần lên một trần: nó đang đi lên hay đi ngang, dao động quanh xu hướng
+cỡ nào, và còn bao lâu nữa thì chạm trần.
+
+Lớp không chuyên biệt cho đĩa. Nó chạy cho bất kì chỉ số nào có `capacity`
+(đĩa, volume, hạn mức API, `MemTotal`, pin…) — script này chỉ là một ví dụ dùng
+đĩa, với `capacity` là trần vật lý 100%. Với chỉ số không có trần cứng, đặt
+`capacity` bằng mốc ngưỡng cảnh báo: lớp không kiểm tra trần có thật, nó chỉ
+dùng `capacity` làm mốc chiếu.
 
 Mỗi đĩa cho ra 3 observation:
 

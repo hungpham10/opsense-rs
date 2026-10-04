@@ -1,5 +1,9 @@
 /// disk_capacity_forecast.rhai
-/// Dự đoán capacity disk: **hướng đi** + **biên đường chéo**.
+/// Dự đoán chỉ số có trần: **hướng đi** + **biên đường chéo**.
+///
+/// `capacity_forecast` không chuyên biệt cho đĩa — nó dùng được cho bất kì chỉ
+/// số nào có một `capacity` và bò dần về phía nó (volume, hạn mức API,
+/// `MemTotal`, pin…). Đĩa chỉ là ví dụ ở đây, với trần cứng là 100%.
 ///
 /// Mỗi đĩa cho ra 3 observation:
 ///

@@ -1,5 +1,9 @@
 //! Chạy `examples/prometheus-demo/rhai/disk_capacity_forecast.rhai` qua Rhai runtime.
 //!
+//! Đĩa là **một** cách cấu hình `capacity_forecast`, không phải phạm vi của nó —
+//! nhưng script mẫu chính là cách cấu hình đó, nên đây là chỗ đúng để khẳng
+//! định trên **giá trị**.
+//!
 //! Test ở đây bắt được cả hai lớp lỗi: accessor đăng ký sai (script không eval
 //! được) và logic dự đoán sai (số ra sai). Vì vậy khẳng định trên **giá trị**,
 //! không chỉ "không rỗng".

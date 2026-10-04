@@ -71,7 +71,7 @@ impl std::fmt::Display for Direction {
 ///
 /// Mọi ngưỡng ở đây là **tương đối** (so với biên độ đo được) hoặc **đơn vị
 /// của chính value** — không có hằng số tuyệt đối nào. Nhờ vậy cùng một cấu
-/// hình chạy được cho phần trăm disk, byte, hay độ dài queue.
+/// hình chạy được cho phần trăm, byte, hay độ dài queue.
 #[derive(Debug, Clone, Copy)]
 pub struct TrendConfig {
     /// Ít nhất bao nhiêu điểm thì mới dựng được. Dưới ngưỡng này [`TrendAnalysis::new`]

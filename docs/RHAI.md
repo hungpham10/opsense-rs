@@ -302,7 +302,7 @@ fn process(observations) {
 
     let h_full   = capacity_hours_to_full(f);
     let h_trend  = capacity_hours_to_trend_full(f);
-    // () = disk không đi lên → không có mốc chạm trần. Ép -1 để series không
+    // () = chỉ số không đi lên → không có mốc chạm trần. Ép -1 để series không
     // biến mất (thiếu series thì alert không bắt được).
     let hours    = if type_of(h_full)  == "()" { -1.0 } else { h_full };
     let hours_tr = if type_of(h_trend) == "()" { -1.0 } else { h_trend };
@@ -323,7 +323,7 @@ fn process(observations) {
 }
 ```
 
-Xem script chạy thật, một observation cho mỗi đĩa:
+Xem script chạy thật, một observation cho mỗi chỉ số:
 [`examples/prometheus-demo/rhai/disk_capacity_forecast.rhai`](../examples/prometheus-demo/rhai/disk_capacity_forecast.rhai).
 
 ## 6. Pattern matching & catalog (`pattern_*` / `catalog_*`)

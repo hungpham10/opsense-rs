@@ -1,4 +1,29 @@
-//! # Dự đoán capacity — hướng đi và biên đường chéo
+//! # Dự đoán chỉ số có trần — hướng đi và biên đường chéo
+//!
+//! Lớp này **không** chuyên biệt cho đĩa. Nó trả lời cho bất kì chỉ số nào
+//! có hai đặc tính cùng lúc:
+//!
+//! 1. **Có trần vật lý** — một `capacity` mà dữ liệu nào cũng không vượt, và
+//! 2. **Bò theo thời gian** — chiếm dần dần trần đó, với dao động quanh đường
+//!    đi.
+//!
+//! Dung lượng đĩa chỉ là một trường hợp. Cùng câu hỏi, cùng câu trả lời:
+//!
+//! | Chỉ số | `capacity` |
+//! |---|---|
+//! | Dung lượng đĩa | kích thước ổ |
+//! | Dung lượng volume / quota API | hạn mức tài khoản |
+//! | Số request còn lại trong quota | hạn mức/tháng |
+//! | Bộ nhớ đang dùng | `MemTotal` |
+//! | Dung lượng pin còn lại | sức chứa danh định |
+//! | Độ mòn ổ (SMART `percent_used`) | 100% |
+//! | Số người theo dõi | trần của nền tảng |
+//! | Số dư tài khoản (nợ dần) | hạn mức tín dụng |
+//!
+//! Trần **không nhất thiết phải cứng**. Với chỉ số không có trần thật — doanh
+//! thu, số request — đặt `capacity` bằng một mốc ngưỡng cảnh báo là đủ; lớp
+//! không kiểm tra trần có thật hay không, nó chỉ dùng `capacity` làm mốc
+//! chiếu.
 //!
 //! Lớp ghép: lấy [xu hướng + biên độ] từ
 //! [`TrendAnalysis`](opsense_mlib::trend), rồi bổ sung ba thứ mà phần xu hướng
@@ -19,18 +44,20 @@
 //!    cho hướng theo **hồi quy**.
 //!
 //! Vì sao tách khỏi `TrendAnalysis`: phần xu hướng là toán thuần, dùng được cho
-//! bất cứ chuỗi nào; còn "bao nhiêu thì đáng lo so với capacity" là chính sách
-//! vận hành, chỉ có nghĩa với biên vật lý. Xem module doc của
+//! bất cứ chuỗi nào; còn "bao nhiêu thì đáng lo so với trần" là chính sách
+//! vận hành, chỉ có nghĩa khi đã biết trước mốc đích. Xem module doc của
 //! [`opsense_mlib::trend`] cho phần "biên đường chéo".
 //!
 //! ## Hai con số "còn bao lâu nữa"
 //!
 //! - [`CapacityForecast::hours_to_trend_full`] — **đường xu hướng** chạm trần.
+//!   Sau hơn: bỏ qua dao động nên coi là trần đặt.
 //! - [`CapacityForecast::hours_to_full`] — **mép trên** chạm trần, sớm hơn.
 //!
 //! Chênh lệch giữa hai con số chính là "dao động cắt ngang bao nhiêu phần thời
-//! gian còn lại" (`amplitude / slope`). Dùng số đầu để cảnh báo, số sau để lập
-//! kế hoạch.
+//! gian còn lại" (`amplitude / slope`). Dùng số **sau** để cảnh báo — nó mới
+//! là lúc mép trên chạm trần; dùng số **đầu** để lập kế hoạch, vì nó cho
+//! ngân sách thời gian mà không bị dao động cắt.
 
 use opsense_mlib::grid::{AnalysisGrid, SieveConfig};
 use opsense_mlib::script::parse_points;
@@ -39,8 +66,9 @@ use opsense_mlib::transition::TransitionAnalysis;
 
 /// Cấu hình dựng [`CapacityForecast`].
 ///
-/// Mặc định bám đúng bài toán disk **theo phần trăm** (`capacity = 100`) và cửa
-/// sổ vài chục giờ; đổi `capacity` sang byte thì chỉ sửa một ô.
+/// Mặc định bám bài toán chỉ số **theo phần trăm** (`capacity = 100`) và cửa
+/// sổ vài chục giờ; đổi `capacity` sang byte, byte/s, hay đơn vị riêng thì chỉ
+/// sửa một ô.
 #[derive(Debug, Clone, Copy)]
 pub struct ForecastConfig {
     /// Ngưỡng của phần xu hướng, truyền thẳng xuống
@@ -243,13 +271,13 @@ impl CapacityForecast {
         self.trend.current()
     }
 
-    /// Dung lượng còn trống (`capacity − current`), có thể âm khi đã vượt trần.
+    /// Khoảng cách còn lại tới trần (`capacity − current`), có thể âm khi đã vượt.
     #[must_use]
     pub fn headroom(&self) -> f64 {
         self.capacity - self.current()
     }
 
-    /// Dung lượng còn trống theo tỉ lệ (`0.2` = còn 20%).
+    /// Khoảng cách tới trần theo tỉ lệ (`0.2` = còn 20% trần).
     #[must_use]
     pub fn headroom_rel(&self) -> f64 {
         self.headroom() / self.capacity
@@ -326,10 +354,10 @@ impl CapacityForecast {
 
     /// **Biên độ tính bằng ô lưới** — `amplitude / grid.step`.
     ///
-    /// Đây là chỗ [`AnalysisGrid`] thật sự góp phần: biên độ thuần là "4% dung
-    /// lượng", còn `grid.step` là độ rộng dải mà sieve chọn từ chính dữ liệu
+    /// Đây là chỗ [`AnalysisGrid`] thật sự góp phần: biên độ thuần là "4% trần",
+    /// còn `grid.step` là độ rộng dải mà sieve chọn từ chính dữ liệu
     /// này — tức đúng những mức dữ liệu phân biệt được. `0.4` nghĩa là mép trên
-    /// với dưới lệch nhau chưa tới một dải: disk đang đi trong **một dải**, và
+    /// với dưới lệch nhau chưa tới một dải: chỉ số đang đi trong **một dải**, và
     /// [`Self::hours_to_full`] dựa trên biên đó là dự đoán trên dữ liệu nhiễu.
     #[must_use]
     pub fn envelope_cells(&self) -> f64 {
@@ -427,7 +455,7 @@ impl CapacityForecast {
     /// `capacity`) nhưng **vi mô hơn** [`Self::hours_to_trend_full`] (mép trên,
     /// không phải đường xu hướng). Đây là câu hỏi mà transition trả lời được:
     /// "mấy giờ nữa dữ liệu vào dải sắp đầy", và là câu hỏi đáng hỏi nhất khi
-    /// muốn cảnh báo theo mức độ **dải** thay vì theo phần trăm tuyệt đối.
+    /// muốn cảnh báo theo mức độ **dải** thay vì theo giá trị tuyệt đối.
     #[must_use]
     pub fn hours_to_top_cell(&self) -> Option<f64> {
         self.trend.hours_to_upper_envelope(self.top_cell_edge())
@@ -636,9 +664,16 @@ mod tests {
     #[test]
     fn band_is_measured_in_grid_cells() {
         // Biên độ ~3.96, sieve chọn step = 12.5 (8 dải trên capacity 100) ⇒
-        // mép trên với dưới lệch ~0.32 dải: disk đang đi **trong một dải**, nên
+        // mép trên với dưới lệch ~0.32 dải: chỉ số đang đi **trong một dải**, nên
         // `hours_to_full` dựa trên biên đó là dự đoán trên dữ liệu nhiễu.
-        let f = CapacityForecast::new(&series(50.0, 0.0, AMP, PERIOD), 100.0, &cfg())
+        //
+        // Phải là chuỗi **có xu hướng** (`rising_oscillating`): sieve nhìn giá
+        // trị thô, mà nó phân bố theo chuỗi — chuỗi phẳng đứng quanh 50 thì
+        // ngưỡng dừng chỉ cho step = 1.5625 (64 dải), biên 3.96 trải ra 2.53 dải,
+        // tức "đi trong một dải" sai hoàn toàn. Đó là khác biệt thật, không phải
+        // artifact của test: dữ liệu trôi đều thì mức độ phân biệt được thật sự
+        // mịn hơn hẳn.
+        let f = CapacityForecast::new(&rising_oscillating(), 100.0, &cfg())
             .expect("đủ dữ liệu");
         assert!((f.grid().step - 12.5).abs() < 1e-9, "step = {}", f.grid().step);
         assert!(f.amplitude() > 0.8 * AMP && f.amplitude() < AMP, "biên độ = {}", f.amplitude());
