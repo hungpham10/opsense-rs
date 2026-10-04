@@ -111,6 +111,7 @@ impl Default for ForecastConfig {
         "capacity_samples" -> |f: &mut Self| -> i64 { f.samples() as i64 },
         "capacity_span_secs" -> |f: &mut Self| -> i64 { f.span_secs() },
         "capacity_interval_secs" -> |f: &mut Self| -> i64 { f.interval_secs() },
+        "capacity_anchor_ts" -> |f: &mut Self| -> i64 { f.anchor_ts() },
         "capacity_grid" -> |f: &mut Self| -> AnalysisGrid { *f.grid() },
         "capacity_transition" -> |f: &mut Self| -> TransitionAnalysis {
             f.transition().clone()

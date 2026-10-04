@@ -136,6 +136,7 @@ fn trend_capacity_script() -> &'static str {
             capacity_samples(f),
             capacity_span_secs(f),
             capacity_interval_secs(f),
+            capacity_anchor_ts(f),
             capacity_envelope_cells(f),
             capacity_current_cell(f),
             capacity_top_cell(f),
@@ -183,7 +184,7 @@ async fn trend_and_capacity_accessors_are_callable() {
 
     assert_eq!(
         out.len(),
-        44,
-        "số lời gọi phải khớp trend_capacity_script (20 trend + 24 capacity): {out:?}"
+        45,
+        "số lời gọi phải khớp trend_capacity_script (20 trend + 25 capacity): {out:?}"
     );
 }
