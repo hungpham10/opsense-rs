@@ -101,6 +101,20 @@ pub struct SetParamParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ClearStationParams {
+    /// Station id, vd "grid". Dùng `opsense_status` để xem danh sách.
+    #[schemars(description = "Station id, e.g. \"grid\"")]
+    pub node: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConfirmParams {
+    /// Phải `true`. Bảo đảm không xoá nhầm: mất cả lệnh đang mở và lịch sử.
+    #[schemars(description = "Must be true")]
+    pub confirm: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReloadParams {
     /// JSON array of component objects, each: `{"type": "...", "id": "...", "config": {...}, "inputs": [...]}`.
     #[schemars(description = "JSON array of component objects")]
@@ -234,6 +248,33 @@ impl OpsenseMcpServer {
     ) -> Result<String, String> {
         tools::set_param(&self.client, &p.id, &p.path, &p.value).await
     }
+
+    /// Xoá sạch **một** station — RAM lẫn storage (Redis/SQLite/Parquet), nên
+    /// dữ liệu cũ không quay lại sau restart.
+    #[tool(
+        description = "Clear ONE station's data (both RAM and persistent storage, so it does NOT come back after restart). Wipes open orders, T+N cursor, grid plan and history for that station. The owning node KEEPS RUNNING and will start writing fresh data again. Use opsense_status to list stations first."
+    )]
+    async fn opsense_clear_station(
+        &self,
+        Parameters(p): Parameters<ClearStationParams>,
+    ) -> Result<String, String> {
+        tools::clear_station(&self.client, &p.node).await
+    }
+
+    /// Xoá sạch **mọi** station — nên phải có `confirm`.
+    ///
+    /// Xoá cả `grid` lẫn `tick-candle` là cách reset trọn phiên: kernel đọc
+    /// cursor T+N từ station, nên xoá một trong hai có thể để lần chạy kế tiếp
+    /// tưởng đã đi tới nến hiện tại và bỏ qua phần lịch sử còn lại.
+    #[tool(
+        description = "Clear ALL stations' data (RAM + persistent storage). This destroys open orders, T+N cursors, grid plans and all station history for the whole process; nodes keep running and refill from new data. Requires confirm=true. Clearing only one of two coupled stations can leave the kernel thinking it already advanced past the candles you want to replay — prefer this over per-station clears when resetting a trading session."
+    )]
+    async fn opsense_clear_all_stations(
+        &self,
+        Parameters(p): Parameters<ConfirmParams>,
+    ) -> Result<String, String> {
+        tools::clear_all_stations(&self.client, p.confirm).await
+    }
 }
 
 #[tool_handler]
@@ -249,7 +290,9 @@ impl ServerHandler for OpsenseMcpServer {
                  JSON pointer (e.g. \"params.sl_pct\") — preferred; opsense_reload replaces the WHOLE \
                  node list and loses any node you forget to include. \
                  Runtime state (orders, T+N cursor, snapshots) lives in stations — read it with \
-                 opsense_query_timeseries."
+                 opsense_query_timeseries. To RESET that state: opsense_clear_station(node) for one, or \
+                 opsense_clear_all_stations(confirm=true) to reset the whole trading session (prefer the \
+                 latter — the kernel reads its T+N cursor from a station)."
                     .to_string(),
             ),
         }

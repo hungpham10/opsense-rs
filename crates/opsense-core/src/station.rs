@@ -488,6 +488,32 @@ impl TimeseriesStation {
 
     /// Storage backend của station (nếu có) — `None` cho station memory.
     ///
+    /// Xoá sạch station: block trong RAM **và** series trên storage.
+    ///
+    /// Hai tầng phải đi cùng nhau, xoá một tầng là còn sót:
+    ///
+    /// - RAM ([`LruCache::clear`]) — nếu không, `query_range` vẫn trả về
+    ///   block cũ đã nạp, và lần đọc sau đó lại `persist_point` ngược lại đĩa.
+    /// - Storage ([`TimeseriesStorage::clear_all_series`]) — nếu không, restart
+    ///   process sẽ nạp lại đúng dữ liệu vừa "xoá" (xem
+    ///   [`TimeseriesStation::from_storage`]).
+    ///
+    /// Station `memory` (không có storage) chỉ còn tầng RAM.
+    ///
+    /// Không đụng `bg` (task nền flush/retention) — nó vẫn chạy và sẽ ghi
+    /// đè lên series rỗng, đúng như khi station mới vừa tạo.
+    pub async fn clear(&self) -> Result<(), Error> {
+        let removed = self.caches.clear();
+        tracing::info!(blocks = removed, "clear station: đã xoá block trong RAM");
+
+        if let Some(storage) = &self.storage {
+            storage.clear_all_series().await.map_err(|e| {
+                Error::other(format!("clear_all_series thất bại: {e}"))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Đối xứng với [`CategoryStation::storage`]. Cần để kiểm chứng
     /// `[storage.stations.<id>]` **thật sự** đổi backend, chứ không chỉ đổi
     /// con số trên config.
@@ -792,6 +818,29 @@ impl PatternStation {
         })
     }
 
+    /// Xoá toàn bộ pattern đã đăng ký: automaton dựng lại từ rỗng (không chỉ
+    /// xoá key trong `storage`) — giữ lại pattern cũ trong automaton thì lệnh
+    /// `set` sau đó vẫn match những pattern đã xoá, tức clear không có tác dụng.
+    ///
+    /// Bộ đếm `hits`/`misses` là **thống kê cả đời**, không phải dữ liệu, nên
+    /// giữ nguyên: clear dữ liệu không có nghĩa reset số đếm.
+    pub async fn clear(&self) -> Result<(), Error> {
+        {
+            let mut automaton = self.automaton.write().await;
+            *automaton = AhoCorasick::new();
+        }
+        // `storage` ở đây là `Option<Arc<dyn PatternStorage>>` — **không** có
+        // `RwLock` bọc ngoài (khác `CategoryStation`), nên gọi thẳng, đúng như
+        // `PatternStation::set` đang làm.
+        if let Some(storage) = &self.storage {
+            storage
+                .clear()
+                .await
+                .map_err(|e| Error::other(format!("clear storage pattern thất bại: {e}")))?;
+        }
+        Ok(())
+    }
+
     pub async fn set(&self, template: &str) {
         self.automaton.write().await.add(template.to_string());
         if let Some(storage) = &self.storage {
@@ -876,6 +925,35 @@ impl CategoryStation {
         self.storage.as_ref()
     }
 
+    /// Xoá toàn bộ bản ghi đã `insert`. Dựng lại radix tree rỗng và xoá series
+    /// trên storage.
+    ///
+    /// `SnowflakeId` là **bộ đếm**, không phải dữ liệu — giữ nguyên để id cấp
+    /// tiếp theo không đụng id đã cấp (tránh hai bản ghi khác nhau cùng id).
+    pub async fn clear(&mut self) -> Result<(), Error> {
+        // Radix tree RAM phải dựng lại từ rỗng — giữ `search` cũ thì `insert`
+        // sau đó vẫn thấy node đã xoá, tức clear vô tác dụng ở tầng RAM.
+        //
+        // Backend nào có storage thì `Search::new` trỏ lại chính storage đó
+        // (radix đọc từ đĩa nên không cần nạp lại gì); không có thì thuần RAM.
+        self.search = match &self.storage {
+            Some(storage) => Search::<u8>::new(1, storage.clone()),
+            None => Search::<u8>::in_memory(1),
+        };
+
+        // Tầng đĩa sau: backend chưa hiện thực `clear` thì `Err` — đã xoá RAM
+        // xong mà vẫn báo lỗi là đúng, vì dữ liệu trên đĩa còn nguyên.
+        if let Some(storage) = &self.storage {
+            storage
+                .read()
+                .await
+                .clear()
+                .await
+                .map_err(|e| Error::other(format!("clear storage category thất bại: {e}")))?;
+        }
+        Ok(())
+    }
+
     pub async fn insert(&mut self, text: &str, metadata: &str) -> Result<u64, Error> {
         let record_id = self.id.generate() as u64;
         let key_bytes = text.as_bytes();
@@ -913,6 +991,7 @@ impl CategoryStation {
     }
 }
 
+#[derive(Clone)]
 pub enum Station {
     Timeseries(Arc<RwLock<TimeseriesStation>>),
     Category(Arc<RwLock<CategoryStation>>),
@@ -989,6 +1068,84 @@ mod tests {
 
     fn obs(ts: i64, value: f64) -> Observation {
         Observation::new(ts, "cpu".into(), TelemetryKind::Metric, Signal::Raw, value)
+    }
+
+    /// `clear()` phải xoá **đọc được** và phải hồi lại sức chứa.
+    ///
+    /// Cả hai vế đều cần: chỉ assert "rỗng" thì bỏ sót hồi quy ngược — arena
+    /// không được dựng lại vẫn cho đọc rỗng, nhưng `update_range` sau đó sẽ
+    /// evict oan và mất block. Vì vậy nạp lại **nhiều hơn** `HOT_BLOCKS` để mọi
+    /// block đều phải sống, đúng như lúc station mới.
+    #[tokio::test]
+    async fn clear_wipes_and_restores_capacity() {
+        let st = TimeseriesStation::new(HOT_BLOCKS, Some(115_200));
+        let base: i64 = 1_787_040_000;
+
+        // Nạp 2 × HOT_BLOCKS block: đủ để có evict ở giữa, và để xem clear có
+        // đụng nhầm block nào không.
+        let n: i64 = 2 * HOT_BLOCKS as i64;
+        let mut batch = Vec::new();
+        for i in 0..n {
+            for f in 0..5i64 {
+                batch.push(obs(base + i * 115_200 + f * 60, (i * 5 + f) as f64));
+            }
+        }
+        st.update_range(&batch, base, base + n * 115_200 - 1, base + n * 115_200 - 1);
+        assert!(
+            !st.query_recent(base, base + n * 115_200 - 1)
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "trước khi clear phải có dữ liệu, không thì test này vô nghĩa"
+        );
+
+        st.clear().await.expect("clear station memory");
+
+        assert_eq!(
+            st.query_recent(base, base + n * 115_200 - 1)
+                .await
+                .unwrap_or_default()
+                .len(),
+            0,
+            "sau clear không còn quan sát nào"
+        );
+
+        // Nạp lại y hệt: phải đọc ra **đúng** số obs như lần đầu đầy đủ nhất
+        // mà sức chứa cho phép. Với arena chia cứng + `S = 32` chỉ giữ được
+        // `HOT_BLOCKS` block gần nhất, nên đối chiếu theo **số block sống**,
+        // không theo tổng `n` — đó là hành vi đã biết, không phải hồi quy.
+        let refill: Vec<Observation> = batch
+            .iter()
+            .filter(|o| o.ts >= base + (n - HOT_BLOCKS as i64) * 115_200)
+            .cloned()
+            .collect();
+        st.update_range(&refill, base, base + n * 115_200 - 1, base + n * 115_200 - 1);
+        let got = st
+            .query_recent(base + (n - HOT_BLOCKS as i64) * 115_200, base + n * 115_200 - 1)
+            .await
+            .unwrap_or_default();
+        assert_eq!(
+            got.len(),
+            refill.len(),
+            "sau clear, nạp lại {} block phải giữ trọn {} obs",
+            HOT_BLOCKS,
+            refill.len()
+        );
+    }
+
+    /// Station memory (`storage = None`) clear phải không lỗi — nhánh
+    /// `if let Some(storage)` bỏ qua, và đây là trường hợp phổ biến nhất khi
+    /// chạy local không bật backend.
+    #[tokio::test]
+    async fn clear_works_without_storage() {
+        let st = TimeseriesStation::new(HOT_BLOCKS, Some(115_200));
+        let base: i64 = 1_787_040_000;
+        st.update_range(&[obs(base, 1.0)], base, base, base);
+        st.clear().await.expect("clear station memory không cần storage");
+        assert_eq!(
+            st.query_recent(base, base).await.unwrap_or_default().len(),
+            0
+        );
     }
 
     /// Chống hồi quy **chỉ ở build có feature**.

@@ -60,6 +60,66 @@ pub async fn remove_attribute(client: &OpsenseClient, name: &str) -> Result<Stri
         .map_err(|e| format!("{e:#}"))
 }
 
+/// Xoá sạch **một** station (RAM + storage).
+///
+/// Node sở hữu station **vẫn chạy** và ghi lại dữ liệu mới tới, nên đây là
+/// "xoá sạch rồi để nó tự lấp lại" chứ không phải xoá vĩnh viễn.
+pub async fn clear_station(client: &OpsenseClient, id: &str) -> Result<String, String> {
+    client
+        .clear_station(id)
+        .await
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|r| render_clear_result(r, false))
+}
+
+/// Xoá sạch mọi station. `confirm` bắt buộc bằng `true` vì mất cả lệnh đang
+/// mở, cursor T+N và toàn bộ lịch sử của process.
+pub async fn clear_all_stations(
+    client: &OpsenseClient,
+    confirm: bool,
+) -> Result<String, String> {
+    if !confirm {
+        return Err(
+            "clear_all_stations xoá MẌT VÀNG dữ liệu của process (lệnh đang mở, \
+             cursor T+N, plan, lịch sử station) — node vẫn chạy và sẽ ghi lại từ \
+             dữ liệu mới tới. Gọi lại với confirm = true nếu bạn thật sự muốn."
+                .to_string(),
+        );
+    }
+    client
+        .clear_all_stations()
+        .await
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|r| render_clear_result(r, true))
+}
+
+/// Gộp `cleared`/`failed` thành bản tóm tắt.
+///
+/// Liệt kê từng station khi có **nhiều** cái, hoặc khi `bulk` bật (lệnh xoá
+/// tất cả thì caller cần biết đã xoá đúng những gì). Một lệnh đơn lẻ thì chỉ
+/// một dòng là đủ.
+fn render_clear_result(
+    r: crate::client::graphql::ClearStationResult,
+    bulk: bool,
+) -> Result<String, String> {
+    let mut out = String::new();
+    if bulk || r.cleared.len() > 1 {
+        for c in &r.cleared {
+            out.push_str(&format!("- {} ({}): cleared\n", c.id, c.kind));
+        }
+    } else if let Some(c) = r.cleared.first() {
+        out.push_str(&format!("- {} ({}): cleared\n", c.id, c.kind));
+    }
+    if !r.failed.is_empty() {
+        out.push_str("FAILED:\n");
+        for f in &r.failed {
+            out.push_str(&format!("- {f}\n"));
+        }
+    }
+    out.push_str(&format!("cleared={} failed={}", r.cleared.len(), r.failed.len()));
+    Ok(out)
+}
+
 pub async fn query_timeseries(
     client: &OpsenseClient,
     node: &str,

@@ -252,6 +252,16 @@ impl AppState {
         self.context.remove_attribute(name).await
     }
 
+    /// Xoá sạch một station (RAM + storage). `Err` nếu không có station đó.
+    pub async fn clear_station(&self, id: &str) -> Result<StationKind, Error> {
+        self.context.clear_station(id).await
+    }
+
+    /// Xoá sạch mọi station đã đăng ký. Trả `(xoá được, lỗi từng cái)`.
+    pub async fn clear_all_stations(&self) -> Result<(Vec<(String, StationKind)>, Vec<String>), Error> {
+        self.context.clear_all_stations().await
+    }
+
     fn default_pipeline(cfg: &Config) -> Vec<Arc<dyn Component>> {
         let interval_secs = cfg.engine.poll_interval_seconds.max(1);
         vec![

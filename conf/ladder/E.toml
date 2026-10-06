@@ -1,49 +1,51 @@
-# Binance grid — tick realtime là đường duy nhất **sinh lệnh**, kline 1m chỉ làm
-# nền phân tích.
+# Opsense configuration — file that `opsense-serve` actually loads.
+# See docs/PLAN.MD for the field reference.
 #
-#   history (http_origin)  Binance /klines — KÉO theo yêu cầu, không có nhịp
-#        │                 seed trading range + cửa sổ sieve
-#        │
-#   tick-feed (websocket_2_json)  wss://…@aggTrade
-#        │
-#        ▼
-#   tick-map (json_2_json)         E→ts (ms) · s→metric_id · p→value (f64)
-#        │                         + trigger="tick"
-#        ▼
-#   tick-candle (tick_2_candle)    gom tick → nến bucket 1m
-#        │                         giữ nến đang mở trong RAM, chỉ ghi khi đóng
-#        ▼
-#   grid (rhai_transform)          đọc nến, dựng lưới, (nếu bật) đặt lệnh
+# Mounted into the container and selected by `OPSENSE_CONFIG=/app/opsense.conf.toml`
+# (docker-compose.yml). This is the ONE config the running service reads; edits
+# here take effect on `docker compose up -d opsense-serve` or a container restart.
 #
-# Không có node `clock`: `history` là `http_origin` — `ComponentType::Source`
-# nên không cần ai đẩy nhịp; nó tự quét HTTP theo `interval_secs` của chính
-# nó. `grid` chạy khi `tick-candle` phát nến vừa đóng (~1 lần/phút).
+# ── PROVENANCE / KEEP IN SYNC ───────────────────────────────────────────────
+# The pipeline below is the Binance grid strategy, copied from
+# `strategies/binance/config.toml` — that file is the canonical template and is
+# what `crates/opsense/tests/e2e_binance_config.rs` validates, so edit IT first
+# and re-copy. Two intentional deviations from the template:
 #
-# `tick-candle` và `grid` đều tự đăng ký station của chính node, nên terminal
-# sẵn — không cần node sink để giữ graph hợp lệ.
+#   1. `script_path` is ABSOLUTE (`/app/strategies/binance/grid.rhai`).
+#      The template's relative path only resolves when the process cwd is the
+#      repo root. The container's cwd is `/`, so relative silently becomes
+#      `/strategies/...` and every batch fails with `script_run: No such file
+#      or directory`. docker-compose.yml mounts `./strategies:/app/strategies:ro`
+#      to make the absolute path valid inside the container. DO NOT "fix" this
+#      back to a relative path.
+#   2. `params.mode = "trading"`; the template ships `"analysis"`. See below —
+#      still SIMULATED trading, but it does emit order rows.
+#   3. Nothing else. `description` on each node is kept — it is metadata only
+#      (every component struct is `deny_unknown_fields`, so the loader strips it
+#      before deserialize via `node_descriptions`); it populates the text
+#      `opsense_status` shows, which tells an agent which station to query.
+#      It only loads at `serve` startup, so a `Mutation.reload` over MCP leaves
+#      it null.
 #
-# `grid` branch theo `trigger()` (ưu tiên `payload.trigger`, fallback
-# `payload.src` — xem crates/opsense-rhai/src/transform.rs):
-#   - trigger == "tick"        → trả `[]`: nến do `tick-candle` gom, script không
-#                                được ghi đè lên nến đó.
-#   - trigger khác (message từ `tick-candle`) → đọc nến đã gom → `grid_fit` +
-#                                 `transition_analysis` → snapshot obs
-#                                 (`labels.kind = "snapshot"`), và nếu
-#                                 `mode = "trading"` thêm bước đặt lệnh.
+# ── WHAT `mode = "trading"` ACTUALLY DOES ───────────────────────────────────
+# It routes each CLOSED candle through the kernel `portfolio_feed` — the same
+# kernel backtest uses — and writes `signal = "order"` rows into station `grid`.
 #
-# Phân vai hai nguồn nến: `history` cho **phạm vi giá** (16 giờ, đủ rộng để
-# `step` vượt ngưỡng phí), `tick-candle` cho **nến phút đang chạy**. Nến hai nguồn
-# chồng lấn ở phút hiện tại; `merge_candles` cho nến live ghi đè, vì nến API tới
-# trễ và đã đóng một phần.
+# These are NOT Binance orders. The repo has no order-routing code at all: no
+# `/fapi/v1/order`, no `/api/v3/order`, no HMAC signing, no API-key plumbing
+# (`rg -n 'BINANCE_API|HMAC' --glob '!target'` → nothing). Binance here is only
+# a PUBLIC market-data source: `/klines` + the `aggTrade` websocket, neither of
+# which is authenticated. Order ids are internal (`o<ts>-<seq>`), PnL is
+# modelled, and nothing leaves the process. Trading mode = paper trading.
 #
-# Storage: Redis/Valkey cho station `grid` + `tick-candle` (lệnh, plan, cursor và
-# nến đã đóng), RAM cho `history`.
+# Two real consequences, both from `backend = "memory"`:
+#   - A restart loses candles AND open orders outright. The kernel rebuilds
+#     session state from `signal = "order"` + the `trading_step` cursor in the
+#     station, so both are RAM-only here. Use parquet/sqlite to make it durable.
+#   - `fee_rate = 0.0002` (maker) is ASSUMED, not measured. The kernel has no
+#     funding-fee model either, so a position held across an 8h funding period
+#     drifts from real-world PnL. Do not read these fills as achievable.
 #
-# Lý do tách vậy: `grid` giữ **tiền** — lệnh đang mở, cursor T+N, plan lưới. Mất
-# nó khi restart là mất sạch vị thế, nên nó phải sống ngoài process. Còn `history`
-# chỉ là gương của API Binance, cứ 60s quét lại là có đủ ⇒ để RAM, khỏi tốn
-# round-trip ghi mà không đổi được gì.
-
 [engine]
 poll_interval_seconds = 10
 # KHÔNG có khai cache ở đây, và cũng không có khai được: cache nóng của station
@@ -55,50 +57,11 @@ poll_interval_seconds = 10
 # Nếu sau này cần chỉnh sức chứa thì phải cho `HOT_BLOCKS` đọc được từ config,
 # không phải thêm lại hai field chết.
 #
-# Cửa sổ phân tích của `grid` là `history_secs` (16h). Với `block_secs` mặc định
-# 3600 thì cache nóng giữ `HOT_BLOCKS = 32` × 1h = 32 giờ, đủ cho 16h — và đây
-# là giới hạn cứng của engine, không chỉnh được bằng config (xem comment trên).
+# Cửa sổ phân tích của `grid` là `history_secs` (16h). Với `backend = "memory"`
+# và `block_secs` mặc định 3600 thì cache giữ 32 × 1h = 32 giờ, đủ cho 16h.
 
 [storage]
-# "redis" = state nằm trên server Redis/Valkey, **không** đụng `data_dir` và
-# không đụng `[storage.s3]`. Đổi từ "memory" sang backend này là đổi bản chất:
-# restart process không còn xoá lệnh đang mở.
-#
-# Cần binary build có feature `opsense-core/redis` — image release đã bật
-# (xem `.github/workflows/image.yml`), bản `cargo run` mặc định thì không có và
-# sẽ báo `storage backend 'redis' ... requires opsense-core feature 'redis'`.
-backend = "redis"
-#
-# **Không có retention cho backend này.** `storage.retention_secs` gọi
-# `TimeseriesStorage::retain_older_than`, mà `RedisStorage` chưa hiện thực nên
-# lịch trim chạy và làm rỗng — key cũ nằm lại mãi. Dọn bằng tay khi cần:
-#   docker exec opsense-valkey valkey-cli --scan --pattern 'opsense:grid-*' \
-#     | xargs -r docker exec -i opsense-valkey valkey-cli del
-#
-# `s3_flush_interval_secs` / `s3_snapshot_interval_secs` cũng vô nghĩa ở đây:
-# chúng gọi `flush()` / `checkpoint()`, mà Redis ghi thẳng từng entry nên hai
-# hàm đó là no-op.
-
-   [storage.redis]
-   # DSN. Khai ở đây thắng env; bỏ trống thì đọc `OPSENSE_REDIS_URL` rồi
-   # `REDIS_URL`. **Không có giá trị mặc định** — không có env thì `validate()`
-   # chặn ngay lúc khởi động, vì đoán sai host là mất state chứ không chỉ chậm.
-   #
-   # `opsense-valkey` là container trong `docker-compose.yml` (cùng host mà
-   # `REDIS_HOST` đặt cho model cache). Chạy ngoài compose thì sửa thành host
-   # thật, VD `redis://127.0.0.1:6379`.
-   url = "redis://opsense-valkey:6379"
-   # Prefix key gốc. Station cuối cùng đặt ở `opsense:<station>-<kind>` —
-   # VD `opsense:grid-timeseries`, `opsense:grid-pattern`, `opsense:grid-category`.
-   # Nhờ vậy các station không đè key lẫn nhau, và xoá sạch thì
-   # `valkey-cli --scan --pattern 'opsense:*'`.
-   prefix = "opsense"
-
-   # `history` để RAM: nó là gương của Binance /klines, mỗi 60s quét lại là có
-   # đủ 16h ⇒ persist chỉ tốn ~5000 obs × 2 round-trip mỗi phút mà không thay
-   # đổi được gì sau restart.
-   [storage.stations.history]
-   backend = "memory"
+backend = "memory"
 
 # Lịch sử nến — node terminal tự quét, không cần ai đẩy nhịp.
 #
@@ -198,7 +161,7 @@ station = true
 type = "rhai_transform"
 id = "grid"
 description = "Đọc nến, dựng lưới, đặt lệnh. **Đây là station cần query.** Lọc server-side theo `signal`: `order` = lệnh (`labels.status` open/closed, `labels.dtype` long/short, `labels.tp`/`sl`/`size`); `summary` + `labelKind=trading_step` = cursor T+N; `summary` + `labelKind=plan` = lưới đang dùng (`labels.cells` = JSON); `summary` + `labelKind=snapshot` = ảnh chụp grid mỗi nến."
-script_path = "strategies/binance/grid.rhai"
+script_path = "/app/strategies/binance/grid.rhai"
 inputs = ["tick-map", "tick-candle"]
 # Terminal — station của node này (lệnh, snapshot, plan, cursor) là nơi duy
 # nhất đọc lại được, nên không cần node sink để giữ graph hợp lệ.
@@ -221,7 +184,20 @@ station = true
    # `portfolio_feed` (cùng kernel backtest dùng), lệnh ghi thành observation
    # `signal = "order"` trong station `grid` (open/close theo `labels.status`).
    # Các tham số dưới là tham số engine cho nhánh đó — đổi ở đây, không sửa script.
-   mode = "analysis"
+   mode = "trading"
+
+   # RR mục tiêu cho take-profit. `0` ⇒ TP ở bậc kề (mặc định, hành vi gốc).
+   # `> 0` ⇒ TP ở bậc ĐẦU TIÊN đủ `reward / risk >= min_rr`, và lệnh bị TỪ CHỐI
+   # nếu không bậc nào đủ — không rơi về bậc kề (bậc kề RR thấp hơn thì lỗ ngay
+   # khi giá chạm tới). Xem `TradingGrid::tp_for_rr`.
+   #
+   # Với `sl_pct = 0.008` và `fee_rate = 0.0002`, mỗi bậc kề ≈ RR 0.43:
+   #   net win  = 0.43% - 0.04% = 0.39%  |  net loss = 0.80% + 0.04% = 0.84%
+   #   ⇒ cần tỉ lệ thắng 0.84/(0.84+0.39) = 68% — mà `grid_min_trades = 3` và
+   #   tỉ lệ thắng mô hình là **0.75 giả định**, chưa có lệnh đóng nào thay thế.
+   # `min_rr = 0.5` ⇒ TP nhảy 2 bậc: net win 0.46% ⇒ cần 65%, biên rộng hơn,
+   # đổi lại mất entry (mốc chỉ còn bậc trên thì không đủ RR thì bị từ chối).
+   min_rr = 0.5
    calendar = "crypto"
    # `strategy = "rhai"` (mặc định): plan lưới lệnh do chính script này dựng ở
    # `fn rebuild(candles, prev, params)` — đổi chiến lược = sửa file .rhai, không
@@ -231,24 +207,7 @@ station = true
    # mốc cuối không có TP trên ⇒ `levels - 2` mốc dùng được thật. 2 mốc là
    # 0 mốc dùng được; 5 mốc chỉ 3 mốc mà bán kính thì hẹp quá so với phí.
    grid_levels = 4
-   # RR = reward / risk, mà `reward` là **1 bước lưới** (= `step / grid_levels`),
-   # không phải tham số rời. Với cửa sổ 16h, sieve chọn `step ≈ 781.83` ⇒
-   # mỗi bậc ≈ $195 = 0.23% giá, tức:
-   #
-   #   sl_pct = 0.008  ⇒ RR 0.29, hòa vốn cần 81.5% thắng  (không khả thi)
-   #   sl_pct = 0.0025 ⇒ RR 0.92, hòa vốn cần 60.3% thắng
-   #
-   # Công thức ở `TradingGrid::breakeven_win_p`: `(risk + 2×fee) / (reward + risk)`.
-   # Mốc 0.0025 lấy từ win rate 75% mà chính chiến lược này đo được — hòa vốn
-   # phải nằm **dưới** tỉ lệ thắng thực tế, không thì lãi không bao giờ ra.
-   #
-   # Đánh đổi: SL 0.25% nằm trong nhiễu nến 1 phút, nên sẽ bị quét stop nhiều
-   # hơn. Đó là cái giá thật, không phải con số nào chứng minh được.
-   #
-   # Hệ quả phụ: hòa vốn 60.3% < trần độ-tin-cậy 0.75, nên `win_ceiling` trả về
-   # 0.75 ⇒ kernel chỉ đặt lệnh khi mô hình tự tin ≥ 75% (xem `win_ceiling`).
-   # Ở `sl_pct = 0.008` ngưỡng hòa vốn 81.5% ép kernel nhảy lên 81.5%.
-   sl_pct = 0.0025
+   sl_pct = 0.008
    # Knob cho `fn rebuild`: số lệnh đóng tối thiểu trước khi tin tỉ lệ thắng
    # thực tế, độ nhọn phân bổ vốn, sieve max_bit.
    grid_min_trades = 3
@@ -294,46 +253,23 @@ station = true
    # mốc cách nhau $31.48 < phí $33.87 ⇒ 8/8 entry bị lo, không log gì. Cùng
    # code, cửa sổ 16h thì ra 4 ô rộng và vào được lệnh.
    # grid_min_step_frac = 0.00192
-   # Kelly fraction. Tỉ lệ thắng 0.75 mà kernel dùng khi chưa đủ
-   # `grid_min_trades` lệnh đóng là **mô hình đoán**, không phải thống kê đo
-   # được — xem `grid.rhai` (`grid_min_trades`).
-   #
-   # Lưu ý khi đổi `sl_pct`: `calculate_order_size` dùng `b = 1 / sl_pct`, tức
-   # **giả định reward = 1.0** (một cú nhảy 100%), khác với TP thật là một bước
-   # lưới ~0.23%. Nên Kelly ở đây thực chất ≈ `win_p`, gần như không nhạy với
-   # `sl_pct` (`kelly = win_p − (1 − win_p)/b`): 0.008 cho 0.748, 0.0025 cho
-   # 0.7494. Cắt SL **không** làm phình khối lệnh.
+   # Kelly fraction. Cảnh báo: với `sl_pct = 0.008` và tỉ lệ thắng **mô hình**
+   # 0.75 (dùng khi chưa đủ `grid_min_trades` lệnh đóng), Kelly ra 0.244 ->
+   # cược 6% vốn mỗi lệnh. Tỉ lệ 0.75 là **mô hình đoán**, không phải thống kê
+   # đo được — xem `grid.rhai` (`grid_min_trades`).
    kelly_fraction = 0.25
    # Vốn cơ sở để định cỡ lệnh. `size` là **giá trị vị thế (notional) USD**, KHÔNG
    # phải margin: qlib không có khái niệm leverage/margin nào, và PnL tính thẳng
-   # `size × pnl_pct` (`portfolio.rs`). Đòn bẩy **không đổi PnL strategy tính** —
-   # nó chỉ quyết định giá thanh lýc, và cái đó **nằm ngoài mô hình**: grep
-   # `liquidat|margin|mmr|collateral` trong `opsense-qlib`/`opsense-rhai` không ra
-   # dòng nào. Kernel không biết còn bao nhiêu ký quỹ và sẽ đặt lệnh kể cả khi
-   # không đủ margin ⇒ **SL là hàng rào duy nhất**, không phải sàn.
+   # `size × pnl_pct` (`portfolio.rs`). Nên **đòn bẩy trên sàn không đổi PnL mà
+   # strategy tính** — nó chỉ quyết định giá thanh lýc:
    #
-   # Khoảng cách thanh lýc ~ `1/leverage − mmr` (mmr BTCUSDT ~ 0.4%):
+   #   cách thanh lýc ~ 1/leverage - mmr   (mmr BTCUSDT ~ 0.4%)
+   #     20x  -> 4.6%   => SL 0.8% về trước, an toàn
+   #    100x  -> 0.6%   => THANH LY TRUOC SL
    #
-   #   lev   cách thanh lýc   so với SL 0.0643%   ai chạm trước
-   #    20x      4.600%            71.5x          SL
-   #    50x      1.600%            24.9x          SL
-   #   100x      0.600%             9.3x          SL
-   #
-   # ⇒ Ở `sl_pct` hiện tại **thanh lýc không phải ràng buộc**: SL nằm gần hơn
-   # ~25x ở 50x, nên giá chạm SL trước, đóng lệnh, không bị thanh lýc. Rủi ro
-   # thật là **nhảy giá** (flash crash) vượt qua SL — cần cú nhảy > 1.6% trong
-   # một lần, tức ~25x SL. Với nến 1 phút, hiếm nhưng không phải không có;
-   # nhiều lệnh mở cùng lúc còn làm rủi ro chồng lên nhau.
-   #
-   # Còn `base_capital` này là **kích thước notional**, không phải ký quỹ:
-   # 1000 USD ký quỹ × 50x ⇒ hạn mức notional 50.000 USD, và đó chính là con
-   # số khai ở đây. Đừng đọc nó là "tiền nằm trong tài khoản".
-   #
-   # Thực tế đang dùng rất ít: `size = base_capital × kelly × fraction`, mà
-   # `kelly × fraction` chỉ ra ~0.1–1.5% ⇒ mỗi lệnh 64–774 notional. Giả định
-   # 5 lệnh mở đồng thời (~1500 notional) thì margin @50x = **30 USD**, tức
-   # dùng **3% trên 1000 USD ký quỹ**. Nút chặn là công thức sizing, không
-   # phải leverage.
-   base_capital = 50000.0
+   # Nên ký <= 20x. Và đừng đọc `size` là "số tiền ký quỹ": đặt 20x với
+   # `size = 2341` nghĩa là đang cầm notional $46.830, PnL thật 20x con số
+   # trên — theo CẢ HAI chiều, lãi lẫn lỗ.
+   base_capital = 100000.0
    # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.
    settlement_candles = 0

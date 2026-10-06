@@ -57,3 +57,7 @@ build/
 
 # Playground
 playground/
+
+# Local runtime configs (xem docker-compose.grid.yml)
+conf/*.local.toml
+conf/*.notick.local.toml

@@ -557,6 +557,77 @@ where
         }
     }
 
+    /// Xoá **toàn bộ** entry và đưa cache về đúng trạng thái lúc [`LruCache::new`]:
+    /// `mapping` rỗng, free-list (hoặc linked-list từng shard) khôi phục nguyên
+    /// vẹn. Trả số entry đã xoá.
+    ///
+    /// Khác [`LruCache::remove`] ở hai điểm cố ý:
+    ///
+    /// 1. **Không** gọi `on_removing` / `on_updating` và **không** `persist_point`.
+    ///    Xoá hàng loạt là thao tác quản trị (vd clear station) — dữ liệu bị
+    ///    xoá là chủ đích, nên không persist lại từng entry vừa rút.
+    /// 2. Trả về **số entry bị xoá** để caller báo cáo, thay vì `Option<V>`.
+    ///
+    /// Rẻ hơn nhiều so với lặp [`LruCache::remove`]: một lần `DashMap::clear`
+    /// + một vòng `S` lần, không phải `O(n)` lần khóa shard và persist.
+    pub fn clear(&self) -> usize {
+        let removed = self.mapping.len();
+        self.mapping.clear();
+
+        // Arena dùng chung: mọi node về free-list, xích từ node cuối về 0 —
+        // đúng như `new()` dựng. Vì vậy `free_head` quyết định phần lớn trạng
+        // thái, còn `next`/`prev` của từng node là dự phòng cho lần `put` sau.
+        #[cfg(feature = "lru-shared-memory")]
+        {
+            let len = self.caching.len();
+            for index in 0..len {
+                let node = &self.caching[index] as *const Node<K, V> as *mut Node<K, V>;
+                unsafe {
+                    (*node).key = None;
+                    (*node).value = None;
+                    (*node).next = AtomicUsize::new(if index + 1 < len { index + 1 } else { NULL });
+                    (*node).prev = AtomicUsize::new(NULL);
+                }
+            }
+            for shard in &self.shards {
+                let mut ht = shard.mutex.lock().unwrap();
+                ht.first = NULL;
+                ht.last = NULL;
+            }
+            // `free_head` là field thường sau `&self` ⇒ phải `store`, không gán.
+            self.free_head
+                .store(if len == 0 { NULL } else { 0 }, Ordering::Release);
+        }
+
+        // Arena chia cứng: ranh giới khối đóng dấu lúc `new()` và không dịch,
+        // nên `per_shard` suy ra lại được từ `caching.len()` — và phải khớp
+        // đúng `ceil(capacity / S)` mà `new()` đã dùng, nếu không linked-list
+        // sẽ khác hẳn cache lúc mới và `put` sẽ đi lệch.
+        #[cfg(not(feature = "lru-shared-memory"))]
+        {
+            let per_shard = self.caching.len() / S;
+            for shard_index in 0..S {
+                let offset = shard_index * per_shard;
+                for i in 0..per_shard {
+                    let current = offset + i;
+                    let node = &self.caching[current] as *const Node<K, V> as *mut Node<K, V>;
+                    unsafe {
+                        (*node).key = None;
+                        (*node).value = None;
+                        (*node).next =
+                            AtomicUsize::new(if i + 1 < per_shard { current + 1 } else { NULL });
+                        (*node).prev = AtomicUsize::new(if i > 0 { current - 1 } else { NULL });
+                    }
+                }
+                let mut ht = self.shards[shard_index].mutex.lock().unwrap();
+                ht.first = if per_shard > 0 { offset } else { NULL };
+                ht.last = if per_shard > 0 { offset + per_shard - 1 } else { NULL };
+            }
+        }
+
+        removed
+    }
+
     /// Xoá entry khỏi cache theo key.
     /// Chỉ remove khỏi DashMap, slot trong arena được tái sử dụng khi `put` overwrite.
     pub fn remove(&self, key: &K) -> Option<V> {
@@ -912,6 +983,44 @@ mod tests {
             sống.len(),
             keys.len()
         );
+    }
+
+    /// `clear()` phải đưa cache về **đúng** trạng thái lúc `new()`, không chỉ
+    /// làm rỗng `mapping`.
+    ///
+    /// Nếu arena không được dựng lại (free-list / linked-list từng shard còn
+    /// trỏ vào node đã xoá) thì `put` sau đó sẽ ghi đè lên node mà linked-list
+    /// không tính là đang sống ⇒ mất dữ liệu âm thầm, và lỗi đó chỉ lộ ra ở
+    /// lần đọc sau. Vì vậy assert cả hai vế: sau clear phải **còn đủ `capacity`
+    /// entry**, chứ không chỉ "get trả None".
+    ///
+    /// Không rẽ nhánh theo `SHARED_ARENA` — hai layout arena phải cho cùng kết
+    /// quả, và test này chạy trên cả hai ở CI.
+    #[test]
+    fn clear_restores_full_capacity() {
+        const S: usize = 8;
+        const CAP: i64 = 64;
+        let cache: LruCache<i64, i64, S> = LruCache::new(CAP as usize);
+
+        for i in 0..CAP {
+            cache.put(i, i * 2);
+        }
+        assert_eq!(cache.get(&0), Some(0), "put/get phải chạy được trước khi clear");
+
+        assert_eq!(cache.clear(), CAP as usize, "clear trả về số entry đã xoá");
+
+        for i in 0..CAP {
+            assert_eq!(cache.get(&i), None, "sau clear phải rỗng, còn sót {i}");
+        }
+
+        // Vế quan trọng: nạp lại **đúng bằng** CAP entry và không mất món nào.
+        // Nếu arena chưa hồi phục, chỉ cần nửa số key là đủ để evict.
+        for i in 0..CAP {
+            cache.put(i, i * 3);
+        }
+        for i in 0..CAP {
+            assert_eq!(cache.get(&i), Some(i * 3), "sau clear phải còn đủ {CAP} key");
+        }
     }
 
     /// Cùng lỗi, nhưng nhìn từ góc khác: capacity 32 **từng được cho là** giữ

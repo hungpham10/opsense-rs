@@ -4,6 +4,7 @@
 //! 1. Xem pipeline   — `Query.status`, `Query.components`
 //! 2. Attribute edit — `Query.attributes`, `Mutation.{set,remove}Attribute`
 //! 3. Truy vấn timeseries — `Query.queryTimeseries`
+//! 4. Dọn station — `Mutation.{clearStation,clearAllStations}`
 //!
 //! Mọi thay đổi pipeline đi qua `Mutation.reload(components)`. Nhưng reload nhận
 //! **danh sách đầy đủ**, nên client phải đọc cấu hình hiện tại trước
@@ -23,7 +24,7 @@ use opsense_mlib::vector::runtime::Component;
 use tokio::sync::RwLock;
 
 use super::ReplHeaders;
-use crate::api::{AppState, Node, Status};
+use crate::api::{AppState, Node, Station, Status};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -40,6 +41,24 @@ pub struct SetAttributeResult {
     pub ok: bool,
     /// True when `OPSENSE_ATTR_<NAME>` is also set (env wins on next lookup).
     pub env_override_active: bool,
+}
+
+/// Kết quả `clearStation` / `clearAllStations`.
+///
+/// `cleared` là **id đã xoá thật** — không đồng nghĩa "hết dữ liệu", mà là
+/// station đã qua cả hai tầng (RAM + storage) không lỗi. `failed` giữ lại lỗi
+/// của từng cái để một station hỏng không che mất phần đã xoá được.
+///
+/// Dùng lại [`crate::api::Station`] (id + kind) — **không** khai tuple
+/// `(String, StationKind)` làm field: async-graphql không implement
+/// `OutputType` cho tuple ⇒ E0277. Object có sẵn cùng shape với
+/// `Status.stations` nên client parse một kiểu cho cả hai.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct ClearStationResult {
+    /// Station đã xoá thành công.
+    pub cleared: Vec<Station>,
+    /// `id: lý do` cho station không xoá được.
+    pub failed: Vec<String>,
 }
 
 /// `ComponentInput` → `Arc<dyn Component>` qua typetag serde.
@@ -408,6 +427,93 @@ impl QueryRoot {
             observations: matched.into_iter().take(limit).cloned().collect(),
         })
     }
+
+    /// Lệnh + cursor T+N của một station — parity với MCP `opsense_orders`.
+    ///
+    /// `status` lọc **sau** khi đã gộp theo `order_id` (xem bước 2 bên dưới):
+    /// station append-only nên bản `open` vẫn còn sau khi lệnh đóng. Lọc ở
+    /// server *trước* sẽ trả lệnh đã đóng là đang mở.
+    async fn orders(
+        &self,
+        ctx: &Context<'_>,
+        node: String,
+        status: Option<String>,
+        from_ts: Option<i64>,
+        to_ts: Option<i64>,
+    ) -> async_graphql::Result<QueryResult> {
+        let s = state(ctx);
+        let now = opsense_components::signal::now_secs();
+        let to = to_ts.unwrap_or(now);
+        let from = from_ts.unwrap_or(to - MAX_QUERY_WINDOW_SECS);
+
+        let station = s
+            .context
+            .station::<Arc<RwLock<TimeseriesStation>>>(&node)
+            .await
+            .map_err(|e| {
+                async_graphql::Error::new(format!("station '{node}' is not a timeseries: {e}"))
+            })?;
+        let rows = {
+            let station = station.read().await;
+            match station.query_recent(from, to).await {
+                Some(rows) => rows,
+                None => {
+                    tracing::warn!(node = %node, "timeseries read returned nothing");
+                    Vec::new()
+                }
+            }
+        };
+
+        // 1. Giữ cursor T+N và lệnh, bỏ quan sát không liên quan.
+        let mut kept: Vec<&Observation> = rows
+            .iter()
+            .filter(|o| {
+                let kind = o.labels.get("kind").map(String::as_str);
+                kind == Some("trading_step") || o.signal == Signal::Order
+            })
+            .collect();
+
+        // 2. Gộp lệnh theo `order_id`, lấy bản ghi **mới nhất** (`>=` để bản
+        //    sau cùng thắng khi trùng `ts`). Cursor T+N không có `order_id`.
+        let mut latest: std::collections::HashMap<&str, (i64, usize)> = Default::default();
+        for (i, o) in kept.iter().enumerate() {
+            let Some(id) = o.labels.get("order_id").map(String::as_str) else {
+                continue;
+            };
+            let ts = o.ts;
+            match latest.get(id) {
+                Some(&(prev_ts, _)) if prev_ts > ts => {}
+                _ => {
+                    latest.insert(id, (ts, i));
+                }
+            }
+        }
+        let keep: std::collections::HashSet<usize> = latest.values().map(|(_, i)| *i).collect();
+        let mut i = 0;
+        kept.retain(|o| {
+            // Cursor (không có order_id) luôn giữ; lệnh thì chỉ giữ bản mới nhất.
+            let is_cursor = o.labels.get("order_id").is_none();
+            let k = is_cursor || keep.contains(&i);
+            i += 1;
+            k
+        });
+
+        // 3. Lọc `status` **sau** khi đã gộp — lúc này mới đúng nghĩa.
+        if let Some(want) = &status {
+            kept.retain(|o| {
+                if o.labels.get("kind").map(String::as_str) == Some("trading_step") {
+                    return true; // cursor không có `status`
+                }
+                o.labels.get("status").map(String::as_str) == Some(want.as_str())
+            });
+        }
+
+        Ok(QueryResult {
+            truncated: rows.len() >= 2000,
+            scanned: rows.len(),
+            observations: kept.into_iter().cloned().collect(),
+        })
+    }
 }
 
 /// Ba bộ lọc server-side của `queryTimeseries`, tách ra thành hàm thuần để test
@@ -592,6 +698,51 @@ impl MutationRoot {
     ) -> async_graphql::Result<bool> {
         Ok(state(ctx).remove_attribute(&name).await)
     }
+
+    /// Xoá sạch **một** station (RAM + storage), vd `clearStation(id: "grid")`.
+    ///
+    /// Mất trọn state của station đó: lệnh đang mở, cursor T+N, plan lưới và
+    /// lịch sử. Node sở hữu nó **vẫn chạy** và sẽ ghi lại từ dữ liệu mới tới —
+    /// nên đây là "xoá sạch rồi để nó tự lấp lại", không phải xoá vĩnh viễn.
+    ///
+    /// Với station Redis/Valkey, khác restart: restart phải nạp lại từ đĩa,
+    /// còn clear xoá luôn key nên không có gì để nạp lại.
+    async fn clear_station(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+    ) -> async_graphql::Result<ClearStationResult> {
+        let kind = state(ctx).clear_station(&id).await.map_err(|e| {
+            async_graphql::Error::new(e.to_string())
+        })?;
+        Ok(ClearStationResult {
+            cleared: vec![Station { id, kind }],
+            failed: Vec::new(),
+        })
+    }
+
+    /// Xoá sạch **mọi** station đã đăng ký.
+    ///
+    /// Không báo lỗi nếu một station hỏng — `failed` liệt kê các cái đó còn
+    /// phần xoá được vẫn nằm trong `cleared`. Xoá cả `grid` lẫn `tick-candle`
+    /// là cách reset trọn phiên giao dịch: kernel đọc cursor T+N từ station,
+    /// nên nếu chỉ xoá một trong hai thì lần chạy kế tiếp có thể tưởng đã đi
+    /// tới nến hiện tại và bỏ qua phần lịch sử còn lại.
+    async fn clear_all_stations(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<ClearStationResult> {
+        let (cleared, failed) = state(ctx).clear_all_stations().await.map_err(|e| {
+            async_graphql::Error::new(e.to_string())
+        })?;
+        Ok(ClearStationResult {
+            cleared: cleared
+                .into_iter()
+                .map(|(id, kind)| Station { id, kind })
+                .collect(),
+            failed,
+        })
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -636,12 +787,43 @@ mod tests {
             "patchComponent",
             "setAttribute",
             "removeAttribute",
+            "clearStation",
+            "clearAllStations",
         ] {
             assert!(
                 sdl.contains(op),
                 "schema missing `{op}`\n--- SDL ---\n{sdl}"
             );
         }
+    }
+
+    /// `ClearStationResult.cleared` **không được** là tuple.
+    ///
+    /// async-graphql không implement `OutputType` cho tuple, nên khai
+    /// `Vec<(String, StationKind)>` là fail lúc build schema:
+    /// E0277 "the trait bound `(String, StationKind): OutputType` is not
+    /// satisfied". Test này đóng băng shape đúng để đổi ngược không sót.
+    #[tokio::test]
+    async fn clear_station_result_cleared_is_object_not_tuple() {
+        let sdl = schema().sdl();
+        assert!(
+            sdl.contains("type ClearStationResult"),
+            "thiếu ClearStationResult\n--- SDL ---\n{sdl}"
+        );
+        assert!(
+            sdl.contains("type Station {"),
+            "cleared phải dùng object `Station` sẵn có (id + kind)\n--- SDL ---\n{sdl}"
+        );
+        assert!(
+            sdl.contains("cleared: [Station!]!"),
+            "`cleared` phải là list Station\n--- SDL ---\n{sdl}"
+        );
+        // Tuple sẽ render thành `kind: StationKind!` trong một type vô danh;
+        // object có `id` + `kind` thì có `id` trong SDL.
+        assert!(
+            sdl.contains("id: String!"),
+            "Station phải có `id`\n--- SDL ---\n{sdl}"
+        );
     }
 
     /// `Runtime::components()` trả JSON typetag + `id` nhét thêm; map sang
