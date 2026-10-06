@@ -829,10 +829,11 @@ impl PatternStation {
             let mut automaton = self.automaton.write().await;
             *automaton = AhoCorasick::new();
         }
+        // `storage` ở đây là `Option<Arc<dyn PatternStorage>>` — **không** có
+        // `RwLock` bọc ngoài (khác `CategoryStation`), nên gọi thẳng, đúng như
+        // `PatternStation::set` đang làm.
         if let Some(storage) = &self.storage {
             storage
-                .read()
-                .await
                 .clear()
                 .await
                 .map_err(|e| Error::other(format!("clear storage pattern thất bại: {e}")))?;
