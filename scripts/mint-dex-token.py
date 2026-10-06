@@ -45,6 +45,9 @@ Port nguyên văn flow của `crates/opsense/tests/common/dex.rs::dex_login_get_
 
 Chỉ dùng stdlib (urllib + http.cookiejar).
 """
+from __future__ import annotations  # chạy được trên Python 3.9: annotation `dict | None`
+                          # chỉ được đánh giá lúc runtime nếu không có dòng này
+
 import base64
 import http.cookiejar
 import json

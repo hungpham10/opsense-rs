@@ -1,0 +1,15 @@
+# Override CHỈ dùng khi triển khai local pipeline grid:
+#
+#   OPSENSE_SERVE_IMAGE=ghcr.io/hungpham10/opsense-serve:v1.0.24 \
+#     docker-compose -f docker-compose.yml -f docker-compose.grid.yml up -d opsense-serve
+#
+# Cố ý KHÔNG đặt tên `docker-compose.override.yml`: compose tự nạp file đó, và
+# khi đó mọi `docker-compose up` của grid sẽ âm thầm chạy pipeline trading —
+# đúng cái điều mà `conf/opsense.conf.toml` tối giản trong repo tránh.
+#
+# `conf/opsense.conf.toml` trong repo giữ nguyên là config tối giản (clock →
+# print). File grid chạy thật là `conf/grid.local.toml` (không track).
+services:
+  opsense-serve:
+    volumes:
+      - ./conf/grid.local.toml:/app/opsense.conf.toml:ro

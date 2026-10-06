@@ -104,11 +104,11 @@ fn render_clear_result(
 ) -> Result<String, String> {
     let mut out = String::new();
     if bulk || r.cleared.len() > 1 {
-        for (id, kind) in &r.cleared {
-            out.push_str(&format!("- {id} ({kind}): cleared\n"));
+        for c in &r.cleared {
+            out.push_str(&format!("- {} ({}): cleared\n", c.id, c.kind));
         }
-    } else if let Some((id, kind)) = r.cleared.first() {
-        out.push_str(&format!("- {id} ({kind}): cleared\n"));
+    } else if let Some(c) = r.cleared.first() {
+        out.push_str(&format!("- {} ({}): cleared\n", c.id, c.kind));
     }
     if !r.failed.is_empty() {
         out.push_str("FAILED:\n");

@@ -68,201 +68,24 @@ fn process(observations) {
         mode = param_mode;
     }
 
+    let tg = trigger();
+    print("TRIGGER=[" + tg + "] type=" + type_of(tg));
     if trigger() == "tick" {
         // Nhánh tick không làm gì: node `tick_2_candle` đã gom nến và tự ghi khi
         // nến đóng. Script chỉ cần **không** ghi đè lên nến đó.
         return [];
     }
 
-    // ── Tách hai nhịp: REVIEW (dựng lưới phân tích) và APPLY (đặt lệnh) ──
-    //
-    // Trước đây mỗi message đến — kể cả heartbeat rỗng của `tick_2_candle` —
-    // đều chạy đủ `snapshot()` + `trade()`, tức ~7,5 lần/giây theo tần suất
-    // aggTrade. Đo được: `snapshot()` ~55 ms/lần, trong đó `sort_by_t` 27 ms,
-    // `merge_candles` 13,6 ms, dựng `points` 6,5 ms; còn kernel
-    // (`grid_fit` 0,19 ms + `transition_analysis` 0,25 ms) gần như miễn phí.
-    // Tức phần tốn là **thao tác mảng trong interpreter Rhai**, lặp lại vô
-    // ích — đốt trọn một core mà không sinh thêm lệnh nào.
-    //
-    // Nay:
-    //   REVIEW — dựng `grid_fit` + `transition_analysis`, nhịp `review_secs`
-    //            (mặc định 1 giờ). Đây mới là việc đắt.
-    //   APPLY  — chỉ đẩy nến vừa đóng vào lưới **đã có**, một lần mỗi nến.
-    let step = bucket_secs(resolution);
-    let now = now_secs();
-
-    // Nến bucket `b` đóng khi `b + step <= now` ⇒ nến đã đóng gần nhất có
-    // `ts = ((now - step) / step) * step`. Tính từ đồng hồ, **không** cần đọc
-    // station — nên nhịp apply rẻ ngay ở cổng chặn đầu tiên.
-    let closed_ts = ((now - step) / step) * step;
-
-    // Marker do chính script ghi, khác `trading_step` của kernel (cái đó mang
-    // ts của nến THỰC SỰ đóng, nên lệch với `closed_ts` khi API chậm — dùng
-    // nó làm nhịp thì lúc dữ liệu trễ sẽ chạy lại nặng mỗi heartbeat).
-    let marks = empty_if_missing(station_query(own, now - hw, now, "summary", "apply_step"));
-    marks += empty_if_missing(station_query(own, now - hw, now, "summary", "review_step"));
-
-    // `state` cho kernel: lệnh đã đóng + cursor T+N + plan đang dùng. Đọc ở
-    // đây một lần rồi truyền xuống `trade` — trước đây `trade()` tự đọc, và
-    // đọc sau khi đã merge/sort nên tốn phần nặng nhất trước khi biết mình có
-    // cần làm việc hay không. Cả ba query này rẻ: ~0,2 ms mỗi cái.
-    //
-    // Plan (`kind = "plan"`) cũng là `signal = "summary"` nhưng **khác kind**,
-    // nên hai query kia không lấy được nó. Mà plan là thứ `portfolio_feed` cần
-    // để dựng lưới: `State::from_observations` đọc `session.plan` từ đúng
-    // `state` này, thiếu nó thì plan rỗng ở **mọi** lời gọi.
-    let state = [];
-    state += empty_if_missing(station_query(own, now - hw, now, "order"));
-    state += empty_if_missing(station_query(own, now - hw, now, "summary", "trading_step"));
-    state += empty_if_missing(station_query(own, now - hw, now, "summary", "plan"));
-
-    let do_apply = mode == "trading" && !seen_step(marks, "apply_step", closed_ts);
-
-    let review_secs = 3600;
-    if is_def_var("param_review_interval_secs") && type_of(param_review_interval_secs) != "()" {
-        review_secs = param_review_interval_secs.to_int();
-    }
-    let do_review = !seen_step(marks, "review_step", now - review_secs);
-
-    if !do_apply && !do_review { return []; }
-
-    // Tới đây là clock ping (trigger "") hoặc klines mới (trigger "history").
-    // Nhánh tick **không** gộp nến ở đây: node `tick_2_candle` làm việc đó và
-    // giữ nến đang mở trong RAM (script stateless, gộp lại mỗi batch thì nến
+    // Clock ping (trigger "") hoặc klines mới (trigger "history") → recompute.
+    // Nhánh tick **không** còn gộp nến ở đây: node `tick_2_candle` làm việc đó
+    // và giữ nến đang mở trong RAM (script stateless, gộp lại mỗi batch thì nến
     // phụ thuộc thứ tự batch và hỏng khi batch thiếu).
-    // Merge + sort **một lần** rồi cho cả hai nhánh dùng chung. Trước đây
-    // `snapshot()` và `trade()` tự đọc station và tự merge/sort riêng ⇒ mỗi
-    // message làm trọng hai lần, đắt gấp đôi mà ra cùng một dữ liệu.
-    let series = build_series(hist_src, live_src, resolution, hw, lw, now, step);
-    if type_of(series) == "()" { return []; }
+    let out = snapshot(hist_src, live_src, symbol, resolution, hw, lw);
 
-    let out = [];
-    if do_review {
-        out += snapshot(series, symbol);
-        // Marker review: ghi kèm để lần sau biết đã review tới lúc nào, kể
-        // cả khi `snapshot()` trả rỗng (thiếu dữ liệu) — nếu không thì thiếu
-        // dữ liệu sẽ thử lại mỗi heartbeat.
-        out += step_marker(now, symbol, "review_step");
-    }
-    if do_apply {
-        let closed = last_closed(series.candles, now, step);
-        if type_of(closed) != "()" {
-            // Map `cfg` cho `portfolio_feed` **phải** dựng ở đây, trong thân
-            // `process`. Runtime nạp `params` thành global `param_<name>` rồi
-            // `call_fn("process")`, nên hàm con KHÔNG nhìn thấy: `is_def_var`
-            // trong `trading_cfg()` trả `false` cho mọi param ⇒ nó luôn rơi về
-            // số hardcode trong thân hàm. Lần này `min_rr` 0,5 trong config chết
-            // âm thầm nên TP rơi về bậc kề. Xem `trading_cfg` bị bỏ.
-            let cfg_calendar = "crypto";
-            if is_def_var("param_calendar") && type_of(param_calendar) != "()" {
-                cfg_calendar = param_calendar;
-            }
-            let cfg_strategy = "rhai";
-            if is_def_var("param_strategy") && type_of(param_strategy) != "()" {
-                cfg_strategy = param_strategy;
-            }
-            let cfg_grid_levels = 4;
-            if is_def_var("param_grid_levels") && type_of(param_grid_levels) != "()" {
-                cfg_grid_levels = param_grid_levels.to_int();
-            }
-            let cfg_sl_pct = 0.008;
-            if is_def_var("param_sl_pct") && type_of(param_sl_pct) != "()" {
-                cfg_sl_pct = param_sl_pct.to_float();
-            }
-            let cfg_min_trades = 3;
-            if is_def_var("param_grid_min_trades") && type_of(param_grid_min_trades) != "()" {
-                cfg_min_trades = param_grid_min_trades.to_int();
-            }
-            let cfg_sharpness = 4.0;
-            if is_def_var("param_grid_weight_sharpness") && type_of(param_grid_weight_sharpness) != "()" {
-                cfg_sharpness = param_grid_weight_sharpness.to_float();
-            }
-            let cfg_max_bit = 20;
-            if is_def_var("param_grid_max_bit") && type_of(param_grid_max_bit) != "()" {
-                cfg_max_bit = param_grid_max_bit.to_int();
-            }
-            let cfg_lookback = 2 * 24 * 3600;
-            if is_def_var("param_lookback_secs") && type_of(param_lookback_secs) != "()" {
-                cfg_lookback = param_lookback_secs.to_int();
-            }
-            let cfg_review = 900;
-            if is_def_var("param_review_interval_secs") && type_of(param_review_interval_secs) != "()" {
-                cfg_review = param_review_interval_secs.to_int();
-            }
-            let cfg_fee = 0.0002;
-            if is_def_var("param_fee_rate") && type_of(param_fee_rate) != "()" {
-                cfg_fee = param_fee_rate.to_float();
-            }
-            let cfg_kelly = 0.25;
-            if is_def_var("param_kelly_fraction") && type_of(param_kelly_fraction) != "()" {
-                cfg_kelly = param_kelly_fraction.to_float();
-            }
-            let cfg_capital = 100000.0;
-            if is_def_var("param_base_capital") && type_of(param_base_capital) != "()" {
-                cfg_capital = param_base_capital.to_float();
-            }
-            let cfg_settlement = 0;
-            if is_def_var("param_settlement_candles") && type_of(param_settlement_candles) != "()" {
-                cfg_settlement = param_settlement_candles.to_int();
-            }
-            let cfg_min_rr = 0.0;
-            if is_def_var("param_min_rr") && type_of(param_min_rr) != "()" {
-                cfg_min_rr = param_min_rr.to_float();
-            }
-
-            let cfg = #{
-                resolution: resolution,
-                calendar: cfg_calendar,
-                strategy: cfg_strategy,
-                grid_levels: cfg_grid_levels,
-                sl_pct: cfg_sl_pct,
-                grid_min_trades: cfg_min_trades,
-                grid_weight_sharpness: cfg_sharpness,
-                grid_max_bit: cfg_max_bit,
-                lookback_secs: cfg_lookback,
-                review_interval_secs: cfg_review,
-                fee_rate: cfg_fee,
-                kelly_fraction: cfg_kelly,
-                base_capital: cfg_capital,
-                settlement_candles: cfg_settlement,
-                min_rr: cfg_min_rr
-            };
-            if is_def_var("param_dag") && type_of(param_dag) != "()" {
-                cfg.dag = param_dag;
-            }
-
-            out += trade(series, state, closed, symbol, cfg);
-            out += step_marker(closed_ts, symbol, "apply_step");
-        }
+    if mode == "trading" {
+        out += trade(hist_src, live_src, own, symbol, resolution, hw);
     }
     out
-}
-
-/// Có marker `kind` nào đã ghi ở `ts >= ts_min` không ⇒ nhịp này đã chạy.
-fn seen_step(state, kind, ts_min) {
-    for o in state {
-        if o["labels"]["kind"] == kind && o["ts"] >= ts_min { return true; }
-    }
-    false
-}
-
-/// Marker nhịp cho chính script (khác `trading_step` của kernel). `ts` = mốc
-/// đã xử lý, nên `seen_step` so `>=` là so "đã gồm mốc này chưa".
-fn step_marker(ts, symbol, kind) {
-    [#{ ts: ts, metric_id: symbol, kind: "metric", signal: "summary", value: 0,
-        labels: #{ kind: kind } }]
-}
-
-/// Đọc nến history + live, merge và sort — **một lần** cho mọi nhánh.
-/// Trả `()` khi thiếu dữ liệu để dựng được chuỗi nến.
-fn build_series(hist_src, live_src, resolution, hw, lw, now, step) {
-    let hist = station_candles(hist_src, now - hw, now, resolution);
-    if type_of(hist) == "()" { return (); }
-    let live = station_candles(live_src, now - lw, now, resolution);
-    if type_of(live) == "()" { return (); }
-    let candles = sort_by_t(merge_candles(hist, live, now, step));
-    if candles.len() < 2 { return (); }
-    #{ now: now, step: step, live: live, candles: candles }
 }
 
 // ── trading: chạy kernel đặt lệnh cho candle vừa đóng ─────────────────────
@@ -276,19 +99,49 @@ fn build_series(hist_src, live_src, resolution, hw, lw, now, step) {
 // restart là mất sạch lệnh. Muốn restart-safe thì đổi sang `parquet`/`sqlite`.
 // Đừng đọc comment cũ "restart không mất lệnh" là đúng với mọi backend.
 
-// Nhánh APPLY: nến đã đóng đi qua kernel trên lưới **đã có** (plan do
-// `fn rebuild` dựng mỗi `review_interval_secs`). Không dựng lại lưới ở đây.
-fn trade(series, state, closed, symbol, cfg) {
-    let candles = series.candles;
-    // ≥ 10 nến để AnalysisGrid dựng được plan.
-    if candles.len() < 10 { return []; }
+fn trade(hist_src, live_src, own, symbol, resolution, hw) {
+    let now = now_secs();
+    let from = now - hw;
+    let step = bucket_secs(resolution);
 
-    // `state` (lệnh + cursor + plan) đã đọc ở `process` và truyền vào — đọc
-    // sớm ở đó vì rẻ, và đọc *trước* khi merge/sort để lúc nến chưa tới không
-    // phải làm việc nặng vô ích.
+    // Kline history cho bucket đã đóng + candle live cho bucket đang mở; xem
+    // `merge_candles` để biết vì sao không để live đè lên nến đã đóng.
+    let hist = station_candles(hist_src, from, now, resolution);
+    let live = station_candles(live_src, from, now, resolution);
+    if type_of(hist) == "()" && type_of(live) == "()" { return []; }
+    let series = merge_candles(empty_if_missing(hist), empty_if_missing(live), now, step);
+    // ≥ 10 nến để AnalysisGrid dựng được plan.
+    if series.len() < 10 { return []; }
+
+    // Chỉ giao trên nến ĐÃ ĐÓNG: bucket + step <= now.
+    let closed = last_closed(series, now, step);
+    if type_of(closed) == "()" { return []; }
+
+    // Lệnh/cursor đều nằm ở own station — nhưng **phải lọc**, không kéo cả
+    // station. Own station lấp đầy tick aggTrade (5 obs/tick, vài nghìn
+    // tick/phút); `station_query` không lọc dựng map cho từng observation và
+    // `max_map_size` của Rhai là trần *engine-wide* (100_000) nên vài chục
+    // nghìn obs là đủ vượt ⇒ cả batch script bị bỏ với
+    // "Size of object map too large", node im bặt, không đặt được lệnh nào.
+    // Đo thật: 26_680 obs trong 1 giờ đã vỡ. Kernel chỉ cần lệnh + cursor.
+    // `station_query` trả `()` khi station chưa tồn tại (node vừa dựng) — nên
+    // gộp qua `empty_if_missing` thay vì cộng thẳng, nếu không sẽ lỗi script.
+    let state = [];
+    state += empty_if_missing(station_query(own, from, now, "order"));
+    state += empty_if_missing(station_query(own, from, now, "summary", "trading_step"));
+    // Plan (`kind = "plan"`) cũng là `signal = "summary"` nhưng **khác kind**,
+    // nên hai lệnh trên không lấy được nó. Mà plan là thứ `portfolio_feed`
+    // cần để dựng lưới: `State::from_observations` đọc `session.plan` từ
+    // đúng `state` này, thiếu nó thì plan rỗng ở **mọi** lời gọi.
+    //
+    // Đo được trước khi sửa: `rebuild xong grids=2` ⇒ nến ngay sau đó
+    // `plan_grids=2`, nhưng từ nến kế tiếp `plan_grids=0` và giữ nguyên 0
+    // cho tới lần rebuild sau (+`review_interval_secs` = 15 nến). Tức chỉ
+    // 1 nến trên 15 nến có lưới để đặt lệnh.
+    state += empty_if_missing(station_query(own, from, now, "summary", "plan"));
     if already_traded(state, closed["t"].to_int()) { return []; }
 
-    portfolio_feed(candles, state, closed, cfg, symbol)
+    portfolio_feed(series, state, closed, trading_cfg(), symbol)
 }
 
 /// `()` (station chưa có) → mảng rỗng để merge.
@@ -325,6 +178,106 @@ fn bucket_secs(resolution) {
     60
 }
 
+/// Cấu hình engine lấy từ `params` của node (đổi chiến lược = đổi TOML).
+fn trading_cfg() {
+    let resolution = "1m";
+    if is_def_var("param_resolution") && type_of(param_resolution) != "()" {
+        resolution = param_resolution;
+    }
+    let calendar = "crypto";
+    if is_def_var("param_calendar") && type_of(param_calendar) != "()" {
+        calendar = param_calendar;
+    }
+    let strategy = "rhai";
+    if is_def_var("param_strategy") && type_of(param_strategy) != "()" {
+        strategy = param_strategy;
+    }
+    // Mặc định 4, khớp `trading.grid_levels` trong config.toml (contract test
+    // `config_file_contract` chốt hai chỗ này phải bằng nhau). 4 vì mỗi ô là
+    // một `TradingGrid` riêng: mốc đầu không có TP dưới, mốc cuối không có TP
+    // trên ⇒ chỉ `levels - 2` mốc dùng được thật. 2 mốc là 0 mốc dùng được.
+    let grid_levels = 4;
+    if is_def_var("param_grid_levels") && type_of(param_grid_levels) != "()" {
+        grid_levels = param_grid_levels.to_int();
+    }
+    let sl_pct = 0.008;
+    if is_def_var("param_sl_pct") && type_of(param_sl_pct) != "()" {
+        sl_pct = param_sl_pct.to_float();
+    }
+    let grid_min_trades = 3;
+    if is_def_var("param_grid_min_trades") && type_of(param_grid_min_trades) != "()" {
+        grid_min_trades = param_grid_min_trades.to_int();
+    }
+    let grid_weight_sharpness = 4.0;
+    if is_def_var("param_grid_weight_sharpness") && type_of(param_grid_weight_sharpness) != "()" {
+        grid_weight_sharpness = param_grid_weight_sharpness.to_float();
+    }
+    let grid_max_bit = 20;
+    if is_def_var("param_grid_max_bit") && type_of(param_grid_max_bit) != "()" {
+        grid_max_bit = param_grid_max_bit.to_int();
+    }
+    let lookback_secs = 2 * 24 * 3600;
+    if is_def_var("param_lookback_secs") && type_of(param_lookback_secs) != "()" {
+        lookback_secs = param_lookback_secs.to_int();
+    }
+    let review_interval_secs = 900;
+    if is_def_var("param_review_interval_secs") && type_of(param_review_interval_secs) != "()" {
+        review_interval_secs = param_review_interval_secs.to_int();
+    }
+    // Chỉ là fallback khi thiếu `param_fee_rate`; giá trị thật do config khai.
+    // Binance USDⓈ-M Futures VIP 0: maker 0.0002, taker 0.0005.
+    let fee_rate = 0.0002;
+    if is_def_var("param_fee_rate") && type_of(param_fee_rate) != "()" {
+        fee_rate = param_fee_rate.to_float();
+    }
+    let kelly_fraction = 0.25;
+    if is_def_var("param_kelly_fraction") && type_of(param_kelly_fraction) != "()" {
+        kelly_fraction = param_kelly_fraction.to_float();
+    }
+    let base_capital = 100000.0;
+    if is_def_var("param_base_capital") && type_of(param_base_capital) != "()" {
+        base_capital = param_base_capital.to_float();
+    }
+    let settlement_candles = 0;
+    if is_def_var("param_settlement_candles") && type_of(param_settlement_candles) != "()" {
+        settlement_candles = param_settlement_candles.to_int();
+    }
+    // RR mục tiêu cho take-profit. `0` ⇒ TP ở bậc kề (mặc định, hành vi gốc).
+    // `> 0` ⇒ TP ở bậc đầu tiên đủ `reward / risk >= min_rr`; không bậc nào
+    // đủ thì kernel **từ chối lệnh** thay vì rơi về bậc kề (RR thấp hơn ⇒ lỗ
+    // ngay khi giá chạm tới). Xem `TradingGrid::tp_for_rr`.
+    let min_rr = 0.0;
+    if is_def_var("param_min_rr") && type_of(param_min_rr) != "()" {
+        min_rr = param_min_rr.to_float();
+    }
+
+    let cfg = #{
+        resolution: resolution,
+        calendar: calendar,
+        strategy: strategy,
+        grid_levels: grid_levels,
+        sl_pct: sl_pct,
+        grid_min_trades: grid_min_trades,
+        grid_weight_sharpness: grid_weight_sharpness,
+        grid_max_bit: grid_max_bit,
+        lookback_secs: lookback_secs,
+        review_interval_secs: review_interval_secs,
+        fee_rate: fee_rate,
+        kelly_fraction: kelly_fraction,
+        base_capital: base_capital,
+        settlement_candles: settlement_candles,
+        min_rr: min_rr
+    };
+
+    // `strategy = "dag"`: genome DAG build riêng ở Python truyền vào qua
+    // `params.dag` (ops + nodes + weights). `Graph` tự emit ONNX rồi chạy
+    // bằng tract — cầu nối giữa model ngoài và kernel.
+    if is_def_var("param_dag") && type_of(param_dag) != "()" {
+        cfg.dag = param_dag;
+    }
+    cfg
+}
+
 // ── Strategy: `fn rebuild` — dựng plan lưới lệnh ───────────────────────────
 //
 // Kernel (`Strategy::rebuild`) gọi hàm này mỗi `review_interval_secs`:
@@ -355,50 +308,6 @@ fn rebuild(candles, prev, params) {
     let min_trades = knob(params, "min_trades", 3.0).to_int();
     let amp = knob(params, "level_edge_amp", 0.10).to_float();
     let sharpness = knob(params, "weight_sharpness", 4.0).to_float();
-    // ── Hình học rủi ro, đo bằng BƯỚC LƯỚI chứ không bằng % giá ──────────────
-    //
-    // Vì sao đổi từ `sl_pct` sang `sl_levels`/`tp_levels`: kernel tính
-    // `sl_long(j) = levels[j] * (1 - sl_pct)` (`qlib/grid.rs:326`), tức risk
-    // **bám theo giá**, còn TP thì bám theo lưới (`reward` = 1 bước). Hai bên
-    // lệch nhau nên RR = step/(entry*sl_pct) trôi theo biến động: đo được
-    // RR 0,51 lúc lưới co, 1,02 lúc lưới nở — cùng một cấu hình.
-    //
-    // `sl_levels` = k (SL cách entry k bước), `tp_levels` = m (TP cách entry m
-    // bước) ⇒ `RR = m/k` **hằng số**, không đổi khi sieve co/nới lưới, và
-    // `win_ceiling` cũng hằng theo vì risk đã bám đúng bước.
-    //
-    // Mặc định k = 1,0 ⇒ RR = 2,0 và hòa vốn ~54%. **Không** xuống dưới ~0,31:
-    // SL phải lớn hơn phí trọn vòng `2·fee·mid ≈ 34` (tức > 0,31 bước), nếu
-    // không thì trả phí nhiều hơn cả khoản lỗ cực hạn.
-    //
-    // **Vì sao 0,5 → 1,0** (đo trên lệnh thật o27–o33):
-    //
-    //   k=0,5 ⇒ SL = 54,7 pts, TP = 109,6 pts. Nhưng nhiễu nến 1 phút đủ để
-    //   đi ngược 54 pts trong ~38 phút: o33 vào short ở 85189,26, giá nhảy
-    //   chạm đúng SL 85243,57 rồi **lại đi xuống tiếp**. Tức SL nằm **trong
-    //   vùng nhiễu** ⇒ đoán đúng hướng vẫn bị quét stop.
-    //
-    //   Tỉ lệ thắng rơi từ 8/10 (80%, o17–o26) xuống 3/7 (43%, o27–o33).
-    //
-    //   RR **sau phí** ở k=0,5 chỉ còn (109,6−34)/(54,7+34) ≈ 0,85 < 1: mỗi
-    //   lệnh thắng thực chất vẫn lỗ nhẹ, nên tỉ lệ thắng phải cao mới gồng,
-    //   mà SL hẹp thì không gồng nổi.
-    //
-    //   k=1,0 đặt SL **đúng 1 bước lưới** (109,6 pts): nằm ngoài nhiễu thường
-    //   lệnh mà vẫn nằm trong lưới (ngoài biên là mục tiêu khi k lớn hơn nữa),
-    //   và RR gross giữ nguyên 2,0 vì m cũng là 2 bước.
-    //
-    // Đánh đổi: rủi ro mỗi lệnh **gấp đôi**, nên `kelly_fraction` và
-    // `base_capital` phải xem lại — cùng `win_p` thì size sẽ tự điều chỉnh
-    // theo `b = 1/sl_pct` (rộng hơn ⇒ size nhỏ hơn).
-    //
-    // `tp_levels` chỉ đổi được TP khi kernel chọn mốc xa hơn mốc kề, tức là
-    // cần `min_rr > 0` ở config. Không set thì TP vẫn ở mốc kề (m = 1) và
-    // `sl_levels` là knob duy nhất điều chỉnh RR.
-    let sl_levels = knob(params, "sl_levels", 1.0).to_float();
-    let tp_levels = knob(params, "tp_levels", 2.0).to_float();
-    // Mật độ đặt lệnh. 0 = tắt, dùng lại `weight_sharpness` cũ.
-    let occ_beta = knob(params, "edge_density_beta", 1.0).to_int().max(0);
     // `fee` đọc MỘT lần ở đây và dùng lại cho cả sàn sieve lẫn `spacing_floor`.
     // Trước đây có hai chỗ đọc với default khác nhau (0.001 ở `spacing_floor`),
     // nên đổi phí ở config mà quên một chỗ thì hai bên lệch nhau im lặng.
@@ -463,47 +372,6 @@ fn rebuild(candles, prev, params) {
     let downs = down_probabilities(t);
     let n_cells = num_cells(g);
 
-    // ── Mật độ đặt lệnh: NGHỊCH ĐẢO occupancy ──────────────────────────────
-    //
-    // Ý tưởng: giá dày nhất ở giữa vùng, nên đặt lệnh dồn vào giữa là đánh vào
-    // chỗ không có lợi thế. Đặt ở mép — nơi giá hiếm — thì mỗi lần vào lệnh là
-    // một lần giá bị kéo căng, và SL nằm ngoài biên nên hiếm khi bị chọc.
-    //
-    // Dùng occupancy **thực nghiệm** (`grid_occupancy` = số interval bắt nguồn
-    // từ mỗi ô) thay vì ép một hình chuông: giá BTC có fat tails và đổi hình
-    // dạng theo regime, nên `exp(β·x²)` chỉ đúng khi phân phối đã chuẩn hoá —
-    // còn occupancy thì tự bám dữ liệu thật.
-    //
-    // Cố ý KHÔNG dùng `up_probabilities` cho việc này: đó là P(đi lên | rời ô),
-    // là xác suất *hướng*, khác hẳn P(giá ở ô) mà ta cần.
-    let occ_tot = [];
-    // Trọng số ô chuẩn hoá TOÀN CỤC (max = 1). Chuẩn hoá trong từng ô sẽ
-    // triệt tiêu đúng cái khác biệt cần giữ: mọi mốc trong một ô có cùng
-    // occupancy, mà kernel lại cộng `weight` vào `win_p` (`portfolio.rs:1020`)
-    // nên khác biệt phải nằm GIỮA các ô mới có tác dụng.
-    let occ_w = [];
-    if occ_beta > 0 {
-        let occ = grid_occupancy(g, points, interval);
-        for cell in 0..n_cells {
-            let seen = 0.0;
-            for bucket in occ {
-                if cell < bucket.len() { seen += bucket[cell].to_float(); }
-            }
-            // +1 để ô không có dữ liệu khỏi bị chia 0, và để w luôn tương đối.
-            occ_tot += [seen + 1.0];
-        }
-        let mx = 0.0;
-        for c in 0..n_cells {
-            let v = 1.0;
-            for b in 0..occ_beta { v *= 1.0 / occ_tot[c]; }
-            occ_w += [v];
-            if v > mx { mx = v; }
-        }
-        if mx > 0.0 {
-            for c in 0..n_cells { occ_w[c] = occ_w[c] / mx; }
-        }
-    }
-
     // Bỏ ô nào không đủ rộng để mọi mốc trong ô còn lãi sau phí sàn.
     //
     // Vì sao **bỏ ô** mà không rút bớt số mốc: mỗi ô là một `TradingGrid`
@@ -535,15 +403,9 @@ fn rebuild(candles, prev, params) {
     // mốc là `step / levels`. Dùng `step / (levels - 1)` (như `spacing_floor`
     // bên dưới) sẽ **phóng đại** TP, tức làm ngưỡng hòa vốn thấp hơn thật —
     // sai theo hướng nguy hiểm: báo rẻ hơn để đặt lệnh.
-    let gap = if levels >= 2 { step / levels_f } else { 0.0 };
-    let spacing_frac = gap / mid;
-    // Risk tính theo BƯỚC (`k` bước), không theo % giá — đây là chỗ RR và
-    // ngưỡng hòa vốn trở nên bất biến. `sl_levels` hằng 0 thì rơi về
-    // `sl_pct` cũ để tắt cơ chế mà không phải sửa config.
-    let sl_pct = if gap > 0.0 { sl_levels * gap / mid } else { knob(params, "sl_pct", 0.008).to_float() };
-    // `reward` phải là `tp_levels` bước chứ không phải 1 bước, nếu không
-    // ngưỡng hòa vốn báo cao hơn thật và kernel đặt lệnh ở mức cần thiết.
-    let cap = win_ceiling(spacing_frac * tp_levels, sl_pct, fee);
+    let spacing_frac = if levels >= 2 { (step / levels_f) / mid } else { 0.0 };
+    let sl_pct = knob(params, "sl_pct", 0.008).to_float();
+    let cap = win_ceiling(spacing_frac, sl_pct, fee);
     if type_of(cap) == "()" {
         // Mốc cuối không có TP phía trên ⇒ `reward = 0` ⇒ không tỉ lệ thắng nào
         // hòa vốn. Vẫn dựng lưới (mốc khác vẫn dùng được), nhưng nói ra.
@@ -597,33 +459,11 @@ fn rebuild(candles, prev, params) {
             short_win += [if sw + sl >= min_trades { clamp_win(sw / (sw + sl), cap) } else { model_short }];
         }
 
-        // SL của ô này: `k` bước tính từ **giữa ô**. Vì các mốc trong ô lệch
-        // giữa ô không quá `step/2`, risk mỗi mốc sai số ≤ ~0,2% so với `k`×
-        // spacing — chấp nhận được, và đổi lại RR thành hằng số.
-        let cell_mid = cell_lo + step / 2.0;
-        let cell_sl_pct = if gap > 0.0 { sl_levels * gap / cell_mid } else { params.sl_pct };
-
-        // Trọng số theo nghịch đảo occupancy: ô giá hiếm ⇒ nhân lớn. Ô trung
-        // tâm (giá dày) ⇒ nhân nhỏ. Chuẩn hoá cho tổng = 1 như `weights_normal`
-        // để so sánh được với hình dạng cũ.
-        let w = [];
-        if occ_w.len() == n_cells && occ_w[cell] > 0.0 {
-            // Chia đều trong ô để tổng của ô bằng `occ_w[cell]` (≤ 1): giữ được
-            // thang tương đối giữa các ô mà vẫn không vượt 1.
-            let per = occ_w[cell] / levels.to_float();
-            for j in 0..levels { w += [per]; }
-        }
-
-        let cell_plan = #{ levels: lv,
-                           sl_pct: cell_sl_pct,
-                           weight_sharpness: sharpness,
-                           long_win: long_win,
-                           short_win: short_win };
-        // `with_weights` (`qlib/grid.rs:345`) **im lặng bỏ qua** nếu số phần tử
-        // lệch số level — nên chỉ đặt khi đúng độ dài, còn lại để plan.rs
-        // fallback về `weight_sharpness` như cũ.
-        if w.len() == levels { cell_plan.weights = w; }
-        plans += [cell_plan];
+        plans += [#{ levels: lv,
+                     sl_pct: params.sl_pct,
+                     weight_sharpness: sharpness,
+                     long_win: long_win,
+                     short_win: short_win }];
     }
     plans
 }
@@ -740,13 +580,17 @@ fn candle_obs(ts, field, value, symbol, resolution) {
 
 // ── snapshot: history + live → grid/transition → summary obs ──────────────
 
-// Nhánh REVIEW: dựng lại lưới phân tích + xác suất chuyển trạng thái, nhịp
-// riêng (`review_interval_secs`). Nhận `series` dựng sẵn — không tự đọc
-// station, vì `process()` đã merge/sort một lần cho cả hai nhánh.
-fn snapshot(series, symbol) {
-    let now = series.now;
-    let live = series.live;
-    let candles = series.candles;
+fn snapshot(hist_src, own, symbol, resolution, hw, lw) {
+    let now = now_secs();
+
+    let hist = station_candles(hist_src, now - hw, now, resolution);
+    if type_of(hist) == "()" { return []; }
+    let live = station_candles(own, now - lw, now, resolution);
+    if type_of(live) == "()" { return []; }
+
+    // Kline history cho bucket đã đóng + candle live cho bucket đang mở.
+    let step = bucket_secs(resolution);
+    let candles = sort_by_t(merge_candles(hist, live, now, step));
     if candles.len() < 2 { return []; }
 
     let points = [];

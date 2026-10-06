@@ -94,15 +94,21 @@ pub struct QueryResult {
 }
 
 /// Cấu hình đang chạy của một component (`Query.components`).
-/// Kết quả `clearStation` / `clearAllStations`.
+/// Một station đã xoá — cùng shape với `Status.stations`.
 ///
-/// `cleared` là **cặp (id, kind)** — GraphQL trả tuple thành list 2 phần tử,
-/// nên serde đọc `Vec<(String, String)>` là khớp. `kind` giữ dạng `String`
-/// thay vì enum `StationKind` để client không phụ thuộc vào tên biến thể enum
-/// bên server (đổi `rename_items` sau này không làm hỏng client cũ).
+/// `kind` giữ dạng `String` thay vì enum `StationKind` để client không phụ thuộc
+/// vào tên biến thể enum bên server (đổi `rename_items` sau này không làm hỏng
+/// client cũ).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ClearedStation {
+    pub id: String,
+    pub kind: String,
+}
+
+/// Kết quả `clearStation` / `clearAllStations`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClearStationResult {
-    pub cleared: Vec<(String, String)>,
+    pub cleared: Vec<ClearedStation>,
     #[serde(default)]
     pub failed: Vec<String>,
 }
