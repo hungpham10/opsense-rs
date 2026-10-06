@@ -4,6 +4,7 @@
 //! 1. Xem pipeline   — `Query.status`, `Query.components`
 //! 2. Attribute edit — `Query.attributes`, `Mutation.{set,remove}Attribute`
 //! 3. Truy vấn timeseries — `Query.queryTimeseries`
+//! 4. Dọn station — `Mutation.{clearStation,clearAllStations}`
 //!
 //! Mọi thay đổi pipeline đi qua `Mutation.reload(components)`. Nhưng reload nhận
 //! **danh sách đầy đủ**, nên client phải đọc cấu hình hiện tại trước
@@ -18,6 +19,7 @@ use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::Extension;
 use axum::extract::State;
 use opsense_core::Observation;
+use opsense_core::StationKind;
 use opsense_core::TimeseriesStation;
 use opsense_mlib::vector::runtime::Component;
 use tokio::sync::RwLock;
@@ -40,6 +42,19 @@ pub struct SetAttributeResult {
     pub ok: bool,
     /// True when `OPSENSE_ATTR_<NAME>` is also set (env wins on next lookup).
     pub env_override_active: bool,
+}
+
+/// Kết quả `clearStation` / `clearAllStations`.
+///
+/// `cleared` là **id đã xoá thật** — không đồng nghĩa "hết dữ liệu", mà là
+/// station đã qua cả hai tầng (RAM + storage) không lỗi. `failed` giữ lại lỗi
+/// của từng cái để một station hỏng không che mất phần đã xoá được.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct ClearStationResult {
+    /// `id` → loại station đã xoá (vd `("grid", TIMESERIES)`).
+    pub cleared: Vec<(String, StationKind)>,
+    /// `id: lý do` cho station không xoá được.
+    pub failed: Vec<String>,
 }
 
 /// `ComponentInput` → `Arc<dyn Component>` qua typetag serde.
@@ -592,6 +607,45 @@ impl MutationRoot {
     ) -> async_graphql::Result<bool> {
         Ok(state(ctx).remove_attribute(&name).await)
     }
+
+    /// Xoá sạch **một** station (RAM + storage), vd `clearStation(id: "grid")`.
+    ///
+    /// Mất trọn state của station đó: lệnh đang mở, cursor T+N, plan lưới và
+    /// lịch sử. Node sở hữu nó **vẫn chạy** và sẽ ghi lại từ dữ liệu mới tới —
+    /// nên đây là "xoá sạch rồi để nó tự lấp lại", không phải xoá vĩnh viễn.
+    ///
+    /// Với station Redis/Valkey, khác restart: restart phải nạp lại từ đĩa,
+    /// còn clear xoá luôn key nên không có gì để nạp lại.
+    async fn clear_station(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+    ) -> async_graphql::Result<ClearStationResult> {
+        let kind = state(ctx).clear_station(&id).await.map_err(|e| {
+            async_graphql::Error::new(e.to_string())
+        })?;
+        Ok(ClearStationResult {
+            cleared: vec![(id, kind)],
+            failed: Vec::new(),
+        })
+    }
+
+    /// Xoá sạch **mọi** station đã đăng ký.
+    ///
+    /// Không báo lỗi nếu một station hỏng — `failed` liệt kê các cái đó còn
+    /// phần xoá được vẫn nằm trong `cleared`. Xoá cả `grid` lẫn `tick-candle`
+    /// là cách reset trọn phiên giao dịch: kernel đọc cursor T+N từ station,
+    /// nên nếu chỉ xoá một trong hai thì lần chạy kế tiếp có thể tưởng đã đi
+    /// tới nến hiện tại và bỏ qua phần lịch sử còn lại.
+    async fn clear_all_stations(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<ClearStationResult> {
+        let (cleared, failed) = state(ctx).clear_all_stations().await.map_err(|e| {
+            async_graphql::Error::new(e.to_string())
+        })?;
+        Ok(ClearStationResult { cleared, failed })
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -636,6 +690,8 @@ mod tests {
             "patchComponent",
             "setAttribute",
             "removeAttribute",
+            "clearStation",
+            "clearAllStations",
         ] {
             assert!(
                 sdl.contains(op),

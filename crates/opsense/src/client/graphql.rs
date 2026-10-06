@@ -94,6 +94,19 @@ pub struct QueryResult {
 }
 
 /// Cấu hình đang chạy của một component (`Query.components`).
+/// Kết quả `clearStation` / `clearAllStations`.
+///
+/// `cleared` là **cặp (id, kind)** — GraphQL trả tuple thành list 2 phần tử,
+/// nên serde đọc `Vec<(String, String)>` là khớp. `kind` giữ dạng `String`
+/// thay vì enum `StationKind` để client không phụ thuộc vào tên biến thể enum
+/// bên server (đổi `rename_items` sau này không làm hỏng client cũ).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ClearStationResult {
+    pub cleared: Vec<(String, String)>,
+    #[serde(default)]
+    pub failed: Vec<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ComponentConfig {
     pub id: String,
@@ -414,6 +427,31 @@ impl OpsenseClient {
             name: &'a str,
         }
         self.gql("removeAttribute", MUTATION, Vars { name }).await
+    }
+
+    /// Xoá sạch **một** station (RAM + storage). Node vẫn chạy và sẽ ghi lại
+    /// dữ liệu mới tới — xoá có tác dụng, không phải xoá vĩnh viễn.
+    pub async fn clear_station(&self, id: &str) -> anyhow::Result<ClearStationResult> {
+        const MUTATION: &str = r#"
+            mutation($id: String!) {
+                clearStation(id: $id) { cleared failed }
+            }
+        "#;
+        #[derive(Serialize)]
+        struct Vars<'a> {
+            id: &'a str,
+        }
+        self.gql("clearStation", MUTATION, Vars { id }).await
+    }
+
+    /// Xoá sạch **mọi** station đã đăng ký.
+    pub async fn clear_all_stations(&self) -> anyhow::Result<ClearStationResult> {
+        const MUTATION: &str = r#"
+            mutation { clearAllStations { cleared failed } }
+        "#;
+        #[derive(Serialize)]
+        struct NoVars {}
+        self.gql("clearAllStations", MUTATION, NoVars {}).await
     }
 }
 
