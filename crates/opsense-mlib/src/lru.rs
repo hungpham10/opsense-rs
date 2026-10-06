@@ -594,7 +594,9 @@ where
                 ht.first = NULL;
                 ht.last = NULL;
             }
-            self.free_head = AtomicUsize::new(if len == 0 { NULL } else { 0 });
+            // `free_head` là field thường sau `&self` ⇒ phải `store`, không gán.
+            self.free_head
+                .store(if len == 0 { NULL } else { 0 }, Ordering::Release);
         }
 
         // Arena chia cứng: ranh giới khối đóng dấu lúc `new()` và không dịch,

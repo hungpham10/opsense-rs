@@ -197,9 +197,9 @@ impl Context {
         };
 
         match &station {
-            Station::Timeseries(inner) => inner.clear().await,
+            Station::Timeseries(inner) => inner.read().await.clear().await,
             Station::Category(inner) => inner.write().await.clear().await,
-            Station::Pattern(inner) => inner.clear().await,
+            Station::Pattern(inner) => inner.read().await.clear().await,
         }?;
 
         Ok(station.kind())
@@ -227,9 +227,9 @@ impl Context {
         let mut failed = Vec::new();
         for (id, station) in stations {
             let result = match &station {
-                Station::Timeseries(inner) => inner.clear().await,
+                Station::Timeseries(inner) => inner.read().await.clear().await,
                 Station::Category(inner) => inner.write().await.clear().await,
-                Station::Pattern(inner) => inner.clear().await,
+                Station::Pattern(inner) => inner.read().await.clear().await,
             };
             match result {
                 Ok(()) => cleared.push((id, station.kind())),

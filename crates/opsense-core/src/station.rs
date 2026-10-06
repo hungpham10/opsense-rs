@@ -830,9 +830,12 @@ impl PatternStation {
             *automaton = AhoCorasick::new();
         }
         if let Some(storage) = &self.storage {
-            storage.clear().await.map_err(|e| {
-                Error::other(format!("clear storage pattern thất bại: {e}"))
-            })?;
+            storage
+                .read()
+                .await
+                .clear()
+                .await
+                .map_err(|e| Error::other(format!("clear storage pattern thất bại: {e}")))?;
         }
         Ok(())
     }
@@ -927,11 +930,25 @@ impl CategoryStation {
     /// `SnowflakeId` là **bộ đếm**, không phải dữ liệu — giữ nguyên để id cấp
     /// tiếp theo không đụng id đã cấp (tránh hai bản ghi khác nhau cùng id).
     pub async fn clear(&mut self) -> Result<(), Error> {
-        self.search = Search::<u8>::new(1, self.storage.clone());
+        // Radix tree RAM phải dựng lại từ rỗng — giữ `search` cũ thì `insert`
+        // sau đó vẫn thấy node đã xoá, tức clear vô tác dụng ở tầng RAM.
+        //
+        // Backend nào có storage thì `Search::new` trỏ lại chính storage đó
+        // (radix đọc từ đĩa nên không cần nạp lại gì); không có thì thuần RAM.
+        self.search = match &self.storage {
+            Some(storage) => Search::<u8>::new(1, storage.clone()),
+            None => Search::<u8>::in_memory(1),
+        };
+
+        // Tầng đĩa sau: backend chưa hiện thực `clear` thì `Err` — đã xoá RAM
+        // xong mà vẫn báo lỗi là đúng, vì dữ liệu trên đĩa còn nguyên.
         if let Some(storage) = &self.storage {
-            storage.clear().await.map_err(|e| {
-                Error::other(format!("clear storage category thất bại: {e}"))
-            })?;
+            storage
+                .read()
+                .await
+                .clear()
+                .await
+                .map_err(|e| Error::other(format!("clear storage category thất bại: {e}")))?;
         }
         Ok(())
     }

@@ -408,6 +408,19 @@ macro_rules! declare_category_storage {
             /// Bắt đầu một transaction (sync, không await — đúng theo cách radix gọi).
             /// Buffer ops; mọi thay đổi chỉ lộ ra khi `commit`.
             fn new_tx(&self) -> Box<dyn CategoryTx>;
+
+            /// Xoá sạch toàn bộ dữ liệu (node + shard root).
+            ///
+            /// Mặc định **báo lỗi** chứ không im lặng thành công: backend chưa
+            /// hiện thực thì `CategoryStation::clear` sẽ in lỗi này lên
+            /// `failed` của `clearAllStations`, để người gọi thấy dữ liệu
+            /// chưa thật sự được xoá. Nếu mặc định là `Ok(())` thì lệnh clear
+            /// sẽ báo thành công trong khi dữ liệu vẫn còn nguyên trên đĩa.
+            async fn clear(&self) -> Result<()> {
+                Err(StorageError::Internal(
+                    "CategoryStorage: backend chưa hiện thực clear()".into(),
+                ))
+            }
         }
     };
 }
