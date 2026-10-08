@@ -71,7 +71,6 @@ fn memonly(cfg: &mut Config) {
 
 /// ── Tầng 1: config contract ────────────────────────────────────────────────
 #[test]
-#[ignore = "backlog: config drift vs contract test — xem PR #347"]
 fn config_file_contract() {
     let cfg = Config::load(Path::new(CONFIG_PATH))
         .expect("strategies/binance/config.toml phải parse + validate");
