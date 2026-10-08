@@ -1154,7 +1154,9 @@ mod tests {
         assert!(!s.remove("he").await.unwrap());
         assert_eq!(s.count().await.unwrap(), 2);
 
-        s.clear().await.unwrap();
+        // `PatternStorage` và `CategoryStorage` đều có `clear()` ⇒ `s.clear()`
+        // là ambiguous (E0034). Test này kiểm tra **pattern** nên gọi rõ trait.
+        PatternStorage::clear(&s).await.unwrap();
         assert_eq!(s.count().await.unwrap(), 0);
         assert!(!s.contains("she").await.unwrap());
 
