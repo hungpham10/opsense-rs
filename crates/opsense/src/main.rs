@@ -95,12 +95,15 @@ enum Commands {
     Query {
         /// Station id.
         node: String,
-        /// From ts (unix seconds, inclusive). Mặc định = cửa sổ tối đa cho phép.
+        /// From ts (inclusive): unix giây (vd `1757000000`) **hoặc** khoảng
+        /// tương đối (`90s`, `15m`, `2h`, `7d`, `1w`, `now`). Mặc định = cửa sổ
+        /// tối đa cho phép.
         #[arg(long)]
-        from: Option<i64>,
-        /// To ts (unix seconds, inclusive). Mặc định = now.
+        from: Option<String>,
+        /// To ts (inclusive): unix giây hoặc khoảng tương đối như `--from`.
+        /// Mặc định = now.
         #[arg(long)]
-        to: Option<i64>,
+        to: Option<String>,
         /// Số dòng tối đa (mặc định 1000, trần cứng 10000).
         #[arg(long)]
         limit: Option<i64>,
@@ -115,6 +118,10 @@ enum Commands {
         /// nên muốn lệnh đã đóng thì dùng cờ này, không phải `--label-kind`.
         #[arg(long)]
         status: Option<String>,
+        /// Thứ tự dòng: `asc` | `desc`. Mặc định `desc` (mới nhất trước), nên
+        /// `--limit` lấy đúng các dòng mới nhất.
+        #[arg(long)]
+        order: Option<String>,
         #[arg(long)]
         endpoint: Option<String>,
     },
@@ -127,10 +134,17 @@ enum Commands {
         /// `open` | `closed`; bỏ trống → cả hai.
         #[arg(long)]
         status: Option<String>,
+        /// Unix giây hoặc khoảng tương đối (`2h`, `now-1d`), như `query --from`.
         #[arg(long)]
-        from: Option<i64>,
+        from: Option<String>,
         #[arg(long)]
-        to: Option<i64>,
+        to: Option<String>,
+        /// Số dòng tối đa (mặc định 1000, trần cứng 10000).
+        #[arg(long)]
+        limit: Option<i64>,
+        /// Thứ tự dòng: `asc` | `desc` (mặc định `desc`).
+        #[arg(long)]
+        order: Option<String>,
         #[arg(long)]
         endpoint: Option<String>,
     },
@@ -308,9 +322,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     signal,
                     label_kind,
                     status,
+                    order,
                     endpoint,
                 }) => {
-                    if let Err(e) = opsense::cli::query(endpoint, &node, from, to, limit, signal, label_kind, status).await {
+                    if let Err(e) = opsense::cli::query(endpoint, &node, from, to, limit, signal, label_kind, status, order).await {
                         eprintln!("query error: {e}");
                         std::process::exit(1);
                     }
@@ -320,9 +335,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     status,
                     from,
                     to,
+                    limit,
+                    order,
                     endpoint,
                 }) => {
-                    if let Err(e) = opsense::cli::orders(endpoint, &node, status, from, to).await {
+                    if let Err(e) = opsense::cli::orders(endpoint, &node, status, from, to, limit, order).await {
                         eprintln!("orders error: {e}");
                         std::process::exit(1);
                     }

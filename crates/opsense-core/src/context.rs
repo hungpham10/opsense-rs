@@ -257,7 +257,11 @@ impl opsense_mlib::vector::runtime::Context for Context {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opsense_model::events::{Signal, TelemetryKind};
+    // `use super::*` không mang `Observation`/`TimeseriesStation` vào scope:
+    // module cha chỉ import `Station`/`StationKind`. Không có hai dòng này thì
+    // `cargo test --no-run` fail ở `opsense-core` trước cả khi tới crate khác.
+    use crate::station::TimeseriesStation;
+    use opsense_model::events::{Observation, Signal, TelemetryKind};
     use opsense_model::secret::Secret;
 
     fn obs(ts: i64, value: f64) -> Observation {

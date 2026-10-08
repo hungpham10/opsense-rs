@@ -134,6 +134,12 @@ pub struct QueryResult {
     pub truncated: bool,
     /// Số dòng đã quét trong cửa sổ (trước khi lọc/cắt).
     pub scanned: usize,
+    /// Đơn vị đã áp dụng: `"asc"` | `"desc"`.
+    ///
+    /// Luôn có mặt (kể cả khi caller không truyền `order`) vì đây là **hợp
+    /// đồng** để agent không phải đoán: cùng một payload trả về theo hai chiều
+    /// khác nhau thì cột `ts` tăng hay giảm chính là thứ phải nói ra.
+    pub order: String,
 }
 
 #[derive(SimpleObject, Clone, Debug)]
@@ -363,6 +369,7 @@ impl QueryRoot {
         signal: Option<String>,
         label_kind: Option<String>,
         status: Option<String>,
+        order: Option<String>,
     ) -> async_graphql::Result<QueryResult> {
         let s = state(ctx);
 
@@ -372,6 +379,7 @@ impl QueryRoot {
         let to = to_ts.unwrap_or(now);
         let from = from_ts.unwrap_or(to - MAX_QUERY_WINDOW_SECS);
         let limit = check_query_bounds(from, to, limit)?;
+        let order = parse_order(order.as_deref())?;
 
         let station = s
             .context
@@ -420,11 +428,13 @@ impl QueryRoot {
             .iter()
             .filter(|o| matches_filters(o, want_signal.as_ref(), label_kind.as_deref(), status.as_deref()))
             .collect();
-        let truncated = matched.len() > limit;
+        let matched: Vec<Observation> = matched.into_iter().cloned().collect();
+        let (observations, truncated) = order_and_limit(&matched, limit, order == Order::Desc);
         Ok(QueryResult {
+            order: order_name(order).to_string(),
             truncated,
             scanned: rows.len(),
-            observations: matched.into_iter().take(limit).cloned().collect(),
+            observations,
         })
     }
 
@@ -440,11 +450,15 @@ impl QueryRoot {
         status: Option<String>,
         from_ts: Option<i64>,
         to_ts: Option<i64>,
+        limit: Option<i64>,
+        order: Option<String>,
     ) -> async_graphql::Result<QueryResult> {
         let s = state(ctx);
         let now = opsense_components::signal::now_secs();
         let to = to_ts.unwrap_or(now);
         let from = from_ts.unwrap_or(to - MAX_QUERY_WINDOW_SECS);
+        let limit = check_query_bounds(from, to, limit)?;
+        let order = parse_order(order.as_deref())?;
 
         let station = s
             .context
@@ -508,10 +522,15 @@ impl QueryRoot {
             });
         }
 
+        // Cắt **sau** khi gộp + lọc: cắt sớm hơn sẽ mất bản `closed` của một
+        // lệnh vẫn còn bản `open` cũ trong cửa sổ ⇒ `status: "closed"` rỗng.
+        let kept: Vec<Observation> = kept.into_iter().cloned().collect();
+        let (observations, truncated) = order_and_limit(&kept, limit, order == Order::Desc);
         Ok(QueryResult {
-            truncated: rows.len() >= 2000,
+            order: order_name(order).to_string(),
+            truncated,
             scanned: rows.len(),
-            observations: kept.into_iter().cloned().collect(),
+            observations,
         })
     }
 }
@@ -544,6 +563,49 @@ fn matches_filters(
         return false;
     }
     true
+}
+
+/// Thứ tự trả về. Mặc định `desc` (mới nhất trước): người/agent hỏi "vừa xảy ra
+/// gì" thì phải nhìn cuối cửa sổ, mà `take(limit)` trên dữ liệu tăng dần lại cắt
+/// phần **cũ nhất** — sai đúng cái người ta cần xem nhất.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Order {
+    Asc,
+    Desc,
+}
+
+fn parse_order(raw: Option<&str>) -> async_graphql::Result<Order> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(Order::Desc),
+        Some(v) if v.eq_ignore_ascii_case("asc") => Ok(Order::Asc),
+        Some(v) if v.eq_ignore_ascii_case("desc") => Ok(Order::Desc),
+        Some(v) => Err(async_graphql::Error::new(format!(
+            "order '{v}' không hợp lệ; chỉ nhận \"asc\" hoặc \"desc\""
+        ))),
+    }
+}
+
+fn order_name(o: Order) -> &'static str {
+    match o {
+        Order::Asc => "asc",
+        Order::Desc => "desc",
+    }
+}
+
+/// Cắt + đảo chiều. `rows` từ `query_recent` **luôn** tăng dần theo `ts` — đó
+/// là tiền đề để `desc` lấy đúng `limit` dòng *mới nhất*.
+///
+/// `truncated` tính trước khi cắt ⇒ đúng nghĩa "còn dữ liệu ngoài `limit`" ở cả
+/// hai chiều, không phụ thuộc thứ tự cắt.
+fn order_and_limit(rows: &[Observation], limit: usize, desc: bool) -> (Vec<Observation>, bool) {
+    let truncated = rows.len() > limit;
+    let out = if desc {
+        let start = rows.len().saturating_sub(limit);
+        rows[start..].iter().rev().cloned().collect()
+    } else {
+        rows[..rows.len().min(limit)].to_vec()
+    };
+    (out, truncated)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -783,6 +845,9 @@ mod tests {
             "components",
             "attributes",
             "queryTimeseries",
+            // `orders` có resolver từ trước nhưng thiếu trong danh sách này:
+            // xoá resolver mà test vẫn xanh thì test không bảo vệ được gì.
+            "orders",
             "reload",
             "patchComponent",
             "setAttribute",
@@ -795,6 +860,12 @@ mod tests {
                 "schema missing `{op}`\n--- SDL ---\n{sdl}"
             );
         }
+        // `order` là hợp đồng: client đọc nó để biết `ts` tăng hay giảm, nên
+        // phải là `String!` (không nullable) — thiếu là mọi client cũ decode hỏng.
+        assert!(
+            sdl.contains("order: String!"),
+            "QueryResult phải có `order: String!`\n--- SDL ---\n{sdl}"
+        );
     }
 
     /// `ClearStationResult.cleared` **không được** là tuple.
@@ -1100,3 +1171,73 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+    use opsense_model::events::TelemetryKind;
+
+    fn rows(n: i64) -> Vec<Observation> {
+        (1..=n)
+            .map(|i| Observation {
+                ts: i,
+                metric_id: "m".into(),
+                value: 0.0,
+                labels: Default::default(),
+                // `TelemetryKind`/`Signal` **không** impl `Default` — dựng
+                // bằng biến thể thật thay vì `Default::default()`.
+                kind: TelemetryKind::Metric,
+                signal: Signal::Order,
+                severity: None,
+            })
+            .collect()
+    }
+
+    fn tss(out: &[Observation]) -> Vec<i64> {
+        out.iter().map(|o| o.ts).collect()
+    }
+
+    #[test]
+    fn parse_order_defaults_to_desc_and_is_case_insensitive() {
+        assert_eq!(parse_order(None).unwrap(), Order::Desc);
+        assert_eq!(parse_order(Some("")).unwrap(), Order::Desc);
+        assert_eq!(parse_order(Some("DESC")).unwrap(), Order::Desc);
+        assert_eq!(parse_order(Some(" asc ")).unwrap(), Order::Asc);
+        let err = parse_order(Some("descending")).expect_err("phải từ chối");
+        let msg = err.message;
+        assert!(msg.contains("asc") && msg.contains("desc"), "{msg}");
+    }
+
+    /// `desc` + `limit` phải lấy dòng **mới nhất**: đây là cả lý do `order` tồn
+    /// tại — `take(limit)` trên dữ liệu tăng dần cắt phần cũ nhất.
+    #[test]
+    fn order_and_limit_takes_newest_when_desc() {
+        let r = rows(5);
+        let (out, trunc) = order_and_limit(&r, 2, true);
+        assert_eq!(tss(&out), vec![5, 4]);
+        assert!(trunc);
+        let (out, trunc) = order_and_limit(&r, 9, true);
+        assert_eq!(tss(&out), vec![5, 4, 3, 2, 1]);
+        assert!(!trunc);
+    }
+
+    #[test]
+    fn order_and_limit_takes_oldest_when_asc() {
+        let r = rows(5);
+        let (out, trunc) = order_and_limit(&r, 2, false);
+        assert_eq!(tss(&out), vec![1, 2]);
+        assert!(trunc);
+        let (out, trunc) = order_and_limit(&r, 9, false);
+        assert_eq!(tss(&out), vec![1, 2, 3, 4, 5]);
+        assert!(!trunc);
+    }
+
+    #[test]
+    fn order_and_limit_handles_empty_rows() {
+        let (out, trunc) = order_and_limit(&[], 10, true);
+        assert!(out.is_empty());
+        assert!(!trunc);
+        let (out, trunc) = order_and_limit(&[], 10, false);
+        assert!(out.is_empty());
+        assert!(!trunc);
+    }
+}

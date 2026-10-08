@@ -9,7 +9,7 @@ use rmcp::transport::stdio;
 use rmcp::{ServiceExt, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
-use crate::client::OpsenseClient;
+use crate::client::{OpsenseClient, TimeArg};
 
 use super::tools;
 
@@ -47,10 +47,10 @@ pub struct RemoveAttributeParams {
 pub struct QueryTimeseriesParams {
     #[schemars(description = "Station/node id")]
     pub node: String,
-    #[schemars(description = "From ts (unix seconds, inclusive). Omit → bounded default window")]
-    pub from_ts: Option<i64>,
-    #[schemars(description = "To ts (unix seconds, inclusive). Omit → now")]
-    pub to_ts: Option<i64>,
+    #[schemars(description = "From ts (inclusive): unix seconds OR relative window. Omit → bounded default window")]
+    pub from_ts: Option<TimeArg>,
+    #[schemars(description = "To ts (inclusive): unix seconds OR relative window. Omit → now")]
+    pub to_ts: Option<TimeArg>,
     /// Server từ chối vượt trần (10k) và báo `truncated` khi cắt.
     #[schemars(description = "Max rows (default 1000, hard cap 10000)")]
     pub limit: Option<i64>,
@@ -65,6 +65,9 @@ pub struct QueryTimeseriesParams {
     /// muốn lệnh đã đóng thì dùng tham số này, không phải `label_kind`.
     #[schemars(description = "Filter by labels.status, e.g. open|closed (orders only)")]
     pub status: Option<String>,
+    /// `desc` = mới nhất trước, nên `limit` lấy đúng `limit` dòng **mới nhất**.
+    #[schemars(description = "Row order: asc|desc, default desc (newest first)")]
+    pub order: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -74,10 +77,14 @@ pub struct OrdersParams {
     /// `open` | `closed`; bỏ trống → cả hai.
     #[schemars(description = "Filter by labels.status: open|closed")]
     pub status: Option<String>,
-    #[schemars(description = "From ts (unix seconds, inclusive)")]
-    pub from_ts: Option<i64>,
-    #[schemars(description = "To ts (unix seconds, inclusive)")]
-    pub to_ts: Option<i64>,
+    #[schemars(description = "From ts (inclusive): unix seconds OR relative window")]
+    pub from_ts: Option<TimeArg>,
+    #[schemars(description = "To ts (inclusive): unix seconds OR relative window")]
+    pub to_ts: Option<TimeArg>,
+    #[schemars(description = "Max rows (default 1000, hard cap 10000)")]
+    pub limit: Option<i64>,
+    #[schemars(description = "Row order: asc|desc, default desc (newest first)")]
+    pub order: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -146,7 +153,7 @@ impl OpsenseMcpServer {
     /// **chứa dữ liệu gì** và ở đâu. Đó là cách duy nhất biết nên hỏi station
     /// nào, với `signal`/`labels` nào, thay vì đoán theo tên.
     #[tool(
-        description = "Snapshot of the current pipeline: nodes (id, type, inputs, description of what data each node holds) + stations. Call this FIRST to decide which station to query and with which filters — a node's `description` says what it actually contains in THIS deployment."
+        description = "Snapshot of the current pipeline: nodes (id, type, inputs, description of what data each node holds, plus `running`, `faultCount` and `lastError`) + stations. Call this FIRST to decide which station to query and with which filters — a node's `description` says what it actually contains in THIS deployment. When a node is dead, `lastError` (severity/code/message) is the only place that says WHY: component run() loops rarely return Err, so logs are the only other source and they die with the container."
     )]
     async fn opsense_status(&self) -> Result<String, String> {
         tools::status(&self.client).await
@@ -187,7 +194,7 @@ impl OpsenseMcpServer {
     }
 
     #[tool(
-        description = "Query observations from a TimeseriesStation. Bounded server-side (limit cap 10000, window cap 30 days) and reports `truncated`. Filter server-side with `signal` / `label_kind` / `status` instead of pulling everything and filtering yourself. NOTE `label_kind` filters `labels.kind` while `status` filters `labels.status` — trade orders carry `status` (open/closed) and have no `kind`, so use `status` for closed orders. Call opsense_status first to see which node holds what."
+        description = "Query observations from a TimeseriesStation. Bounded server-side (limit cap 10000, window cap 30 days) and reports `truncated`. Filter server-side with `signal` / `label_kind` / `status` instead of pulling everything and filtering yourself. NOTE `label_kind` filters `labels.kind` while `status` filters `labels.status` — trade orders carry `status` (open/closed) and have no `kind`, so use `status` for closed orders. `order` defaults to `desc` (newest first) so `limit` returns the LATEST rows, not the oldest; pass `asc` for oldest-first. `from_ts`/`to_ts` accept unix seconds or a relative window like \"2h\" / \"now-1d\". Call opsense_status first to see which node holds what."
     )]
     async fn opsense_query_timeseries(
         &self,
@@ -202,6 +209,7 @@ impl OpsenseMcpServer {
             p.signal.as_deref(),
             p.label_kind.as_deref(),
             p.status.as_deref(),
+            p.order.as_deref(),
         )
         .await
     }
@@ -210,7 +218,7 @@ impl OpsenseMcpServer {
     /// `signal = "order"` (`labels.status = open|closed`) và cursor T+N
     /// (`labels.kind = "trading_step"`).
     #[tool(
-        description = "Trading state in a station: orders (labels.status open/closed) plus the T+N cursor (labels.kind trading_step), with optional status filter applied server-side. One call instead of pulling the station and filtering by hand."
+        description = "Trading state in a station: orders (labels.status open/closed) plus the T+N cursor (labels.kind trading_step). Calls Query.orders directly — one round-trip, with order_id de-duplication and the status filter applied server-side AFTER it (a closed order's old `open` row is still in the station, so filtering before merging reports closed orders as open). Supports limit/order and unix-seconds or relative from_ts/to_ts (\"2h\", \"now-1d\")."
     )]
     async fn opsense_orders(
         &self,
@@ -222,6 +230,8 @@ impl OpsenseMcpServer {
             p.status.as_deref(),
             p.from_ts,
             p.to_ts,
+            p.limit,
+            p.order.as_deref(),
         )
         .await
     }
@@ -292,7 +302,10 @@ impl ServerHandler for OpsenseMcpServer {
                  Runtime state (orders, T+N cursor, snapshots) lives in stations — read it with \
                  opsense_query_timeseries. To RESET that state: opsense_clear_station(node) for one, or \
                  opsense_clear_all_stations(confirm=true) to reset the whole trading session (prefer the \
-                 latter — the kernel reads its T+N cursor from a station)."
+                 latter — the kernel reads its T+N cursor from a station). When a node is dead, read \
+                 lastError + faultCount from opsense_status — that is the only error path left after \
+                 a container restart. Time arguments accept unix seconds or a relative window \
+                 (\"2h\", \"now-1d\"); query results default to newest-first (order=\"desc\")."
                     .to_string(),
             ),
         }

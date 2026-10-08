@@ -155,15 +155,35 @@ Token phát ra là **một lần duy nhất** — mất thì lấy lại bằng 
 
 | Tool | API | Ý nghĩa |
 |---|---|---|
-| `opsense_status()` | `Query.status` | Topology node + danh sách station. |
+| `opsense_status()` | `Query.status` | Topology node + danh sách station. Mỗi node kèm `running`, `faultCount`, `lastError` — **đường hỏi lỗi duy nhất** sau khi container restart. |
 | `opsense_get_config({id?})` | `Query.components` | Cấu hình **đang chạy** (kể cả `params` của script). Bỏ `id` → toàn bộ pipeline. **Đọc trước khi sửa.** |
 | `opsense_attributes()` | `Query.attributes` | Attribute trong memory. |
 | `opsense_set_attribute({name, value})` | `Mutation.setAttribute` | Set attribute (cảnh báo nếu `OPSENSE_ATTR_<NAME>` đang ghi đè). |
 | `opsense_remove_attribute({name})` | `Mutation.removeAttribute` | Xoá attribute. |
-| `opsense_query_timeseries({node, from_ts?, to_ts?, limit?, signal?, label_kind?})` | `Query.queryTimeseries` | Đọc station, **có guard**, filter server-side, trả `truncated`. |
-| `opsense_orders({node, status?})` | `Query.queryTimeseries` | Lệnh (`signal=order`, `labels.status=open\|closed`) **+** cursor T+N (`labels.kind=trading_step`). |
+| `opsense_query_timeseries({node, from_ts?, to_ts?, limit?, signal?, label_kind?, status?, order?})` | `Query.queryTimeseries` | Đọc station, **có guard**, filter server-side, trả `truncated` + `order`. |
+| `opsense_orders({node, status?, from_ts?, to_ts?, limit?, order?})` | `Query.orders` | Lệnh (`signal=order`, `labels.status=open\|closed`) **+** cursor T+N (`labels.kind=trading_step`); gộp `order_id` + lọc `status` server-side. |
 | `opsense_set_param({id, path, value})` | `Mutation.patchComponent` | Sửa **một** trường (JSON pointer). Đường sửa mặc định. |
 | `opsense_reload({components_json})` | `Mutation.reload` | Thay **toàn bộ** danh sách node. Thô — thiếu một node là mất node đó. |
+| `opsense_clear_station({node})` | `Mutation.clearStation` | Xoá sạch **một** station (RAM + storage). Node vẫn chạy và ghi lại. |
+| `opsense_clear_all_stations({confirm})` | `Mutation.clearAllStations` | Xoá sạch **mọi** station — reset trọn phiên trading (cần `confirm=true`). |
+
+### Mốc thời gian: unix giây **hoặc** tương đối
+
+`from_ts`/`to_ts` (và `--from`/`--to`, `:query`/`:orders`) nhận **cả hai** dạng —
+một field, không phải hai:
+
+| Dạng | Ví dụ | Nghĩa |
+|---|---|---|
+| Unix giây | `1757000000` | tuyệt đối |
+| Tương đối | `"now"`, `"90s"`, `"15m"`, `"2h"`, `"7d"`, `"1w"` | `now − n`, đơn vị |
+| Tương đối có `now-` | `"now-2h"`, `"now-1d"` | như trên (viết tường minh) |
+
+Bỏ trống = mặc định của server (`to` = now, `from` = cửa sổ tối đa 30 ngày). Giá trị
+sai (`"abc"`, `"2y"`, `"0h"`, `"-2h"`) bị từ chối kèm gợi ý, không lặng lẽ rơi
+về mặc định.
+
+**Thứ tự dòng**: `order` mặc định `desc` (mới nhất trước) — cần thứ tự cũ thì
+truyền `order: "asc"`. `QueryResult.order` luôn có mặt nên không phải đoán.
 
 ### Sửa cấu hình: đọc → patch → audit
 

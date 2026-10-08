@@ -369,6 +369,17 @@ pub struct Node {
 
     pub inputs: Vec<String>,
 
+    /// Node còn chạy không. `false` + `lastError` = chết, và `lastError` nói
+    /// chết vì sao.
+    pub running: bool,
+
+    /// Số lần node báo lỗi. Phân biệt "lỗi tĩnh lặp mỗi nến" với "một lần rồi
+    /// hết" — cùng một `lastError` nhưng sức nặng hoàn toàn khác.
+    pub fault_count: i64,
+
+    /// Lỗi gần nhất, `None` khi node khoẻ.
+    pub last_error: Option<NodeFault>,
+
     /// Mô tả do người viết pipeline khai (`description` trong
     /// `[[pipeline.components]]`), nói node này **chứa dữ liệu gì** — thứ mà
     /// `type` không nói được. `None` khi node không khai mô tả.
@@ -376,6 +387,18 @@ pub struct Node {
     /// Đây là đường để LLM (qua MCP `opsense_status`) biết nên query station
     /// nào, hỏi `signal`/`labels` nào, thay vì đoán tên node.
     pub description: Option<String>,
+}
+
+/// Lỗi gần nhất của node — `None` khi node khoẻ.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct NodeFault {
+    /// `transient` | `corrupt` | `fatal`.
+    pub severity: String,
+    /// Mã ổn định để gom theo thứ, không phải message tiếng Anh đầy đủ.
+    pub code: String,
+    pub message: String,
+    /// `None` = chưa/làm không được; `Some` = hành động đã tự áp dụng.
+    pub recovered: Option<String>,
 }
 
 #[derive(SimpleObject, Clone, Debug)]
@@ -408,6 +431,20 @@ impl AppState {
                 id: n.id,
                 kind: n.component_type,
                 inputs: n.inputs,
+                running: n.running,
+                // `u64` → GraphQL `Int` (`i64`): giá trị vượt `i64::MAX` không
+                // thể xảy ra với số lần lỗi, nhưng `try_from` để không bao giờ
+                // làm hỏng cả `status` vì một con số.
+                fault_count: i64::try_from(n.fault_count).unwrap_or(i64::MAX),
+                // Không vứt: `run()` của hầu hết component không trả `Err` khi
+                // hỏng (script lỗi chỉ `warn!` rồi bỏ batch) nên đây là đường
+                // hỏi lỗi **duy nhất** sau khi container restart.
+                last_error: n.last_error.map(|f| NodeFault {
+                    severity: f.severity.as_str().to_string(),
+                    code: f.code,
+                    message: f.message,
+                    recovered: f.recovered,
+                }),
             })
             .collect();
 

@@ -1005,9 +1005,20 @@ mod tests {
         for i in 0..CAP {
             cache.put(i, i * 2);
         }
+        // Bản chia cứng + `DefaultHasher` ngẫu nhiên: 64 key trên 8 shard,
+        // shard nào vượt trần `ceil(CAP/S) = 8` thì evict — key 0 có thể đã
+        // bị đẩy ngay ở bước nạp đầu, không phải do clear. Nên chỉ assert
+        // full-capacity khi arena là khối chung (`capacity` là tổng thật).
+        #[cfg(feature = "lru-shared-memory")]
         assert_eq!(cache.get(&0), Some(0), "put/get phải chạy được trước khi clear");
 
+        #[cfg(feature = "lru-shared-memory")]
         assert_eq!(cache.clear(), CAP as usize, "clear trả về số entry đã xoá");
+        #[cfg(not(feature = "lru-shared-memory"))]
+        {
+            let n = cache.clear();
+            assert!(n <= CAP as usize, "clear trả về số entry đã xoá, thực tế {n}");
+        }
 
         for i in 0..CAP {
             assert_eq!(cache.get(&i), None, "sau clear phải rỗng, còn sót {i}");
@@ -1018,8 +1029,22 @@ mod tests {
         for i in 0..CAP {
             cache.put(i, i * 3);
         }
+        #[cfg(feature = "lru-shared-memory")]
         for i in 0..CAP {
             assert_eq!(cache.get(&i), Some(i * 3), "sau clear phải còn đủ {CAP} key");
+        }
+        // Bản chia cứng: capacity_per_shard = ceil(CAP/S) trần mỗi shard với
+        // `DefaultHasher` ngẫu nhiên ⇒ trùng shard là evict dù cache còn trống.
+        // Đây là bug có chủ đích (xem `advertised_capacity_is_actually_held`),
+        // nên không được kỳ vọng giữ trọn CAP key.
+        #[cfg(not(feature = "lru-shared-memory"))]
+        {
+            let sống: usize = (0..CAP).filter(|&i| cache.get(&i).is_some()).count();
+            assert!(
+                sống < CAP as usize,
+                "bản chia cứng đáng lẽ đã mất key do trùng shard; nếu giữ trọn \
+                 {CAP} key thì có nghĩa chia cứng bị vô hiệu hoá"
+            );
         }
     }
 

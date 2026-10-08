@@ -319,7 +319,10 @@ async fn storage_data_integrity_metric_ids() {
             .post(format!("{}/api/repl/graphql", serve_url()))
             .bearer_auth(&id_token)
             .json(&serde_json::json!({
-                "query": "query Q($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { ts value metricId } }",
+                // Shape đúng: `QueryResult` bọc trong `observations`. Bản cũ
+                // hỏi thẳng `ts value metricId` ở root ⇒ GraphQL error mọi lần,
+                // và vì chỉ `if let Some(..) = eprintln!` nên test **pass vacuously**.
+                "query": "query Q($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { observations { ts value metricId } truncated scanned order } }",
                 "variables": {
                     "node": station_id,
                     "fromTs": from_ts,
@@ -331,9 +334,20 @@ async fn storage_data_integrity_metric_ids() {
             .expect("queryTimeseries request");
         assert!(resp.status().is_success(), "queryTimeseries for {station_id} status: {}", resp.status());
         let body: Value = resp.json().await.expect("queryTimeseries json");
-        if let Some(data) = body.get("data").and_then(|d| d.get("queryTimeseries")).and_then(|d| d.as_array()) {
-            eprintln!("station {}: {} points", station_id, data.len());
-        }
+        assert!(
+            body.get("errors").is_none(),
+            "station {station_id}: GraphQL error {}",
+            body.get("errors").unwrap_or(&Value::Null)
+        );
+        let result = body
+            .get("data")
+            .and_then(|d| d.get("queryTimeseries"))
+            .unwrap_or_else(|| panic!("station {station_id}: response không có queryTimeseries: {body}"));
+        let points = result
+            .get("observations")
+            .and_then(|o| o.as_array())
+            .unwrap_or_else(|| panic!("station {station_id}: QueryResult thiếu `observations`: {result}"));
+        eprintln!("station {}: {} points", station_id, points.len());
     }
 }
 

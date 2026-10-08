@@ -7,6 +7,7 @@
 
 use crate::client::OpsenseClient;
 use crate::client::graphql::ComponentInput;
+use crate::client::time_arg::TimeArg;
 
 fn json_dump<T: serde::Serialize>(v: &T) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(v)
@@ -123,111 +124,42 @@ fn render_clear_result(
 pub async fn query_timeseries(
     client: &OpsenseClient,
     node: &str,
-    from_ts: Option<i64>,
-    to_ts: Option<i64>,
+    from_ts: Option<TimeArg>,
+    to_ts: Option<TimeArg>,
     limit: Option<i64>,
     signal: Option<&str>,
     label_kind: Option<&str>,
     status: Option<&str>,
+    order: Option<&str>,
 ) -> Result<String, String> {
     client
-        .query_station(node, from_ts, to_ts, limit, signal, label_kind, status)
+        .query_station(node, from_ts, to_ts, limit, signal, label_kind, status, order)
         .await
         .map_err(|e| format!("{e:#}"))
         .and_then(|c| json_dump(&c).map_err(|e| format!("{e}")))
 }
 
-/// State giao dịch trong một station: lệnh (`signal = "order"`) **và** cursor T+N
-/// (`labels.kind = "trading_step"`).
+/// Lệnh + cursor T+N của một station — gọi thẳng `Query.orders`.
 ///
-/// Cursor cố ý **không** lọc theo `signal` được: nó là `signal = "summary"`, nên
-/// lọc `signal = "order"` sẽ âm thầm rơi mất cursor — tức mất đúng thứ agent
-/// cần để biết "T+N đã chạy tới nến nào". Vì vậy lấy cả hai loại rồi lọc ở đây.
-/// `status` chỉ áp cho lệnh (cursor không có status) và **đã** lọc server-side
-/// qua tham số `status` của `queryTimeseries` — trước đây phải kéo hết về mới
-/// lọc được, nên `limit` cắt cụt trước khi lọc.
-/// Lệnh + cursor T+N của một station.
-///
-/// `status` lọc **sau** khi đã gộp theo `order_id` (xem bước 2 bên dưới): station
-/// append-only nên bản `open` vẫn còn sau khi lệnh đóng. Lọc ở server *trước*
-/// sẽ trả lệnh đã đóng là đang mở.
+/// Gộp theo `order_id` và lọc `status` **server-side**: station append-only nên
+/// bản `open` cũ vẫn còn sau khi lệnh đóng, và lọc ở client *trước* khi gộp sẽ
+/// trả một lệnh đã đóng là đang mở (đã đo: 2 lệnh thay vì 1). Trước đây khối
+/// gộp nằm ở đây — giờ nó nằm đúng một chỗ trên server, và `limit` cắt *sau* khi
+/// gộp nên `status: "closed"` không còn rỗng.
 pub async fn orders(
     client: &OpsenseClient,
     node: &str,
     status: Option<&str>,
-    from_ts: Option<i64>,
-    to_ts: Option<i64>,
+    from_ts: Option<TimeArg>,
+    to_ts: Option<TimeArg>,
+    limit: Option<i64>,
+    order: Option<&str>,
 ) -> Result<String, String> {
-    // Cố tình **không** truyền `status` xuống server — xem bước 3.
-    let raw = query_timeseries(client, node, from_ts, to_ts, Some(2000), None, None, None).await?;
-    let mut v: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("query result: {e}"))?;
-    let order_filter = status.map(|s| s.to_string());
-    if let Some(obs) = v
-        .get_mut("observations")
-        .and_then(|o| o.as_array_mut())
-    {
-        // 1. Giữ cursor T+N và lệnh, bỏ quan sát không liên quan.
-        obs.retain(|o| {
-            let kind = o.get("labels").and_then(|l| l.get("kind")).and_then(|k| k.as_str());
-            let signal = o.get("signal").and_then(|s| s.as_str());
-            if kind == Some("trading_step") {
-                return true; // cursor T+N — không có `status`
-            }
-            signal == Some("order")
-        });
-
-        // 2. Gộp lệnh theo `order_id`, lấy bản ghi **mới nhất**.
-        //
-        // Station append-only: đóng lệnh là observation **mới** cùng
-        // `order_id`, bản `open` cũ **vẫn còn** với `status = "open"`. Lọc
-        // `status` ở server *trước* bước này là sai: nó thấy bản `open` cũ và
-        // trả về một lệnh **đã đóng** là đang mở.
-        //
-        // Đã đo: lọc thô cho 2 lệnh mở (647 + 2103 USD) trong khi thật chỉ còn
-        // 1 (2103 USD) ⇒ vị thế bị double-count.
-        let mut latest: std::collections::HashMap<String, (i64, usize)> = Default::default();
-        for (i, o) in obs.iter().enumerate() {
-            let Some(id) = o
-                .get("labels")
-                .and_then(|l| l.get("order_id"))
-                .and_then(|v| v.as_str())
-            else {
-                continue; // cursor T+N — không có `order_id`
-            };
-            let ts = o.get("ts").and_then(|t| t.as_i64()).unwrap_or(0);
-            match latest.get(id) {
-                // `>=` để bản ghi sau cùng thắng khi trùng `ts`.
-                Some(&(prev_ts, _)) if prev_ts > ts => {}
-                _ => {
-                    latest.insert(id.to_string(), (ts, i));
-                }
-            }
-        }
-        let keep: std::collections::HashSet<usize> =
-            latest.values().map(|(_, i)| *i).collect();
-        let mut i = 0;
-        obs.retain(|_| {
-            let k = keep.contains(&i);
-            i += 1;
-            k
-        });
-
-        // 3. Lọc `status` **sau** khi đã gộp — lúc này mới đúng nghĩa.
-        if let Some(want) = &order_filter {
-            obs.retain(|o| {
-                let kind = o.get("labels").and_then(|l| l.get("kind")).and_then(|k| k.as_str());
-                if kind == Some("trading_step") {
-                    return true; // cursor không có `status`
-                }
-                o.get("labels")
-                    .and_then(|l| l.get("status"))
-                    .and_then(|s| s.as_str())
-                    == Some(want.as_str())
-            });
-        }
-    }
-    json_dump(&v).map_err(|e| format!("{e}"))
+    client
+        .orders(node, status, from_ts, to_ts, limit, order)
+        .await
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|r| json_dump(&r).map_err(|e| format!("{e}")))
 }
 
 /// Sửa **một** thành phần của một node (vd `params.sl_pct` → `0.02`).

@@ -10,7 +10,7 @@
 
 use anyhow::{Context as _, Result};
 
-use crate::client::OpsenseClient;
+use crate::client::{OpsenseClient, TimeArg};
 
 /// Endpoint GraphQL: `--endpoint` > `$OPSENSE_GRAPHQL_URL` > default.
 pub fn default_endpoint() -> String {
@@ -111,47 +111,83 @@ pub async fn set_param(
 pub async fn query(
     endpoint: Option<String>,
     node: &str,
-    from: Option<i64>,
-    to: Option<i64>,
+    from: Option<String>,
+    to: Option<String>,
     limit: Option<i64>,
     signal: Option<String>,
     label_kind: Option<String>,
     status: Option<String>,
+    order: Option<String>,
 ) -> Result<()> {
+    let now = opsense_components::signal::now_secs();
     let out = client(endpoint)?
         .query_station(
             node,
-            from,
-            to,
+            time_arg(from.as_deref(), now)?,
+            time_arg(to.as_deref(), now)?,
             limit,
             signal.as_deref(),
             label_kind.as_deref(),
             status.as_deref(),
+            order.as_deref(),
         )
         .await
         .context("Query.queryTimeseries")?;
     if out.truncated {
         eprintln!(
-            "warning: truncated ({} rows scanned) — tăng --limit hoặc chia nhỏ --from/--to",
-            out.scanned
+            "warning: truncated ({} rows scanned, order={}) — tăng --limit hoặc chia nhỏ --from/--to",
+            out.scanned, out.order
         );
     }
     print_json(&out)
 }
 
 /// `opsense orders <node>` — lệnh giao dịch trong station (`signal = "order"`).
+///
+/// Gọi thẳng `Query.orders` (một round-trip, gộp `order_id` + lọc `status`
+/// server-side) thay vì đi vòng qua `crate::mcp::tools` — CLI là adapter, không
+/// phải tầng dưới MCP.
+#[allow(clippy::too_many_arguments)]
 pub async fn orders(
     endpoint: Option<String>,
     node: &str,
     status: Option<String>,
-    from: Option<i64>,
-    to: Option<i64>,
+    from: Option<String>,
+    to: Option<String>,
+    limit: Option<i64>,
+    order: Option<String>,
 ) -> Result<()> {
-    let dump = crate::mcp::tools::orders(&client(endpoint)?, node, status.as_deref(), from, to)
+    let now = opsense_components::signal::now_secs();
+    let out = client(endpoint)?
+        .orders(
+            node,
+            status.as_deref(),
+            time_arg(from.as_deref(), now)?,
+            time_arg(to.as_deref(), now)?,
+            limit,
+            order.as_deref(),
+        )
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let v: serde_json::Value = serde_json::from_str(&dump).map_err(|e| anyhow::anyhow!("{e}"))?;
-    print_json(&v)
+        .context("Query.orders")?;
+    if out.truncated {
+        eprintln!(
+            "warning: truncated ({} rows scanned, order={}) — tăng --limit hoặc chia nhỏ --from/--to",
+            out.scanned, out.order
+        );
+    }
+    print_json(&out)
+}
+
+/// `--from/--to` nhận unix giây **hoặc** khoảng tương đối; validate tại đây để
+/// lỗi báo trước khi mở kết nối.
+fn time_arg(raw: Option<&str>, now: i64) -> Result<Option<TimeArg>> {
+    raw.map(|s| TimeArg::parse(s))
+        .transpose()?
+        .map(|arg| {
+            arg.resolve(now)?;
+            Ok(arg)
+        })
+        .transpose()
 }
 
 #[cfg(test)]

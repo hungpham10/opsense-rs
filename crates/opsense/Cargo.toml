@@ -23,6 +23,10 @@ tokio = { workspace = true }
 # Error handling
 anyhow = "1"
 
+# JSON Schema cho MCP tool params (`opsense-*`). Cùng version rmcp dùng, nên
+# `TimeArg` implement `JsonSchema` một lần mà derive `#[tool]` vẫn nhận.
+schemars = "1.2"
+
 # HTTP + GraphQL API
 axum = { version = "0.8", features = ["macros", "multipart", "ws"] }
 axum-macros = "0.5"
