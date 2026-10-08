@@ -9,6 +9,7 @@
 pub mod auth;
 pub mod graphql;
 pub mod grpc;
+pub mod time_arg;
 
 pub use auth::{poll_token, request_device_code, save_token_to_disk};
 pub use graphql::{
@@ -16,3 +17,4 @@ pub use graphql::{
     SetAttributeResult, StationSummary, Status,
 };
 pub use grpc::{ExecOutcome, RunnerClient};
+pub use time_arg::TimeArg;

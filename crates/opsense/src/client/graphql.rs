@@ -17,6 +17,8 @@ use opsense_core::{LogLevel, Signal};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::client::time_arg::TimeArg;
+
 /// Một observation trả về từ `queryTimeseries`.
 ///
 /// `metric_id` phải rename `metricId`: đây là **tên field trong JSON do GraphQL
@@ -54,6 +56,28 @@ pub struct NodeSummary {
     /// `NodeSummary` và server có thể không gửi field này.
     #[serde(default)]
     pub description: Option<String>,
+    /// Node còn chạy không — `false` cùng `last_error` là node chết.
+    #[serde(default)]
+    pub running: bool,
+    /// Số lần báo lỗi: phân biệt lỗi tĩnh lặp với một lần rồi hết.
+    #[serde(default)]
+    pub fault_count: i64,
+    /// Lỗi gần nhất; `None` khi node khoẻ. Đây là đường hỏi lỗi duy nhất sau
+    /// khi container restart (`run()` phần lớn không trả `Err`).
+    #[serde(default)]
+    pub last_error: Option<NodeFault>,
+}
+
+/// Lỗi gần nhất của node. Tách riêng `NodeSummary` vì `reload`/`patchComponent`
+/// cũng dùng `NodeSummary` mà **không** chọn field này.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NodeFault {
+    /// `transient` | `corrupt` | `fatal`.
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub recovered: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -91,6 +115,14 @@ pub struct QueryResult {
     pub observations: Vec<Observation>,
     pub truncated: bool,
     pub scanned: usize,
+    /// Đơn vị server đã áp dụng (`asc`/`desc`). Default `"asc"` để client cũ đọc
+    /// server mới vẫn decode được thay vì chết vì `missing field order`.
+    #[serde(default = "asc_default")]
+    pub order: String,
+}
+
+fn asc_default() -> String {
+    "asc".to_string()
 }
 
 /// Cấu hình đang chạy của một component (`Query.components`).
@@ -128,6 +160,10 @@ pub struct ComponentConfig {
 #[derive(Debug, Deserialize)]
 struct GraphQLError {
     pub message: String,
+    #[serde(default)]
+    pub path: Option<Vec<String>>,
+    #[serde(default)]
+    pub extensions: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,13 +177,42 @@ impl<T> GqlResponse<T> {
         if let Some(errors) = self.errors {
             let msg = errors
                 .iter()
-                .map(|e| e.message.clone())
+                .map(|e| {
+                    // `path` + `extensions.code` là hai thứ duy nhất phân biệt
+                    // được "lỗi ở đâu" với "lỗi gì"; bỏ chúng thì agent chỉ còn
+                    // một câu tiếng Anh trần trụi.
+                    let at = e
+                        .path
+                        .as_ref()
+                        .map(|p| p.join("."))
+                        .filter(|p| !p.is_empty())
+                        .map(|p| format!("{p}: "))
+                        .unwrap_or_default();
+                    let code = e
+                        .extensions
+                        .as_ref()
+                        .and_then(|x| x.get("code"))
+                        .and_then(|c| c.as_str())
+                        .map(|c| format!(" [{c}]"))
+                        .unwrap_or_default();
+                    format!("{at}{}{code}", e.message)
+                })
                 .collect::<Vec<_>>()
                 .join("; ");
             anyhow::bail!("GraphQL error: {msg}");
         }
         self.data
             .ok_or_else(|| anyhow::anyhow!("no data in response"))
+    }
+}
+
+/// Body lỗi HTTP có thể là cả stack trace / dump config — cắt để một lỗi không
+/// nuốt tràn màn hình REPL.
+fn truncate_body(text: &str) -> String {
+    const MAX: usize = 2000;
+    match text.char_indices().nth(MAX) {
+        Some((idx, _)) => format!("{}…", text[..idx].trim()),
+        None => text.trim().to_string(),
     }
 }
 
@@ -248,8 +313,19 @@ impl OpsenseClient {
         // Deserialize `data` thành `Value` trước: vừa bóc được root field, vừa
         // để lỗi schema hiện dạng "thiếu field `X`" kèm vị trí, thay vì báo
         // "error decoding response body" trừng trơi.
+        let resp = req.send().await?;
+        let status = resp.status();
+        // KHÔNG dùng `error_for_status()`: nó trả lỗi **không kèm body**, nên
+        // REPL chỉ in `HTTP status client error (500 Internal Server Error)` —
+        // mất sạch lý do server chết (thường là message của panik/validate).
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("HTTP {status}: {}", truncate_body(&text));
+        }
         let request: GqlResponse<serde_json::Value> =
-            req.send().await?.error_for_status()?.json().await?;
+            serde_json::from_str(&text).map_err(|e| {
+                anyhow::anyhow!("HTTP {status} nhưng body không phải JSON: {e}; body: {}", truncate_body(&text))
+            })?;
         let data = request.into_result()?;
         let value = data
             .get(root)
@@ -265,7 +341,8 @@ impl OpsenseClient {
         const QUERY: &str = r#"
             query {
                 status {
-                    nodes { id type inputs description }
+                    nodes { id type inputs description running faultCount
+                            lastError { severity code message recovered } }
                     stations { id kind }
                 }
             }
@@ -309,22 +386,25 @@ impl OpsenseClient {
     pub async fn query_station(
         &self,
         node: &str,
-        from_ts: Option<i64>,
-        to_ts: Option<i64>,
+        from_ts: Option<TimeArg>,
+        to_ts: Option<TimeArg>,
         limit: Option<i64>,
         signal: Option<&str>,
         label_kind: Option<&str>,
         status: Option<&str>,
+        order: Option<&str>,
     ) -> anyhow::Result<QueryResult> {
         const QUERY: &str = r#"
             query($node: String!, $fromTs: Int, $toTs: Int, $limit: Int,
-                  $signal: String, $labelKind: String, $status: String) {
+                  $signal: String, $labelKind: String, $status: String,
+                  $order: String) {
                 queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs,
                                 limit: $limit, signal: $signal, labelKind: $labelKind,
-                                status: $status) {
+                                status: $status, order: $order) {
                     observations { ts metricId kind signal value labels }
                     truncated
                     scanned
+                    order
                 }
             }
         "#;
@@ -346,18 +426,76 @@ impl OpsenseClient {
             signal: Option<&'a str>,
             label_kind: Option<&'a str>,
             status: Option<&'a str>,
+            order: Option<&'a str>,
         }
+        // Neo "now" ở **client** (server vẫn nhận `Int`): đổi `fromTs`/`toTs`
+        // sang scalar hỗn hợp sẽ phá client/test cũ khai `$fromTs: Int!`.
+        let now = opsense_components::signal::now_secs();
         self.gql(
             "queryTimeseries",
             QUERY,
             Vars {
                 node,
-                from_ts,
-                to_ts,
+                from_ts: from_ts.map(|t| t.resolve(now)).transpose()?,
+                to_ts: to_ts.map(|t| t.resolve(now)).transpose()?,
                 limit,
                 signal,
                 label_kind,
                 status,
+                order,
+            },
+        )
+        .await
+    }
+
+    /// Lệnh + cursor T+N của một station — parity với MCP `opsense_orders`.
+    ///
+    /// Gộp theo `order_id` và lọc `status` **server-side** (`Query.orders`):
+    /// station append-only nên bản `open` cũ vẫn còn sau khi lệnh đóng, nên
+    /// lọc ở client *trước* khi gộp sẽ trả một lệnh đã đóng là đang mở.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn orders(
+        &self,
+        node: &str,
+        status: Option<&str>,
+        from_ts: Option<TimeArg>,
+        to_ts: Option<TimeArg>,
+        limit: Option<i64>,
+        order: Option<&str>,
+    ) -> anyhow::Result<QueryResult> {
+        const QUERY: &str = r#"
+            query($node: String!, $status: String, $fromTs: Int, $toTs: Int,
+                  $limit: Int, $order: String) {
+                orders(node: $node, status: $status, fromTs: $fromTs, toTs: $toTs,
+                       limit: $limit, order: $order) {
+                    observations { ts metricId kind signal value labels }
+                    truncated
+                    scanned
+                    order
+                }
+            }
+        "#;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Vars<'a> {
+            node: &'a str,
+            status: Option<&'a str>,
+            from_ts: Option<i64>,
+            to_ts: Option<i64>,
+            limit: Option<i64>,
+            order: Option<&'a str>,
+        }
+        let now = opsense_components::signal::now_secs();
+        self.gql(
+            "orders",
+            QUERY,
+            Vars {
+                node,
+                status,
+                from_ts: from_ts.map(|t| t.resolve(now)).transpose()?,
+                to_ts: to_ts.map(|t| t.resolve(now)).transpose()?,
+                limit,
+                order,
             },
         )
         .await
@@ -855,6 +993,56 @@ mod tests {
         assert!(req.contains("\"labelKind\":\"order\""), "{req}");
     }
 
+    /// Client **cũ** đọc server mới: thiếu `order` phải ra `"asc"` chứ không
+    /// chết vì `missing field order`.
+    #[test]
+    fn query_result_order_defaults_to_asc() {
+        let r: QueryResult =
+            serde_json::from_str(r#"{"observations":[],"truncated":false,"scanned":0}"#)
+                .expect("thiếu `order` vẫn phải decode");
+        assert_eq!(r.order, "asc");
+        let r: QueryResult =
+            serde_json::from_str(r#"{"observations":[],"truncated":false,"scanned":0,"order":"desc"}"#)
+                .expect("decode");
+        assert_eq!(r.order, "desc");
+    }
+
+    /// `reload`/`patchComponent` dùng **cùng** `NodeSummary` mà không chọn field
+    /// lỗi ⇒ `serde(default)` là bắt buộc, không có nó là decode hỏng.
+    #[test]
+    fn node_summary_tolerates_missing_fault_fields() {
+        let n: NodeSummary =
+            serde_json::from_str(r#"{"id":"grid","type":"rhai","inputs":["clock"]}"#)
+                .expect("selection set cũ vẫn phải decode");
+        assert!(!n.running);
+        assert_eq!(n.fault_count, 0);
+        assert!(n.last_error.is_none());
+        let n: NodeSummary = serde_json::from_str(
+            r#"{"id":"grid","type":"rhai","inputs":[],"running":false,"faultCount":7,
+                "lastError":{"severity":"transient","code":"script_error","message":"boom"}}"#,
+        )
+        .expect("decode node lỗi");
+        assert_eq!(n.fault_count, 7);
+        let f = n.last_error.expect("lastError");
+        assert_eq!(f.code, "script_error");
+        assert_eq!(f.message, "boom");
+    }
+
+    /// `path` + `extensions.code` là thứ phân biệt "lỗi ở đâu" với "lỗi gì".
+    #[test]
+    fn graphql_error_carries_path_and_code() {
+        let resp: GqlResponse<serde_json::Value> = serde_json::from_str(
+            r#"{"data":null,"errors":[{"message":"boom","path":["queryTimeseries"],
+                "extensions":{"code":"INTERNAL"}}]}"#,
+        )
+        .expect("decode");
+        let err = resp.into_result().expect_err("phải báo lỗi");
+        let msg = err.to_string();
+        assert!(msg.contains("queryTimeseries"), "{msg}");
+        assert!(msg.contains("INTERNAL"), "{msg}");
+        assert!(msg.contains("boom"), "{msg}");
+    }
+
     /// Root field sai phải báo đúng tên, không báo "missing field" mơ hồ.
     #[test]
     fn gql_reports_missing_root_by_name() {
@@ -890,5 +1078,98 @@ mod tests {
             msg.contains("queryTimeseries"),
             "lỗi phải nêu đúng tên root thiếu: {msg}"
         );
+    }
+
+    /// HTTP lỗi phải kèm **body**: `error_for_status()` chỉ trả
+    /// `HTTP status client error (500 Internal Server Error)` ⇒ mất sạch lý do.
+    #[test]
+    fn gql_keeps_http_error_body() {
+        use std::io::Write;
+        const BODY: &str = r#"{"message":"boom: station grid is corrupt"}"#;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let _ = read_full_request(&mut sock);
+            let resp = format!(
+                "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{BODY}",
+                BODY.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let err = rt.block_on(async {
+            let c =
+                OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+            c.status().await.expect_err("HTTP 500 phải là lỗi")
+        });
+        let msg = err.to_string();
+        assert!(msg.contains("500"), "thiếu status: {msg}");
+        assert!(msg.contains("boom"), "thiếu body: {msg}");
+    }
+
+    /// `orders` phải cấp **đủ** biến: thiếu `rename_all` thì `fromTs`/`toTs`/
+    /// `labelKind` không tới server và async-graphql coi là `None` — cửa sổ
+    /// thời gian bị bỏ **im lặng**.
+    #[test]
+    fn orders_variables_are_camel_case() {
+        use std::io::Write;
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("accept");
+            let buf = read_full_request(&mut sock).unwrap_or_default();
+            let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+            const BODY: &str =
+                r#"{"data":{"orders":{"observations":[],"truncated":false,"scanned":0,"order":"desc"}}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{BODY}",
+                BODY.len()
+            );
+            let _ = sock.write_all(resp.as_bytes());
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let now = opsense_components::signal::now_secs();
+        rt.block_on(async {
+            let c =
+                OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+            let out = c
+                .orders(
+                    "grid",
+                    Some("open"),
+                    Some(TimeArg::Expr("2h".into())),
+                    Some(TimeArg::Unix(now)),
+                    Some(5),
+                    Some("asc"),
+                )
+                .await
+                .expect("orders");
+            assert_eq!(out.order, "desc");
+        });
+        let req = rx.recv().expect("request body");
+        for name in ["node", "status", "fromTs", "toTs", "limit", "order"] {
+            assert!(
+                req.contains(&format!("\"{name}\":")),
+                "orders phải có biến `{name}`:\n{req}"
+            );
+        }
+        assert!(req.contains("\"fromTs\":"), "{req}");
+        // `2h` phải được resolve thành unix giây trước khi gửi.
+        assert!(!req.contains("\"2h\""), "chưa resolve TimeArg: {req}");
+        assert!(req.contains("\"limit\":5"), "{req}");
+        assert!(req.contains("\"order\":\"asc\""), "{req}");
     }
 }

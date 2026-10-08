@@ -139,14 +139,19 @@ def _query_parquet(
 
 def _query_graphql(station: str, metric: str, from_ts: int, to_ts: int):
     data = _graphql(
-        "query($node: String!, $from: BigInt, $to: BigInt) {"
+        "query($node: String!, $from: Int, $to: Int) {"
         " queryTimeseries(node: $node, fromTs: $from, toTs: $to) {"
-        " ts metric_id value labels kind signal } }",
+        " observations { ts metricId value labels kind signal } } }",
         {"node": station, "from": from_ts, "to": to_ts},
     )
-    rows = data.get("queryTimeseries") or []
+    # `QueryResult` bọc trong `observations`; đọc thẳng `queryTimeseries` như
+    # một list là sai shape ⇒ GraphQL error mỗi lần fallback.
+    rows = (data.get("queryTimeseries") or {}).get("observations") or []
     if metric:
-        rows = [r for r in rows if r.get("metric_id") == metric]
+        rows = [r for r in rows if r.get("metricId") == metric]
+    # GraphQL camelCase (`metricId`), cột DataFrame snake_case (`metric_id`) —
+    # không đổi thì `_to_dataframe` điền NaN cho cột `metric_id`.
+    rows = [dict(r, metric_id=r.get("metricId")) for r in rows]
     return rows
 
 

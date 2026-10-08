@@ -21,6 +21,8 @@ use crate::repl::display::{
     format_status_table,
 };
 
+use crate::client::TimeArg;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,6 +40,7 @@ pub async fn dispatch(line: &str, client: &OpsenseClient) -> anyhow::Result<Opti
         ":attr" | ":a" => cmd_attr(client, rest).await,
         ":node" | ":n" => cmd_node(client, rest).await,
         ":query" | ":q" => cmd_query(client, rest).await,
+        ":orders" | ":o" => cmd_orders(client, rest).await,
         ":login" => cmd_login(rest).await,
 
         ":help" | ":h" | ":?" => Ok(Some(HELP_TEXT.to_string())),
@@ -66,6 +69,20 @@ async fn cmd_status(client: &OpsenseClient) -> anyhow::Result<Option<String>> {
     out.push('\n');
     out.push_str(&format!("\nStations ({}):\n", status.stations.len()));
     out.push_str(&format_stations_table(&status.stations).to_string());
+    // Bỏ hẳn mục khi không có node lỗi: một mục rỗng chỉ dạy người đọc rằng
+    // "fault" là thứ gì đó bình thường cần soi.
+    let faulted: Vec<_> = status.nodes.iter().filter(|n| n.last_error.is_some()).collect();
+    if !faulted.is_empty() {
+        out.push_str(&format!("\nNodes in fault ({}):\n", faulted.len()));
+        for n in faulted {
+            let f = n.last_error.as_ref().expect("đã lọc");
+            // KHÔNG cắt: đây là chỗ người ta đọc để debug.
+            out.push_str(&format!(
+                "- {}  [x{}]  {}: {}: {}\n",
+                n.id, n.fault_count, f.severity, f.code, f.message
+            ));
+        }
+    }
     Ok(Some(out))
 }
 
@@ -198,30 +215,72 @@ async fn cmd_node_add(client: &OpsenseClient, args: &str) -> anyhow::Result<Opti
 // Query
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `:query <node> [from] [to] [limit] [signal] [label-kind] [status]`
+/// — thêm flag `--from/--to/--limit/--signal/--label-kind/--status/--order`.
+///
+/// Thứ tự positional **giữ nguyên** để script cũ không hỏng; flag ghi đè
+/// positional cùng ý nghĩa (viết sau cùng thì thắng).
 async fn cmd_query(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<String>> {
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    if parts.is_empty() {
-        anyhow::bail!("usage: :query <node> [from_ts] [to_ts] [limit] [signal] [label_kind]");
-    }
-    let node = parts[0];
-    let from_ts = parts.get(1).and_then(|s| s.parse::<i64>().ok());
-    let to_ts = parts.get(2).and_then(|s| s.parse::<i64>().ok());
-    let limit = parts.get(3).and_then(|s| s.parse::<i64>().ok());
-    let signal = parts.get(4).copied();
-    let label_kind = parts.get(5).copied();
+    const FLAGS: &[&str] = &[
+        "from",
+        "to",
+        "limit",
+        "signal",
+        "label-kind",
+        "status",
+        "order",
+    ];
+    let args = parse_args(rest, FLAGS)?;
+    let node = args
+        .positional
+        .first()
+        .ok_or_else(|| anyhow::anyhow!(
+            "usage: :query <node> [from] [to] [limit] [signal] [label_kind] [status] \
+             [--from X] [--to Y] [--limit N] [--order asc|desc]"
+        ))?;
+    let pick = |i: usize, name: &str| -> anyhow::Result<Option<String>> {
+        Ok(args
+            .flags
+            .get(name)
+            .cloned()
+            .or_else(|| args.positional.get(i).cloned()))
+    };
+    let now = opsense_components::signal::now_secs();
+    let from_ts = pick(1, "from")?.map(|s| time_arg(&s, now)).transpose()?;
+    let to_ts = pick(2, "to")?.map(|s| time_arg(&s, now)).transpose()?;
+    let limit = pick(3, "limit")?.map(|s| parse_i64("limit", &s)).transpose()?;
+    let signal = pick(4, "signal")?;
+    let label_kind = pick(5, "label-kind")?;
     // `status` lọc `labels.status` — khác `label_kind` (lọc `labels.kind`).
-    let status = parts.get(6).copied();
+    let status = pick(6, "status")?;
+    let order = args.flags.get("order").cloned();
+
     // Server tự chặn `limit`/cửa sổ vượt trần và lọc server-side.
     let out = client
-        .query_station(node, from_ts, to_ts, limit, signal, label_kind, status)
+        .query_station(
+            node,
+            from_ts,
+            to_ts,
+            limit,
+            signal.as_deref(),
+            label_kind.as_deref(),
+            status.as_deref(),
+            order.as_deref(),
+        )
         .await?;
     if out.observations.is_empty() {
         Ok(Some(format!(
-            "(no observations; scanned {})",
-            out.scanned
+            "(no observations; scanned {}, order={})",
+            out.scanned, out.order
         )))
     } else {
-        let mut text = format_observations(&out.observations).to_string();
+        let mut text = format!(
+            "({} rows, order={}, scanned {})\n",
+            out.observations.len(),
+            out.order,
+            out.scanned
+        );
+        text.push_str(&format_observations(&out.observations).to_string());
         if out.truncated {
             // Còn dữ liệu ngoài limit → nói rõ thay vì im lặng cắt bớt.
             text.push_str(&format!(
@@ -231,6 +290,115 @@ async fn cmd_query(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<
         }
         Ok(Some(text))
     }
+}
+
+/// `:orders <node> [--status open|closed] [--from X] [--to Y] [--limit N] [--order asc|desc]`
+async fn cmd_orders(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<String>> {
+    const FLAGS: &[&str] = &["status", "from", "to", "limit", "order"];
+    let args = parse_args(rest, FLAGS)?;
+    let node = args.positional.first().ok_or_else(|| {
+        anyhow::anyhow!(
+            "usage: :orders <node> [--status open|closed] [--from X] [--to Y] \
+             [--limit N] [--order asc|desc]"
+        )
+    })?;
+    let now = opsense_components::signal::now_secs();
+    let from_ts = args
+        .flags
+        .get("from")
+        .map(|s| time_arg(s, now))
+        .transpose()?;
+    let to_ts = args.flags.get("to").map(|s| time_arg(s, now)).transpose()?;
+    let limit = args
+        .flags
+        .get("limit")
+        .map(|s| parse_i64("limit", s))
+        .transpose()?;
+    let status = args.flags.get("status").cloned();
+    let order = args.flags.get("order").cloned();
+
+    let out = client
+        .orders(
+            node,
+            status.as_deref(),
+            from_ts,
+            to_ts,
+            limit,
+            order.as_deref(),
+        )
+        .await?;
+    if out.observations.is_empty() {
+        return Ok(Some(format!(
+            "(no orders; scanned {}, order={})",
+            out.scanned, out.order
+        )));
+    }
+    let mut text = format!(
+        "Orders ({} rows, order={}, scanned {})\n",
+        out.observations.len(),
+        out.order,
+        out.scanned
+    );
+    text.push_str(&format_observations(&out.observations).to_string());
+    if out.truncated {
+        text.push_str(&format!("\n… truncated ({} rows scanned)", out.scanned));
+    }
+    Ok(Some(text))
+}
+
+fn parse_i64(what: &str, raw: &str) -> anyhow::Result<i64> {
+    raw.trim()
+        .parse::<i64>()
+        .map_err(|e| anyhow::anyhow!("{what} '{raw}' không phải số nguyên: {e}"))
+}
+
+fn time_arg(raw: &str, now: i64) -> anyhow::Result<TimeArg> {
+    let arg = TimeArg::parse(raw)?;
+    arg.resolve(now)?;
+    Ok(arg)
+}
+
+/// Token cho `:query`/`:orders`: `--k=v`, `--k v`, còn lại là positional.
+///
+/// Flag lạ báo tên những cái được nhận — im lặng bỏ qua `--oder` là cách nhanh
+/// nhất để người dùng tin nhầm rằng đã lọc theo ý mình.
+#[derive(Default)]
+struct Args {
+    positional: Vec<String>,
+    flags: BTreeMap<String, String>,
+}
+
+fn parse_args(rest: &str, allowed: &[&str]) -> anyhow::Result<Args> {
+    let mut out = Args::default();
+    let mut it = rest.split_whitespace().peekable();
+    while let Some(tok) = it.next() {
+        let Some(body) = tok.strip_prefix("--") else {
+            out.positional.push(tok.to_string());
+            continue;
+        };
+        let (key, inline) = match body.split_once('=') {
+            Some((k, v)) => (k, Some(v.to_string())),
+            None => (body, None),
+        };
+        if !allowed.contains(&key) {
+            anyhow::bail!(
+                "unknown flag '--{key}'; chỉ nhận --{}",
+                allowed.join(" --")
+            );
+        }
+        let value = match inline {
+            Some(v) => v,
+            None => match it.peek() {
+                Some(next) if !next.starts_with("--") => {
+                    let v = it.next().expect("peek rồi next");
+                    v.to_string()
+                }
+                _ => anyhow::bail!("--{key} cần giá trị"),
+            },
+        };
+        out.flags.insert(key.to_string(), value);
+    }
+    Ok(out)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -349,7 +517,13 @@ Viewing:
   :node get <id>         show one node
 
 Station queries:
-  :query <node> [from] [to]    query timeseries (timestamps in unix seconds)
+  :query <node> [from] [to] [limit] [signal] [label-kind] [status]
+  :query <node> --from 2h --to now --limit 50 --order desc --signal order
+      from/to: unix giây (1757000000) hoặc tương đối (90s, 15m, 2h, 7d, 1w, "now")
+      order: asc | desc (mặc định desc = mới nhất trước)
+
+Orders:
+  :orders <node> [--status open|closed] [--from X] [--to Y] [--limit N] [--order asc|desc], :o
 
 Auth:
   :login                  start OAuth2 device flow (RFC 8628) and save token

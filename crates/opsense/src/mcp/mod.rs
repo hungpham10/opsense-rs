@@ -1,15 +1,18 @@
 //! MCP thin client — speaks to `opsense serve` via GraphQL.
 //!
 //! Every MCP tool is a single GraphQL round-trip via [`OpsenseClient`]. No
-//! local state, no caching (the server holds the truth). 8 tools:
+//! local state, no caching (the server holds the truth). 11 tools:
 //!   - opsense_status            → Query.status
 //!   - opsense_get_config        → Query.components (đọc trước khi sửa)
 //!   - opsense_attributes        → Query.attributes
 //!   - opsense_set_attribute     → Mutation.setAttribute
 //!   - opsense_remove_attribute  → Mutation.removeAttribute
 //!   - opsense_query_timeseries  → Query.queryTimeseries
+//!   - opsense_orders            → Query.orders (lệnh + cursor T+N)
 //!   - opsense_set_param         → Mutation.patchComponent (sửa 1 param — mặc định)
-//!   - opsense_reload            → Mutation.reload (thay TOÀN BỘ danh sách node)
+//   - opsense_reload            → Mutation.reload (thay TOÀN BỘ danh sách node)
+//!   - opsense_clear_station     → Mutation.clearStation (xoá 1 station)
+//!   - opsense_clear_all_stations→ Mutation.clearAllStations (reset phiên trading)
 
 pub mod server;
 pub mod tools;

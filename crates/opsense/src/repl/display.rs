@@ -18,11 +18,29 @@ pub fn format_status_table(status: &Status) -> Table {
         .load_preset(UTF8_FULL)
         .apply_modifier(UTF8_ROUND_CORNERS)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec!["id", "type", "inputs"]);
+        .set_header(vec!["id", "type", "inputs", "state", "error"]);
     for n in &status.nodes {
-        table.add_row(vec![n.id.clone(), n.kind.clone(), n.inputs.join(", ")]);
+        table.add_row(vec![
+            n.id.clone(),
+            n.kind.clone(),
+            n.inputs.join(", "),
+            if n.running { "running" } else { "stopped" }.to_string(),
+            n.last_error
+                .as_ref()
+                .map(|f| clip(&format!("{}: {}: {}", f.severity, f.code, f.message), 40))
+                .unwrap_or_else(|| "-".to_string()),
+        ]);
     }
     table
+}
+
+/// Cắt cột cho bảng. `cmd_status` in thêm mục "Nodes in fault" **không cắt** —
+/// đó là chỗ người ta đọc để debug, nên chỗ cắt ở đây là bảng tổng quan.
+fn clip(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => format!("{}…", &s[..idx]),
+        None => s.to_string(),
+    }
 }
 
 pub fn format_stations_table(stations: &[StationSummary]) -> Table {

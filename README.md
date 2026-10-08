@@ -75,9 +75,9 @@ OPSENSE_CONFIG=strategies/binance/config.toml ./target/release/opsense serve
 | `opsense components [id]` | Cấu hình **đang chạy** của node (kể cả `params` của script) |
 | `opsense get-param <node> <ptr>` | Đọc một trường (JSON pointer, vd `/params/sl_pct`) |
 | `opsense set-param <node> <ptr> <json>` | **Sửa một trường** — không cần gửi lại cả pipeline |
-| `opsense query <node> [--limit --signal --label-kind]` | Đọc observation của station (có guard, có filter server-side) |
-| `opsense orders <node> [--status open\|closed]` | Lệnh giao dịch + cursor T+N trong station |
-| `opsense repl [--runner URL]` | REPL tương tác (`:status`, `:query`, `:node`, `:attr`) |
+| `opsense query <node> [--from --to --limit --signal --label-kind --status --order]` | Đọc observation của station (có guard, filter server-side; `--from/--to` nhận unix giây hoặc `2h`/`now-1d`) |
+| `opsense orders <node> [--status open\|closed --from --to --limit --order]` | Lệnh giao dịch + cursor T+N trong station |
+| `opsense repl [--runner URL]` | REPL tương tác (`:status`, `:query`, `:orders`, `:node`, `:attr`) |
 | `opsense mcp` | MCP stdio server (client mỏng, nói chuyện với `serve` qua GraphQL) |
 | `opsense runner [bind] [--health-check]` | Kernel runner gRPC độc lập (echo/python/julia) |
 
@@ -88,7 +88,7 @@ Cờ `serve --repl` / `serve --mcp` **không còn tồn tại** — dùng subcom
 | Đường dẫn | Method | Nội dung |
 |---|---|---|
 | `/health` | GET | liveness |
-| `/api/repl/graphql` | POST | GraphQL: `status`, `components`, `attributes`, `queryTimeseries`; mutation `reload`, `patchComponent`, `setAttribute`, `removeAttribute` |
+| `/api/repl/graphql` | POST | GraphQL: `status`, `components`, `attributes`, `queryTimeseries`, `orders`; mutation `reload`, `patchComponent`, `setAttribute`, `removeAttribute`, `clearStation`, `clearAllStations` |
 | `/api/admin/*` | — | token/user management (qua Nginx + OIDC) |
 | `/api/oauth/*` | — | device flow, token, session, metrics OAuth |
 

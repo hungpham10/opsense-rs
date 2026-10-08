@@ -4008,6 +4008,7 @@ dependencies = [
  "rexpect",
  "rmcp",
  "rustls 0.23.45",
+ "schemars",
  "sentry",
  "serde",
  "serde_json",
