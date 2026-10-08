@@ -60,11 +60,15 @@ pub struct NodeSummary {
     #[serde(default)]
     pub running: bool,
     /// Số lần báo lỗi: phân biệt lỗi tĩnh lặp với một lần rồi hết.
-    #[serde(default)]
+    ///
+    /// `rename` là **bắt buộc**: đây là tên field trong JSON do async-graphql
+    /// camelCase hoá, không phải tên field serde — cùng lớp lỗi với
+    /// `Observation.metric_id`, và im lặng đọc thành 0.
+    #[serde(rename = "faultCount", default)]
     pub fault_count: i64,
     /// Lỗi gần nhất; `None` khi node khoẻ. Đây là đường hỏi lỗi duy nhất sau
     /// khi container restart (`run()` phần lớn không trả `Err`).
-    #[serde(default)]
+    #[serde(rename = "lastError", default)]
     pub last_error: Option<NodeFault>,
 }
 
@@ -821,7 +825,8 @@ mod tests {
             assert!(r.ok);
             assert!(!r.env_override_active, "envOverrideActive phải map vào `env_override_active`");
 
-            let r = c.query_station("grid", None, None, Some(1), None, None, None).await
+            let r = c.query_station("grid", None, None, Some(1), None, None, None, None)
+                .await
                 .expect("queryTimeseries phải decode được");
             assert_eq!(r.observations.len(), 1);
             assert_eq!(r.observations[0].metric_id, "BTCUSDT", "`metricId` phải map vào `metric_id`");
@@ -967,7 +972,16 @@ mod tests {
             .expect("rt");
         rt.block_on(async {
             let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
-            c.query_station("grid", Some(111), Some(222), Some(9), None, Some("order"), None)
+            c.query_station(
+                "grid",
+                Some(TimeArg::Unix(111)),
+                Some(TimeArg::Unix(222)),
+                Some(9),
+                None,
+                Some("order"),
+                None,
+                None,
+            )
                 .await
                 .expect("query");
         });
@@ -1069,7 +1083,7 @@ mod tests {
             .expect("rt");
         let err = rt.block_on(async {
             let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
-            c.query_station("tsdb", None, None, Some(10), None, None, None)
+            c.query_station("tsdb", None, None, Some(10), None, None, None, None)
                 .await
                 .expect_err("thiếu root phải báo lỗi")
         });

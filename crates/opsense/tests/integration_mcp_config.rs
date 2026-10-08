@@ -11,7 +11,7 @@
 
 mod common;
 
-use opsense::client::OpsenseClient;
+use opsense::client::{OpsenseClient, TimeArg};
 
 async fn connect() -> Option<OpsenseClient> {
     let client = common::dex::login_client();
@@ -71,6 +71,7 @@ async fn config_edit_is_audited_in_station() {
             None,
             Some("config_edit"),
             None,
+            None,
         )
         .await
         .expect("đọc station audit");
@@ -105,8 +106,9 @@ async fn query_station_rejects_unbounded_window() {
     let err = c
         .query_station(
             &station,
-            Some(0),
-            Some(i64::MAX),
+            Some(TimeArg::Unix(0)),
+            Some(TimeArg::Unix(i64::MAX)),
+            None,
             None,
             None,
             None,
@@ -122,7 +124,7 @@ async fn query_station_rejects_unbounded_window() {
 
     // `limit` vô hạn cũng vậy.
     let err = c
-        .query_station(&station, None, None, Some(1_000_000), None, None, None)
+        .query_station(&station, None, None, Some(1_000_000), None, None, None, None)
         .await
         .expect_err("limit vượt trần phải bị từ chối")
         .to_string();
@@ -131,7 +133,16 @@ async fn query_station_rejects_unbounded_window() {
     // `from=i64::MIN, to=i64::MAX` làm phép trừ tràn: debug panic, release wrap
     // thành số âm khiến guard im lặng BỎ QUA — đúng truy vấn vô hạn cần chặn.
     let err = c
-        .query_station(&station, Some(i64::MIN), Some(i64::MAX), None, None, None, None)
+        .query_station(
+            &station,
+            Some(TimeArg::Unix(i64::MIN)),
+            Some(TimeArg::Unix(i64::MAX)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .expect_err("cửa sổ tràn số phải bị chặn")
         .to_string();
@@ -159,14 +170,14 @@ async fn query_station_filters_server_side() {
     };
 
     let all = c
-        .query_station(&station, None, None, Some(10), None, None, None)
+        .query_station(&station, None, None, Some(10), None, None, None, None)
         .await
         .expect("query không filter");
     assert!(all.scanned >= all.observations.len());
 
     // Filter theo `signal` sai kiểu → lỗi (không âm thầm trả rỗng).
     assert!(
-        c.query_station(&station, None, None, Some(10), Some("khong_ton_tai"), None, None)
+        c.query_station(&station, None, None, Some(10), Some("khong_ton_tai"), None, None, None)
             .await
             .is_err(),
         "signal lạ phải báo lỗi chứ không trả rỗng im lặng"
@@ -174,7 +185,7 @@ async fn query_station_filters_server_side() {
 
     // Filter hợp lệ → chỉ còn đúng signal đó (hoặc rỗng nếu station không có).
     let out = c
-        .query_station(&station, None, None, Some(10), Some("order"), None, None)
+        .query_station(&station, None, None, Some(10), Some("order"), None, None, None)
         .await
         .expect("query signal=order");
     assert!(

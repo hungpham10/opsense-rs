@@ -1174,6 +1174,7 @@ mod tests {
 #[cfg(test)]
 mod order_tests {
     use super::*;
+    use opsense_model::events::TelemetryKind;
 
     fn rows(n: i64) -> Vec<Observation> {
         (1..=n)
@@ -1182,8 +1183,11 @@ mod order_tests {
                 metric_id: "m".into(),
                 value: 0.0,
                 labels: Default::default(),
-                kind: Default::default(),
-                signal: Default::default(),
+                // `TelemetryKind`/`Signal` **không** impl `Default` — dựng
+                // bằng biến thể thật thay vì `Default::default()`.
+                kind: TelemetryKind::Metric,
+                signal: Signal::Order,
+                severity: None,
             })
             .collect()
     }

@@ -118,7 +118,8 @@ mod tests {
         assert_eq!(res("90s", 1000).unwrap(), 910);
         assert_eq!(res("15m", 1000).unwrap(), 100);
         assert_eq!(res("7d", 1000).unwrap(), 1000 - 604_800);
-        assert_eq!(res("1w", 1000).unwrap(), 1000 - 6_048_000);
+        // 1 tuần = 604_800s (không phải 6_048_000 — đó là 10 tuần).
+        assert_eq!(res("1w", 1000).unwrap(), 1000 - 604_800);
         // Case-insensitive + trim.
         assert_eq!(res(" 2H ", 1000).unwrap(), 1000 - 7200);
     }
