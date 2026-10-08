@@ -40,6 +40,11 @@ fn strategy() -> ScriptStrategy {
         .with_knob("min_trades", 3.into())
         .with_knob("weight_sharpness", 4.0.into())
         .with_knob("max_bit", 60.into())
+        // TP = 1 bước lưới: với sl_pct=0,8% ⇒ ngưỡng hòa vốn ≈ 78%,
+        // đúng kịch bản cần kiểm — trần win_p phải vượt được 0,75.
+        // (Mặc định script là 2 bước; với 2 bước reward lớn ⇒ hòa vốn
+        // < 0,75 và fixture này không tái hiện được.)
+        .with_knob("tp_levels", 1.0.into())
         .with_knob("fee_rate", FEE.into())
 }
 
@@ -50,18 +55,30 @@ fn params(i: usize) -> f64 {
 /// Nến tổng hợp có biên độ đủ rộng để sieve dựng lưới, mỗi ô vẫn đủ rộng để bù
 /// phí (nếu không thì script `return []` — xem `spacing_floor` trong `grid.rhai`).
 ///
-/// Biên độ chọn **2%**: nhỏ hơn thì sieve ra một ô quá hẹp so với
-/// `min_profitable_step`, lớn hơn thì lệnh TP 1 bước lưới quá xa để quan tâm.
+/// Biên độ chọn **~0,6%**: đủ để sieve dựng lưới mà bước lưới đủ nhỏ để
+/// ngưỡng hòa vốn vượt trần 0,75 — fixture này phải tái hiện được trần kinh
+/// tế vượt trần độ-tin-cậy (xem #36), nếu không hai test về sau không kiểm
+/// được gì.
+///
+/// *Ghi chú lịch sử:* trước đây dùng biên độ 2%. Khi `min_step_frac`/
+/// `spacing_floor` siết kích thước ô (sàn theo tỉ lệ giá) thì bước lưới
+/// phình ra ⇒ reward tăng ⇒ hòa vốn tụt về ~0,62, khiến
+/// `breakeven_really_is_above_the_old_cap` và
+/// `some_win_p_actually_exceeds_the_old_cap` đỏ. Fixture phải nhỏ lại để
+/// tái hiện được điều kiện ekonomic của chúng.
+///
+/// TP = 1 bước lưới qua `with_knob("tp_levels", 1.0)` — mặc định script là 2
+/// bước, reward lớn hơn ⇒ hòa vốn < 0,75 ⇒ fixture không tái hiện được nữa.
 fn candles() -> Vec<CandleStick> {
     let base = 84_000.0_f64;
     let start = 1_700_000_000_i64;
     (0..N_CANDLES)
         .map(|i| {
-            // Răng cưa: chu kỳ 37 nến, biên độ 2%. Biên độ đều đặn để test ổn
+            // Răng cưa: chu kỳ 37 nến, biên độ ~0,6%. Biên độ đều đặn để test ổn
             // định — không phụ thuộc ngẫu nhiên nên lỗi là lỗi thật.
             let phase = (i as f64) * std::f64::consts::TAU / 37.0;
-            let c = base * (1.0 + 0.008 * phase.sin());
-            let o = base * (1.0 + 0.008 * (phase - 0.08).sin());
+            let c = base * (1.0 + 0.003 * phase.sin());
+            let o = base * (1.0 + 0.003 * (phase - 0.08).sin());
             CandleStick {
                 t: start + i * 60,
                 o,
