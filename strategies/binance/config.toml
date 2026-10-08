@@ -248,7 +248,7 @@ station = true
    # Hệ quả phụ: hòa vốn 60.3% < trần độ-tin-cậy 0.75, nên `win_ceiling` trả về
    # 0.75 ⇒ kernel chỉ đặt lệnh khi mô hình tự tin ≥ 75% (xem `win_ceiling`).
    # Ở `sl_pct = 0.008` ngưỡng hòa vốn 81.5% ép kernel nhảy lên 81.5%.
-   sl_pct = 0.0025
+   sl_pct = 0.008
    # Knob cho `fn rebuild`: số lệnh đóng tối thiểu trước khi tin tỉ lệ thắng
    # thực tế, độ nhọn phân bổ vốn, sieve max_bit.
    grid_min_trades = 3
