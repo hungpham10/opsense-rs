@@ -206,6 +206,29 @@ pub struct OrdersResult {
     pub pnl: Option<PnlSummary>,
 }
 
+/// Đọc `fee_rate` **khứ hồi** (entry + exit) từ config live của node.
+///
+/// `Runtime::components()` trả JSON **phẳng**: `params` nằm ngay dưới top-level
+/// (cùng `type`/`id`/`script_path`), KHÔNG bọc trong `config` — xem
+/// [`component_config`] đọc `obj.get("id")` trực tiếp và test
+/// `patch_json_pointer_touches_one_place` với `"/params/sl_pct"`.
+///
+/// Đọc nhầm `c["config"]["params"]["fee_rate"]` sẽ luôn ra `None` rồi im lặng
+/// rơi về mặc định — đúng lúc nào con số mặc định trùng với `fee_rate` của
+/// strategy thì không ai phát hiện, đến khi node dùng fee khác là PnL lệch.
+///
+/// Mặc định `0.0004` (0.04%) khi node không khai `fee_rate`.
+fn fee_roundtrip(components: &[serde_json::Value]) -> f64 {
+    components
+        .iter()
+        .find_map(|c| {
+            c.get("params")
+                .and_then(|p| p.get("fee_rate"))
+                .and_then(serde_json::Value::as_f64)
+        })
+        .map_or(0.0004, |f| f * 2.0)
+}
+
 /// Convert internal `pnl::PnlBucket` to GraphQL `PnlBucket`.
 impl From<InternalPnlBucket> for PnlBucket {
     fn from(b: InternalPnlBucket) -> Self {
@@ -642,14 +665,7 @@ impl QueryRoot {
                 async_graphql::Error::new(e)
             })?;
 
-            // Đọc fee_rate từ config của node (để không hardcode)
-            let fee_roundtrip = s
-                .components(Some(&node))
-                .await
-                .into_iter()
-                .find_map(|c| c.get("config").and_then(|cfg| cfg.get("params")).and_then(|p| p.get("fee_rate")).and_then(|v| v.as_f64()))
-                .map(|f| f * 2.0)
-                .unwrap_or(0.0004);
+            let fee_roundtrip = fee_roundtrip(&s.components(Some(&node)).await);
 
             let pnl_summary = aggregate(
                 &filtered.iter().collect::<Vec<_>>(),
@@ -1179,6 +1195,48 @@ mod tests {
         // tên `params.a.b`, không phải hai tầng — giữ đúng chuẩn RFC 6901.
         let out = patch_json_pointer(base(), "/params.a.b", serde_json::json!(1)).unwrap();
         assert_eq!(out["params.a.b"], serde_json::json!(1));
+    }
+
+    /// `fee_roundtrip` phải đọc `params.fee_rate` ở **top-level**.
+    ///
+    /// Đây là chỗ đã sai một lần: viết `c["config"]["params"]["fee_rate"]` thì
+    /// luôn ra `None` rồi im lặng rơi về mặc định 0.0004 — chỉ đúng lúc `fee_rate`
+    /// của strategy trùng mặc định, sai ngay khi node dùng fee khác (vd 0.0005).
+    /// Không có test này thì lỗi không lộ, vì mặc định **tình cờ đúng** với
+    /// strategy binance.
+    #[test]
+    fn fee_roundtrip_reads_flat_params() {
+        // Shape thật của `Runtime::components()`: phẳng, `params` ở top-level.
+        let grid = serde_json::json!({
+            "type": "rhai_transform",
+            "id": "grid",
+            "script_path": "strategies/binance/grid.rhai",
+            "params": { "fee_rate": 0.0002, "sl_pct": 0.0025 }
+        });
+        // 0.0002 × 2 = 0.0004 — KHÔNG phải mặc định tình cờ
+        assert_eq!(fee_roundtrip(&[grid.clone()]), 0.0004);
+
+        // fee_rate khác phải thấy đổi, không được đứng ở mặc định.
+        let other = serde_json::json!({
+            "type": "rhai_transform",
+            "id": "grid",
+            "params": { "fee_rate": 0.0005 }
+        });
+        assert_eq!(fee_roundtrip(&[other]), 0.001, "0.0005 × 2 phải ra 0.001, không phải mặc định 0.0004");
+
+        // Không khai `fee_rate` → mặc định.
+        let none = serde_json::json!({ "type": "clock", "id": "clock" });
+        assert_eq!(fee_roundtrip(&[none]), 0.0004);
+
+        // Danh sách rỗng cũng phải sống.
+        assert_eq!(fee_roundtrip(&[]), 0.0004);
+
+        // Bẫm chính: nếu ai đó "sửa" thành đọc `c["config"]["params"]` thì test
+        // này đỏ, vì shape đó không tồn tại.
+        assert!(
+            grid.get("config").is_none(),
+            "runtime components không có key `config` — xem `component_config`"
+        );
     }
 
     /// Guard của query là hàng phòng thủ số 1: cửa sổ vô hạn / `limit` vô hạn là

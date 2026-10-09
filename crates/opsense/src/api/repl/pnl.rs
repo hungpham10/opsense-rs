@@ -88,6 +88,11 @@ pub fn dedup_orders<'a>(rows: &'a [&'a Observation]) -> Vec<&'a Observation> {
 }
 
 /// A single PnL bucket (time window).
+///
+/// `net_pnl_pct`, `avg_win_pct`, `avg_loss_pct` là **trung bình trên mỗi lệnh**
+/// (`%`), còn `net_pnl_abs`, `gross_*_abs`, `notional` là **tổng USD**. Ba field
+/// `*_sum` ở cuối là tích luỹ thô nội bộ để `finalize` chia ra — không lộ ra
+/// GraphQL (v1.rs convert tay từng field).
 #[derive(Debug, Clone, Default)]
 pub struct PnlBucket {
     pub bucket_ts: i64,
@@ -106,6 +111,10 @@ pub struct PnlBucket {
     pub short_trades: usize,
     pub open_count: usize,
     pub open_notional: f64,
+    // ── nội bộ: tích luỹ thô, `finalize` mới đổi thành trung bình ──
+    pub pnl_pct_sum: f64,
+    pub win_pct_sum: f64,
+    pub loss_pct_sum: f64,
 }
 
 impl PnlBucket {
@@ -119,15 +128,17 @@ impl PnlBucket {
     fn add_closed(&mut self, size: f64, pnl_pct: f64, dtype: &str) {
         self.trades += 1;
         self.net_pnl_abs += size * pnl_pct;
-        self.net_pnl_pct += pnl_pct;
+        self.pnl_pct_sum += pnl_pct;
         self.notional += size;
 
         if pnl_pct > 0.0 {
             self.wins += 1;
             self.gross_profit_abs += size * pnl_pct;
+            self.win_pct_sum += pnl_pct;
         } else {
             self.losses += 1;
             self.gross_loss_abs += size * pnl_pct;
+            self.loss_pct_sum += pnl_pct;
         }
 
         match dtype {
@@ -142,16 +153,37 @@ impl PnlBucket {
         self.open_notional += size;
     }
 
+    /// Cộng dồn **thô** từ bucket khác (trước khi bất kỳ phép chia nào).
+    /// Không gộp `bucket_ts`.
+    fn roll_up_raw(&mut self, other: &PnlBucket) {
+        self.trades += other.trades;
+        self.wins += other.wins;
+        self.losses += other.losses;
+        self.long_trades += other.long_trades;
+        self.short_trades += other.short_trades;
+        self.open_count += other.open_count;
+
+        self.net_pnl_abs += other.net_pnl_abs;
+        self.pnl_pct_sum += other.pnl_pct_sum;
+        self.gross_profit_abs += other.gross_profit_abs;
+        self.gross_loss_abs += other.gross_loss_abs;
+        self.win_pct_sum += other.win_pct_sum;
+        self.loss_pct_sum += other.loss_pct_sum;
+        self.notional += other.notional;
+        self.open_notional += other.open_notional;
+    }
+
+    /// Đổi tích luỹ thô thành trung bình. Gọi **sau khi** mọi `roll_up_raw`.
     fn finalize(&mut self) {
         if self.trades > 0 {
             self.win_rate = self.wins as f64 / self.trades as f64;
-            self.net_pnl_pct /= self.trades as f64;
-            if self.wins > 0 {
-                self.avg_win_pct = self.gross_profit_abs / self.wins as f64;
-            }
-            if self.losses > 0 {
-                self.avg_loss_pct = self.gross_loss_abs / self.losses as f64;
-            }
+            self.net_pnl_pct = self.pnl_pct_sum / self.trades as f64;
+        }
+        if self.wins > 0 {
+            self.avg_win_pct = self.win_pct_sum / self.wins as f64;
+        }
+        if self.losses > 0 {
+            self.avg_loss_pct = self.loss_pct_sum / self.losses as f64;
         }
     }
 }
@@ -193,6 +225,18 @@ pub struct PnlSummary {
 /// - `mark_price` = giá để tính unrealized PnL của lệnh đang mở; `None` = bỏ qua
 /// - `fee_roundtrip` = phí khứ hồi (entry + exit), mặc định `0.0004` (0.04%)
 /// - `pnl_pct` trong observation **đã trừ phí** (xem `qlib/portfolio.rs:1279`), **không** trừ lần 2
+///
+/// ## Realized vs unrealized
+///
+/// Mọi số **trừ** `unrealized_abs` là **realized only**: `trades`, `wins`,
+/// `gross_profit_abs`/`gross_loss_abs`, `avg_win_pct`/`avg_loss_pct`,
+/// `net_pnl_abs`, `notional`. Unrealized (lệnh mở) chỉ nằm một mình trong
+/// `unrealized_abs`, không lẫn vào `gross_*` hay `avg_*`.
+///
+/// Lý do: nếu trộn unrealized vào `gross_profit_abs` thì `avg_win_pct` (chia cho
+/// `wins`) bị pha bởi một khoản **không phải win** — và vì unrealized không
+/// tăng `wins`, tử số có thêm mà mẫu số không đổi ⇒ trung bình lệnh thắng bị
+/// kéo lệch. Cộng 2 field ra vẫn rõ ràng hơn là để một con số nói dối.
 pub fn aggregate(
     rows: &[&Observation],
     bucket_secs: i64,
@@ -225,49 +269,43 @@ pub fn aggregate(
     }
 
     use std::collections::BTreeMap;
+    // Chỉ bucket nào **có dòng** mới nằm ở đây; gap bucket lấp đủ ở bước sau.
     let mut buckets: BTreeMap<i64, PnlBucket> = BTreeMap::new();
 
     for o in rows {
+        let status = o.labels.get("status").map(String::as_str).unwrap_or("");
+        if status != "closed" && status != "open" {
+            continue;
+        }
         let dtype = o.labels.get("dtype").map(String::as_str).unwrap_or("");
         let size = o.labels.get("size").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-        let status = o.labels.get("status").map(String::as_str).unwrap_or("");
-        let entry = o.value;
-
         let bucket_ts = align_bucket(o.ts, bucket_secs);
         let bucket = buckets.entry(bucket_ts).or_insert_with(|| PnlBucket::new(bucket_ts));
 
-        match status {
-            "closed" => {
-                let pnl_pct = o
-                    .labels
-                    .get("pnl_pct")
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(0.0);
-
-                // size = 0 vẫn đếm là 1 trade (để biết có lệnh), nhưng không cộng PnL
-                if size == 0.0 {
-                    summary.zero_size_rows += 1;
-                }
-                bucket.add_closed(size, pnl_pct, dtype);
-
-                // Unrealized: lệnh mở không có pnl_pct, tính tại đây nếu có mark_price
+        if status == "closed" {
+            // `pnl_pct` đã net-of-fee ⇒ không trừ fee lần 2 (xem comment hàm).
+            let pnl_pct = o
+                .labels
+                .get("pnl_pct")
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            // `size = 0` vẫn là 1 trade (để biết có lệnh) nhưng không đóng góp USD.
+            if size == 0.0 {
+                summary.zero_size_rows += 1;
             }
-            "open" => {
-                if size > 0.0 {
-                    bucket.add_open(size);
-                }
-                // Unrealized sẽ tính sau khi biết mark_price
-                let _ = entry; // unused when no mark_price
-            }
-            _ => {}
+            bucket.add_closed(size, pnl_pct, dtype);
+        } else if size > 0.0 {
+            bucket.add_open(size);
         }
     }
 
-    // Tính unrealized cho từng bucket nếu có mark_price
+    // Unrealized: tính riêng, KHÔNG lẫn vào bucket.
+    //
+    // Lý do không ghi vào bucket: `gross_profit_abs`/`avg_win_pct` chỉ mô tả
+    // realized (xem doc hàm). Một lệnh mở đang lời không phải "win" — chưa chốt.
     if let Some(mark) = mark_price {
         for o in rows {
-            let status = o.labels.get("status").map(String::as_str).unwrap_or("");
-            if status != "open" {
+            if o.labels.get("status").map(String::as_str) != Some("open") {
                 continue;
             }
             let size = o.labels.get("size").and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
@@ -276,113 +314,61 @@ pub fn aggregate(
             }
             let dtype = o.labels.get("dtype").map(String::as_str).unwrap_or("");
             let entry = o.value;
+            if entry == 0.0 {
+                continue;
+            }
             let pnl_pct = match dtype {
                 "long" => (mark - entry) / entry - fee_roundtrip,
                 "short" => (entry - mark) / entry - fee_roundtrip,
                 _ => 0.0,
             };
-            let bucket_ts = align_bucket(o.ts, bucket_secs);
-            if let Some(bucket) = buckets.get_mut(&bucket_ts) {
-                bucket.net_pnl_abs += size * pnl_pct;
-                bucket.net_pnl_pct += pnl_pct; // unrealized cộng vào net_pnl_pct của bucket
-                bucket.notional += size;
-                if pnl_pct > 0.0 {
-                    bucket.gross_profit_abs += size * pnl_pct;
-                } else {
-                    bucket.gross_loss_abs += size * pnl_pct;
-                }
-            }
             summary.unrealized_abs += size * pnl_pct;
         }
     }
 
-    // Finalize buckets + roll up to total
-    let mut total = PnlBucket::new(0);
-
+    // Lấp gap bucket. Dùng `BTreeMap` nên `keys()` đã sort — bucket ra luôn asc.
     if bucket_secs > 0 && !buckets.is_empty() {
-        // Fill gap buckets: create empty buckets for the entire range
-        let min_bucket = *buckets.keys().min().unwrap();
-        let max_bucket = *buckets.keys().max().unwrap();
+        let min_bucket = *buckets.keys().next().expect("không rỗng");
+        let max_bucket = *buckets.keys().next_back().expect("không rỗng");
         let mut current = min_bucket;
         while current <= max_bucket {
-            let bucket = buckets.entry(current).or_insert_with(|| PnlBucket::new(current));
-            bucket.finalize();
-            summary.trades += bucket.trades;
-            summary.net_pnl_abs += bucket.net_pnl_abs;
-            summary.net_pnl_pct += bucket.net_pnl_pct;
-            summary.gross_profit_abs += bucket.gross_profit_abs;
-            summary.gross_loss_abs += bucket.gross_loss_abs;
-            summary.notional += bucket.notional;
-            summary.wins += bucket.wins;
-            summary.losses += bucket.losses;
-            summary.long_trades += bucket.long_trades;
-            summary.short_trades += bucket.short_trades;
-            summary.open_count += bucket.open_count;
-            summary.open_notional += bucket.open_notional;
-
-            total.trades += bucket.trades;
-            total.net_pnl_abs += bucket.net_pnl_abs;
-            total.net_pnl_pct += bucket.net_pnl_pct;
-            total.gross_profit_abs += bucket.gross_profit_abs;
-            total.gross_loss_abs += bucket.gross_loss_abs;
-            total.notional += bucket.notional;
-            total.wins += bucket.wins;
-            total.losses += bucket.losses;
-            total.long_trades += bucket.long_trades;
-            total.short_trades += bucket.short_trades;
-            total.open_count += bucket.open_count;
-            total.open_notional += bucket.open_notional;
-
-            summary.buckets.push(bucket.clone());
+            buckets
+                .entry(current)
+                .or_insert_with(|| PnlBucket::new(current));
             current += bucket_secs;
         }
-    } else {
-        for (_, mut bucket) in buckets {
-            bucket.finalize();
-            summary.trades += bucket.trades;
-            summary.zero_size_rows += 0; // đã cộng ở trên
-            summary.net_pnl_abs += bucket.net_pnl_abs;
-            summary.net_pnl_pct += bucket.net_pnl_pct;
-            summary.gross_profit_abs += bucket.gross_profit_abs;
-            summary.gross_loss_abs += bucket.gross_loss_abs;
-            summary.notional += bucket.notional;
-            summary.wins += bucket.wins;
-            summary.losses += bucket.losses;
-            summary.long_trades += bucket.long_trades;
-            summary.short_trades += bucket.short_trades;
-            summary.open_count += bucket.open_count;
-            summary.open_notional += bucket.open_notional;
+    }
 
-            total.trades += bucket.trades;
-            total.net_pnl_abs += bucket.net_pnl_abs;
-            total.net_pnl_pct += bucket.net_pnl_pct;
-            total.gross_profit_abs += bucket.gross_profit_abs;
-            total.gross_loss_abs += bucket.gross_loss_abs;
-            total.notional += bucket.notional;
-            total.wins += bucket.wins;
-            total.losses += bucket.losses;
-            total.long_trades += bucket.long_trades;
-            total.short_trades += bucket.short_trades;
-            total.open_count += bucket.open_count;
-            total.open_notional += bucket.open_notional;
+    // Roll up **thô** trước, `finalize` (chia ra trung bình) sau cùng. Làm ngược
+    // — finalize từng bucket rồi mới cộng — sẽ chia 2 lần và cho ra trung bình
+    // của trung bình, sai khi các bucket có số lệnh lệch nhau.
+    let mut total = PnlBucket::new(0);
+    for (_, bucket) in &buckets {
+        total.roll_up_raw(bucket);
+    }
 
-            summary.buckets.push(bucket);
-        }
+    for (_, mut bucket) in buckets {
+        bucket.finalize();
+        summary.buckets.push(bucket);
     }
 
     total.finalize();
+    summary.trades = total.trades;
+    summary.wins = total.wins;
+    summary.losses = total.losses;
+    summary.win_rate = total.win_rate;
+    summary.net_pnl_abs = total.net_pnl_abs;
+    summary.net_pnl_pct = total.net_pnl_pct;
+    summary.gross_profit_abs = total.gross_profit_abs;
+    summary.gross_loss_abs = total.gross_loss_abs;
+    summary.notional = total.notional;
+    summary.avg_win_pct = total.avg_win_pct;
+    summary.avg_loss_pct = total.avg_loss_pct;
+    summary.long_trades = total.long_trades;
+    summary.short_trades = total.short_trades;
+    summary.open_count = total.open_count;
+    summary.open_notional = total.open_notional;
     summary.total = total;
-
-    if summary.trades > 0 {
-        summary.win_rate = summary.wins as f64 / summary.trades as f64;
-        summary.net_pnl_pct /= summary.trades as f64;
-        if summary.wins > 0 {
-            summary.avg_win_pct = summary.gross_profit_abs / summary.wins as f64;
-        }
-        if summary.losses > 0 {
-            summary.avg_loss_pct = summary.gross_loss_abs / summary.losses as f64;
-        }
-    }
 
     summary
 }
@@ -580,5 +566,152 @@ mod tests {
         assert_eq!(sum.trades, 0);
         assert_eq!(sum.buckets.len(), 0);
         assert_eq!(sum.total.trades, 0);
+    }
+
+    /// `net_pnl_pct` phải là trung bình **trên mỗi lệnh thật**, không phải trung
+    /// bình của trung bình theo bucket.
+    ///
+    /// Đây là bug đã gặp: cộng dồn theo giá trị **đã chia** của từng bucket rồi
+    /// chia lại cho tổng lệnh ⇒ chia 2 lần. 3 lệnh ở giờ A và 1 lệnh ở giờ B
+    /// là ca khó nhất vì hai bucket lệch nhau 3× về số lệnh.
+    ///
+    /// Dữ liệu cố ý **không đối xứng** (tổng ≠ 0): với dữ liệu đối xứng cả bản
+    /// đúng lẫn bản sai đều cho 0 — test sẽ xanh ngầm.
+    ///
+    ///   đúng   = Σ pnl_pct / total_trades  = 0.01 / 4 = 0.0025
+    ///   bug A  = (avgA + avgB) / total     = −0.02 / 4 = −0.005  (mean-of-means)
+    ///   bug B  = dùng avg chưa finalize    = 0 / 4    = 0
+    #[test]
+    fn net_pnl_pct_is_true_mean_not_mean_of_means() {
+        let base = 3_600_000; // thẳng hàng bucket 1h
+        let mut rows = Vec::new();
+        // Giờ A: 3 lệnh mỗi lệnh +1% ⇒ sum 0.03
+        for i in 0..3 {
+            rows.push(order_obs(base + i, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", &format!("a{i}"))]));
+        }
+        // Giờ B: 1 lệnh −2% ⇒ sum −0.02
+        rows.push(order_obs(base + 3600 + 5, 100.0, "long", 100.0, "closed", Some(-0.02), &[("order_id", "b0")]));
+
+        let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 3600, None, 0.0004);
+        assert_eq!(sum.trades, 4);
+
+        let expected = (3.0 * 0.01 - 0.02) / 4.0; // 0.0025
+        assert!(
+            (sum.total.net_pnl_pct - expected).abs() < 1e-12,
+            "total.netPnlPct phải là mean thật {expected}, được {}",
+            sum.total.net_pnl_pct
+        );
+        assert!(
+            (sum.net_pnl_pct - expected).abs() < 1e-12,
+            "summary.netPnlPct phải là mean thật {expected}, được {}",
+            sum.net_pnl_pct
+        );
+        // Hai dạng sai đều bị loại. Thiếu 2 assert này thì test không phân biệt
+        // được đúng/sai khi kết quả đúng tình cờ gần 0.
+        assert!(
+            (sum.total.net_pnl_pct - (-0.005)).abs() > 1e-6,
+            "bug mean-of-means: (0.01 + (−0.02))/4 = −0.005"
+        );
+        assert!(
+            sum.total.net_pnl_pct.abs() > 1e-6,
+            "bug dùng avg chưa finalize: ra 0"
+        );
+    }
+
+    /// `avg_win_pct` / `avg_loss_pct` phải là **phần trăm**, không phải USD/win.
+    ///
+    /// Phiên bản đầu tính `gross_profit_abs / wins` — đó là USD trung bình mỗi lần
+    /// thắng, đặt tên là `*_pct` nghe như tỷ lệ.
+    #[test]
+    fn avg_pcts_are_pct_means_not_usd_per_win() {
+        let now = 1_000_000;
+        let rows = vec![
+            order_obs(now, 100.0, "long", 100.0, "closed", Some(0.02), &[("order_id", "w1")]),
+            order_obs(now + 1, 100.0, "long", 100.0, "closed", Some(0.04), &[("order_id", "w2")]),
+            order_obs(now + 2, 100.0, "long", 100.0, "closed", Some(-0.01), &[("order_id", "l1")]),
+        ];
+        let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 0, None, 0.0004);
+        // avg_win = (0.02 + 0.04) / 2 = 0.03 — là tỷ lệ, không phải 0.03 USD
+        assert!((sum.avg_win_pct - 0.03).abs() < 1e-12, "avgWinPct phải là 0.03, được {}", sum.avg_win_pct);
+        assert!((sum.avg_loss_pct - (-0.01)).abs() < 1e-12, "avgLossPct phải là −0.01, được {}", sum.avg_loss_pct);
+        // gross_profit_abs vẫn là USD: 100×0.02 + 100×0.04 = 6.0
+        assert!((sum.gross_profit_abs - 6.0).abs() < 1e-9);
+    }
+
+    /// Unrealized **không được** lẫn vào `gross_*`/`avg_*`/`notional`.
+    ///
+    /// Bug cũ: unrealized của lệnh mở cộng vào `gross_profit_abs`. Vì unrealized
+    /// không tăng `wins`, tử số có thêm mà mẫu số không đổi ⇒ `avg_win_pct` bị
+    /// pha bởi khoản chưa chốt — một lệnh mở đang lời không phải "win".
+    #[test]
+    fn unrealized_does_not_pollute_gross_or_averages() {
+        let now = 1_000_000;
+        // 1 lệnh đã chốt thắng +1%, và 1 lệnh đang mở lời rất mạnh (+50%).
+        let mut rows = vec![order_obs(now, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "c1")])];
+        rows.push(order_obs(now + 1, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")]));
+
+        let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 0, Some(150.0), 0.0004);
+
+        // Realized chỉ có 1 lệnh
+        assert_eq!(sum.trades, 1);
+        assert_eq!(sum.wins, 1);
+        assert_eq!(sum.open_count, 1);
+        // gross_profit_abs = 100 × 0.01 = 1.0 — KHÔNG chứa 100×0.4996 = 49.96
+        assert!((sum.gross_profit_abs - 1.0).abs() < 1e-9, "grossProfitAbs = {}, phải là 1.0", sum.gross_profit_abs);
+        assert_eq!(sum.gross_loss_abs, 0.0);
+        // avg_win_pct = 0.01, không phải (0.01 + 0.4996)/1
+        assert!((sum.avg_win_pct - 0.01).abs() < 1e-12, "avgWinPct = {}, phải là 0.01", sum.avg_win_pct);
+        // notional chỉ tính lệnh đã đóng
+        assert!((sum.notional - 100.0).abs() < 1e-9, "notional = {}, phải là 100", sum.notional);
+        // Unrealized nằm riêng: (150-100)/100 - 0.0004 = 0.4996 ⇒ 49.96 USD
+        assert!((sum.unrealized_abs - 49.96).abs() < 1e-9, "unrealizedAbs = {}", sum.unrealized_abs);
+        // net_pnl_abs realized only
+        assert!((sum.net_pnl_abs - 1.0).abs() < 1e-9, "netPnlAbs = {}, phải là 1.0", sum.net_pnl_abs);
+    }
+
+    /// Bất biến: `total` (và `summary`) phải bằng tổng các bucket theo **từng
+    /// field** — không chỉ `net_pnl_abs`. Nếu roll_up_raw quên field nào thì đây
+    /// là chỗ đỏ.
+    #[test]
+    fn total_matches_sum_of_buckets() {
+        let base = 3_600_000;
+        let mut rows = Vec::new();
+        // 2 bucket, mỗi bucket 1 thắng 1 thua + 1 lệnh mở
+        for (b, i) in [(0, 0), (0, 1), (3600, 0), (3600, 1)] {
+            let pnl = if i % 2 == 0 { Some(0.02) } else { Some(-0.01) };
+            rows.push(order_obs(
+                base + b + i,
+                100.0,
+                if i % 2 == 0 { "long" } else { "short" },
+                50.0,
+                "closed",
+                pnl,
+                &[("order_id", &format!("o{b}-{i}"))],
+            ));
+        }
+        rows.push(order_obs(base + 10, 100.0, "long", 30.0, "open", None, &[("order_id", "open0")]));
+        rows.push(order_obs(base + 3610, 100.0, "short", 20.0, "open", None, &[("order_id", "open1")]));
+
+        let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 3600, None, 0.0004);
+        assert_eq!(sum.buckets.len(), 2);
+
+        let s = |f: &dyn Fn(&super::PnlBucket) -> f64| sum.buckets.iter().map(f).sum::<f64>();
+        assert!((sum.total.trades as f64 - s(&|b| b.trades as f64)).abs() < 1e-9);
+        assert!((sum.total.wins as f64 - s(&|b| b.wins as f64)).abs() < 1e-9);
+        assert!((sum.total.losses as f64 - s(&|b| b.losses as f64)).abs() < 1e-9);
+        assert!((sum.total.net_pnl_abs - s(&|b| b.net_pnl_abs)).abs() < 1e-9);
+        assert!((sum.total.gross_profit_abs - s(&|b| b.gross_profit_abs)).abs() < 1e-9);
+        assert!((sum.total.gross_loss_abs - s(&|b| b.gross_loss_abs)).abs() < 1e-9);
+        assert!((sum.total.notional - s(&|b| b.notional)).abs() < 1e-9);
+        assert!((sum.total.open_count as f64 - s(&|b| b.open_count as f64)).abs() < 1e-9);
+        assert!((sum.total.open_notional - s(&|b| b.open_notional)).abs() < 1e-9);
+        assert!((sum.total.long_trades as f64 - s(&|b| b.long_trades as f64)).abs() < 1e-9);
+        assert!((sum.total.short_trades as f64 - s(&|b| b.short_trades as f64)).abs() < 1e-9);
+        // pnl_pct_sum không cộng dồn tuyến tính nên so mean riêng
+        assert_eq!(sum.total.open_count, 2);
+        assert_eq!(sum.total.trades, 4);
+        assert_eq!(sum.total.wins, 2);
+        // net = 50×0.02×2 + 50×(−0.01)×2 = 2 − 1 = 1.0
+        assert!((sum.total.net_pnl_abs - 1.0).abs() < 1e-9, "netPnlAbs = {}", sum.total.net_pnl_abs);
     }
 }
