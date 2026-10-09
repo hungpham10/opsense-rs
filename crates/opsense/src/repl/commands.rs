@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 
 use crate::client::graphql::{ComponentInput, NodeSummary, OpsenseClient, Status};
 use crate::repl::display::{
-    format_attributes, format_edit_result, format_observations, format_stations_table,
-    format_status_table,
+    format_attributes, format_edit_result, format_observations, format_pnl_summary,
+    format_stations_table, format_status_table,
 };
 
 use crate::client::TimeArg;
@@ -292,14 +292,14 @@ async fn cmd_query(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<
     }
 }
 
-/// `:orders <node> [--status open|closed] [--from X] [--to Y] [--limit N] [--order asc|desc]`
+/// `:orders <node> [--status open|closed] [--from X] [--to Y] [--limit N] [--order asc|desc] [--interval 1d] [--mark-price 123.45]`
 async fn cmd_orders(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<String>> {
-    const FLAGS: &[&str] = &["status", "from", "to", "limit", "order"];
+    const FLAGS: &[&str] = &["status", "from", "to", "limit", "order", "interval", "mark-price"];
     let args = parse_args(rest, FLAGS)?;
     let node = args.positional.first().ok_or_else(|| {
         anyhow::anyhow!(
             "usage: :orders <node> [--status open|closed] [--from X] [--to Y] \
-             [--limit N] [--order asc|desc]"
+             [--limit N] [--order asc|desc] [--interval 1d|1h|...] [--mark-price 123.45]"
         )
     })?;
     let now = opsense_components::signal::now_secs();
@@ -316,6 +316,12 @@ async fn cmd_orders(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option
         .transpose()?;
     let status = args.flags.get("status").cloned();
     let order = args.flags.get("order").cloned();
+    let interval = args.flags.get("interval").cloned();
+    let mark_price = args
+        .flags
+        .get("mark-price")
+        .map(|s| s.parse::<f64>())
+        .transpose()?;
 
     let out = client
         .orders(
@@ -325,9 +331,11 @@ async fn cmd_orders(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option
             to_ts,
             limit,
             order.as_deref(),
+            interval.as_deref(),
+            mark_price,
         )
         .await?;
-    if out.observations.is_empty() {
+    if out.observations.is_empty() && out.pnl.is_none() {
         return Ok(Some(format!(
             "(no orders; scanned {}, order={})",
             out.scanned, out.order
@@ -342,6 +350,10 @@ async fn cmd_orders(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option
     text.push_str(&format_observations(&out.observations).to_string());
     if out.truncated {
         text.push_str(&format!("\n… truncated ({} rows scanned)", out.scanned));
+    }
+    if let Some(pnl) = &out.pnl {
+        text.push_str("\n\n");
+        text.push_str(&format_pnl_summary(pnl).to_string());
     }
     Ok(Some(text))
 }

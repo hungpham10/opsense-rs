@@ -146,6 +146,10 @@ pub async fn query_timeseries(
 /// trả một lệnh đã đóng là đang mở (đã đo: 2 lệnh thay vì 1). Trước đây khối
 /// gộp nằm ở đây — giờ nó nằm đúng một chỗ trên server, và `limit` cắt *sau* khi
 /// gộp nên `status: "closed"` không còn rỗng.
+///
+/// Khi có `interval`: server trả thêm `pnl` aggregation. `limit` chỉ cắt
+/// `observations`, `pnl` luôn tính trên toàn bộ cửa sổ sau khi dedup.
+/// Một call thay 3 call trước đây (closed + open + giá).
 pub async fn orders(
     client: &OpsenseClient,
     node: &str,
@@ -154,9 +158,11 @@ pub async fn orders(
     to_ts: Option<TimeArg>,
     limit: Option<i64>,
     order: Option<&str>,
+    interval: Option<&str>,    // NEW: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0"
+    mark_price: Option<f64>,   // NEW: giá để tính unrealized PnL
 ) -> Result<String, String> {
     client
-        .orders(node, status, from_ts, to_ts, limit, order)
+        .orders(node, status, from_ts, to_ts, limit, order, interval, mark_price)
         .await
         .map_err(|e| format!("{e:#}"))
         .and_then(|r| json_dump(&r).map_err(|e| format!("{e}")))
