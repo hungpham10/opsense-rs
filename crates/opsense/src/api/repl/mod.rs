@@ -1,4 +1,5 @@
 mod v1;
+pub mod pnl;
 use v1::{MutationRoot, QueryRoot};
 
 use std::sync::Arc;

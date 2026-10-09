@@ -125,6 +125,70 @@ pub struct QueryResult {
     pub order: String,
 }
 
+/// PnL bucket — mirror of GraphQL `PnlBucket`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PnlBucket {
+    pub bucket_ts: i64,
+    pub trades: i64,
+    pub wins: i64,
+    pub losses: i64,
+    pub win_rate: f64,
+    pub net_pnl_abs: f64,
+    pub net_pnl_pct: f64,
+    pub gross_profit_abs: f64,
+    pub gross_loss_abs: f64,
+    pub notional: f64,
+    pub avg_win_pct: f64,
+    pub avg_loss_pct: f64,
+    pub long_trades: i64,
+    pub short_trades: i64,
+    pub open_count: i64,
+    pub open_notional: f64,
+}
+
+/// Tổng PnL — mirror of GraphQL `PnlSummary`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PnlSummary {
+    pub interval: String,
+    pub bucket_secs: i64,
+    pub from_ts: i64,
+    pub to_ts: i64,
+    pub complete: bool,
+    pub trades: i64,
+    pub zero_size_rows: i64,
+    pub net_pnl_abs: f64,
+    pub net_pnl_pct: f64,
+    pub gross_profit_abs: f64,
+    pub gross_loss_abs: f64,
+    pub notional: f64,
+    pub wins: i64,
+    pub losses: i64,
+    pub win_rate: f64,
+    pub avg_win_pct: f64,
+    pub avg_loss_pct: f64,
+    pub long_trades: i64,
+    pub short_trades: i64,
+    pub open_count: i64,
+    pub open_notional: f64,
+    pub unrealized_abs: f64,
+    pub mark_price: Option<f64>,
+    pub total: PnlBucket,
+    pub buckets: Vec<PnlBucket>,
+}
+
+/// Kết quả `orders` — giữ `observations` cho backward-compatible, thêm `pnl`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrdersResult {
+    pub observations: Vec<Observation>,
+    pub truncated: bool,
+    pub scanned: usize,
+    pub order: String,
+    pub pnl: Option<PnlSummary>,
+}
+
 fn asc_default() -> String {
     "asc".to_string()
 }
@@ -457,6 +521,9 @@ impl OpsenseClient {
     /// Gộp theo `order_id` và lọc `status` **server-side** (`Query.orders`):
     /// station append-only nên bản `open` cũ vẫn còn sau khi lệnh đóng, nên
     /// lọc ở client *trước* khi gộp sẽ trả một lệnh đã đóng là đang mở.
+    ///
+    /// Khi có `interval`: server trả thêm `pnl` aggregation. `limit` chỉ cắt
+    /// `observations`, `pnl` luôn tính trên toàn bộ cửa sổ sau khi dedup.
     #[allow(clippy::too_many_arguments)]
     pub async fn orders(
         &self,
@@ -466,16 +533,30 @@ impl OpsenseClient {
         to_ts: Option<TimeArg>,
         limit: Option<i64>,
         order: Option<&str>,
-    ) -> anyhow::Result<QueryResult> {
+        interval: Option<&str>,    // NEW: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0"
+        mark_price: Option<f64>,   // NEW: giá để tính unrealized PnL
+    ) -> anyhow::Result<OrdersResult> {
         const QUERY: &str = r#"
             query($node: String!, $status: String, $fromTs: Int, $toTs: Int,
-                  $limit: Int, $order: String) {
+                  $limit: Int, $order: String, $interval: String, $markPrice: Float) {
                 orders(node: $node, status: $status, fromTs: $fromTs, toTs: $toTs,
-                       limit: $limit, order: $order) {
+                       limit: $limit, order: $order, interval: $interval, markPrice: $markPrice) {
                     observations { ts metricId kind signal value labels }
                     truncated
                     scanned
                     order
+                    pnl { interval bucketSecs fromTs toTs complete trades zeroSizeRows
+                          netPnlAbs netPnlPct grossProfitAbs grossLossAbs notional
+                          wins losses winRate avgWinPct avgLossPct
+                          longTrades shortTrades openCount openNotional
+                          unrealizedAbs markPrice total { bucketTs trades wins losses winRate
+                                 netPnlAbs netPnlPct grossProfitAbs grossLossAbs notional
+                                 avgWinPct avgLossPct longTrades shortTrades
+                                 openCount openNotional }
+                          buckets { bucketTs trades wins losses winRate
+                                 netPnlAbs netPnlPct grossProfitAbs grossLossAbs notional
+                                 avgWinPct avgLossPct longTrades shortTrades
+                                 openCount openNotional } }
                 }
             }
         "#;
@@ -488,6 +569,8 @@ impl OpsenseClient {
             to_ts: Option<i64>,
             limit: Option<i64>,
             order: Option<&'a str>,
+            interval: Option<&'a str>,
+            mark_price: Option<f64>,
         }
         let now = opsense_components::signal::now_secs();
         self.gql(
@@ -500,6 +583,8 @@ impl OpsenseClient {
                 to_ts: to_ts.map(|t| t.resolve(now)).transpose()?,
                 limit,
                 order,
+                interval,
+                mark_price,
             },
         )
         .await
@@ -1168,6 +1253,8 @@ mod tests {
                     Some(TimeArg::Unix(now)),
                     Some(5),
                     Some("asc"),
+                    None, // interval
+                    None, // mark_price
                 )
                 .await
                 .expect("orders");

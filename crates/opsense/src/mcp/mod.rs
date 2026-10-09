@@ -8,7 +8,7 @@
 //!   - opsense_set_attribute     → Mutation.setAttribute
 //!   - opsense_remove_attribute  → Mutation.removeAttribute
 //!   - opsense_query_timeseries  → Query.queryTimeseries
-//!   - opsense_orders            → Query.orders (lệnh + cursor T+N)
+//!   - opsense_orders            → Query.orders (lệnh + cursor T+N, **optional PnL aggregation**)
 //!   - opsense_set_param         → Mutation.patchComponent (sửa 1 param — mặc định)
 //   - opsense_reload            → Mutation.reload (thay TOÀN BỘ danh sách node)
 //!   - opsense_clear_station     → Mutation.clearStation (xoá 1 station)

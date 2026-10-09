@@ -12,6 +12,7 @@
 //! là cách sửa một phần (thêm ở G2).
 use opsense_model::events::Signal;
 
+use crate::api::repl::pnl::{aggregate, dedup_orders, parse_bucket_secs, PnlBucket as InternalPnlBucket, PnlSummary as InternalPnlSummary};
 use std::sync::Arc;
 
 use async_graphql::{Context, EmptySubscription, InputObject, Object, Schema, SimpleObject};
@@ -140,6 +141,126 @@ pub struct QueryResult {
     /// đồng** để agent không phải đoán: cùng một payload trả về theo hai chiều
     /// khác nhau thì cột `ts` tăng hay giảm chính là thứ phải nói ra.
     pub order: String,
+}
+
+/// PnL bucket — một khung thời gian trong aggregation.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct PnlBucket {
+    pub bucket_ts: i64,
+    pub trades: i64,
+    pub wins: i64,
+    pub losses: i64,
+    pub win_rate: f64,
+    pub net_pnl_abs: f64,
+    pub net_pnl_pct: f64,
+    pub gross_profit_abs: f64,
+    pub gross_loss_abs: f64,
+    pub notional: f64,
+    pub avg_win_pct: f64,
+    pub avg_loss_pct: f64,
+    pub long_trades: i64,
+    pub short_trades: i64,
+    pub open_count: i64,
+    pub open_notional: f64,
+}
+
+/// Tổng PnL của toàn bộ cửa sổ + các bucket con.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct PnlSummary {
+    pub interval: String,
+    pub bucket_secs: i64,
+    pub from_ts: i64,
+    pub to_ts: i64,
+    pub complete: bool,
+    pub trades: i64,
+    pub zero_size_rows: i64,
+    pub net_pnl_abs: f64,
+    pub net_pnl_pct: f64,
+    pub gross_profit_abs: f64,
+    pub gross_loss_abs: f64,
+    pub notional: f64,
+    pub wins: i64,
+    pub losses: i64,
+    pub win_rate: f64,
+    pub avg_win_pct: f64,
+    pub avg_loss_pct: f64,
+    pub long_trades: i64,
+    pub short_trades: i64,
+    pub open_count: i64,
+    pub open_notional: f64,
+    pub unrealized_abs: f64,
+    pub mark_price: Option<f64>,
+    pub total: PnlBucket,
+    pub buckets: Vec<PnlBucket>,
+}
+
+/// Kết quả `orders` — giữ nguyên `observations` để backward-compatible,
+/// thêm `pnl` khi có `interval`.
+#[derive(SimpleObject, Clone, Debug)]
+pub struct OrdersResult {
+    pub observations: Vec<Observation>,
+    pub truncated: bool,
+    pub scanned: usize,
+    pub order: String,
+    /// Chỉ có giá trị khi caller truyền `interval`; null khi không có.
+    pub pnl: Option<PnlSummary>,
+}
+
+/// Convert internal `pnl::PnlBucket` to GraphQL `PnlBucket`.
+impl From<InternalPnlBucket> for PnlBucket {
+    fn from(b: InternalPnlBucket) -> Self {
+        Self {
+            bucket_ts: b.bucket_ts,
+            trades: b.trades as i64,
+            wins: b.wins as i64,
+            losses: b.losses as i64,
+            win_rate: b.win_rate,
+            net_pnl_abs: b.net_pnl_abs,
+            net_pnl_pct: b.net_pnl_pct,
+            gross_profit_abs: b.gross_profit_abs,
+            gross_loss_abs: b.gross_loss_abs,
+            notional: b.notional,
+            avg_win_pct: b.avg_win_pct,
+            avg_loss_pct: b.avg_loss_pct,
+            long_trades: b.long_trades as i64,
+            short_trades: b.short_trades as i64,
+            open_count: b.open_count as i64,
+            open_notional: b.open_notional,
+        }
+    }
+}
+
+/// Convert internal `pnl::PnlSummary` to GraphQL `PnlSummary`.
+impl From<InternalPnlSummary> for PnlSummary {
+    fn from(s: InternalPnlSummary) -> Self {
+        Self {
+            interval: s.interval,
+            bucket_secs: s.bucket_secs,
+            from_ts: s.from_ts,
+            to_ts: s.to_ts,
+            complete: s.complete,
+            trades: s.trades as i64,
+            zero_size_rows: s.zero_size_rows as i64,
+            net_pnl_abs: s.net_pnl_abs,
+            net_pnl_pct: s.net_pnl_pct,
+            gross_profit_abs: s.gross_profit_abs,
+            gross_loss_abs: s.gross_loss_abs,
+            notional: s.notional,
+            wins: s.wins as i64,
+            losses: s.losses as i64,
+            win_rate: s.win_rate,
+            avg_win_pct: s.avg_win_pct,
+            avg_loss_pct: s.avg_loss_pct,
+            long_trades: s.long_trades as i64,
+            short_trades: s.short_trades as i64,
+            open_count: s.open_count as i64,
+            open_notional: s.open_notional,
+            unrealized_abs: s.unrealized_abs,
+            mark_price: s.mark_price,
+            total: s.total.into(),
+            buckets: s.buckets.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 #[derive(SimpleObject, Clone, Debug)]
@@ -443,6 +564,9 @@ impl QueryRoot {
     /// `status` lọc **sau** khi đã gộp theo `order_id` (xem bước 2 bên dưới):
     /// station append-only nên bản `open` vẫn còn sau khi lệnh đóng. Lọc ở
     /// server *trước* sẽ trả lệnh đã đóng là đang mở.
+    ///
+    /// Khi có `interval`: trả thêm `pnl` aggregation. `limit` chỉ cắt `observations`,
+    /// `pnl` luôn tính trên toàn bộ cửa sổ sau khi dedup.
     async fn orders(
         &self,
         ctx: &Context<'_>,
@@ -452,7 +576,9 @@ impl QueryRoot {
         to_ts: Option<i64>,
         limit: Option<i64>,
         order: Option<String>,
-    ) -> async_graphql::Result<QueryResult> {
+        interval: Option<String>,    // NEW: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0"
+        mark_price: Option<f64>,     // NEW: giá để tính unrealized PnL
+    ) -> async_graphql::Result<OrdersResult> {
         let s = state(ctx);
         let now = opsense_components::signal::now_secs();
         let to = to_ts.unwrap_or(now);
@@ -467,6 +593,10 @@ impl QueryRoot {
             .map_err(|e| {
                 async_graphql::Error::new(format!("station '{node}' is not a timeseries: {e}"))
             })?;
+
+        // Kiểm tra xem cửa sổ có bị cắt block không (để báo complete = false)
+        let complete = station.read().await.window_fits_block_cap(from, to);
+
         let rows = {
             let station = station.read().await;
             match station.query_recent(from, to).await {
@@ -479,7 +609,7 @@ impl QueryRoot {
         };
 
         // 1. Giữ cursor T+N và lệnh, bỏ quan sát không liên quan.
-        let mut kept: Vec<&Observation> = rows
+        let kept: Vec<&Observation> = rows
             .iter()
             .filter(|o| {
                 let kind = o.labels.get("kind").map(String::as_str);
@@ -487,50 +617,65 @@ impl QueryRoot {
             })
             .collect();
 
-        // 2. Gộp lệnh theo `order_id`, lấy bản ghi **mới nhất** (`>=` để bản
-        //    sau cùng thắng khi trùng `ts`). Cursor T+N không có `order_id`.
-        let mut latest: std::collections::HashMap<&str, (i64, usize)> = Default::default();
-        for (i, o) in kept.iter().enumerate() {
-            let Some(id) = o.labels.get("order_id").map(String::as_str) else {
-                continue;
-            };
-            let ts = o.ts;
-            match latest.get(id) {
-                Some(&(prev_ts, _)) if prev_ts > ts => {}
-                _ => {
-                    latest.insert(id, (ts, i));
-                }
-            }
-        }
-        let keep: std::collections::HashSet<usize> = latest.values().map(|(_, i)| *i).collect();
-        let mut i = 0;
-        kept.retain(|o| {
-            // Cursor (không có order_id) luôn giữ; lệnh thì chỉ giữ bản mới nhất.
-            let is_cursor = o.labels.get("order_id").is_none();
-            let k = is_cursor || keep.contains(&i);
-            i += 1;
-            k
-        });
+        // 2. Dedup theo `order_id` (dùng hàm chung với aggregation).
+        let deduped = dedup_orders(&kept);
 
-        // 3. Lọc `status` **sau** khi đã gộp — lúc này mới đúng nghĩa.
-        if let Some(want) = &status {
-            kept.retain(|o| {
-                if o.labels.get("kind").map(String::as_str) == Some("trading_step") {
-                    return true; // cursor không có `status`
-                }
-                o.labels.get("status").map(String::as_str) == Some(want.as_str())
-            });
-        }
+        // 3. Lọc `status` **sau** khi đã gộp.
+        let filtered: Vec<Observation> = if let Some(want) = &status {
+            deduped
+                .into_iter()
+                .cloned()
+                .filter(|o| {
+                    if o.labels.get("kind").map(String::as_str) == Some("trading_step") {
+                        return true;
+                    }
+                    o.labels.get("status").map(String::as_str) == Some(want.as_str())
+                })
+                .collect()
+        } else {
+            deduped.into_iter().cloned().collect()
+        };
 
-        // Cắt **sau** khi gộp + lọc: cắt sớm hơn sẽ mất bản `closed` của một
-        // lệnh vẫn còn bản `open` cũ trong cửa sổ ⇒ `status: "closed"` rỗng.
-        let kept: Vec<Observation> = kept.into_iter().cloned().collect();
-        let (observations, truncated) = order_and_limit(&kept, limit, order == Order::Desc);
-        Ok(QueryResult {
+        // 4. PnL aggregation nếu có interval.
+        let pnl = if let Some(interval_str) = interval {
+            let bucket_secs = parse_bucket_secs(&interval_str).map_err(|e| {
+                async_graphql::Error::new(e)
+            })?;
+
+            // Đọc fee_rate từ config của node (để không hardcode)
+            let fee_roundtrip = s
+                .components(Some(&node))
+                .await
+                .into_iter()
+                .find_map(|c| c.get("config").and_then(|cfg| cfg.get("params")).and_then(|p| p.get("fee_rate")).and_then(|v| v.as_f64()))
+                .map(|f| f * 2.0)
+                .unwrap_or(0.0004);
+
+            let pnl_summary = aggregate(
+                &filtered.iter().collect::<Vec<_>>(),
+                bucket_secs,
+                mark_price,
+                fee_roundtrip,
+            );
+
+            // Set complete flag từ station check
+            let mut pnl_with_complete = pnl_summary;
+            pnl_with_complete.complete = complete;
+
+            Some(pnl_with_complete.into())
+        } else {
+            None
+        };
+
+        // 5. Cắt `observations` theo limit/order (backward-compatible).
+        let (observations, truncated) = order_and_limit(&filtered, limit, order == Order::Desc);
+
+        Ok(OrdersResult {
             order: order_name(order).to_string(),
             truncated,
             scanned: rows.len(),
             observations,
+            pnl,
         })
     }
 }

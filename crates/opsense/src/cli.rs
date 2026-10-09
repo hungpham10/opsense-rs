@@ -156,6 +156,8 @@ pub async fn orders(
     to: Option<String>,
     limit: Option<i64>,
     order: Option<String>,
+    interval: Option<String>,    // NEW
+    mark_price: Option<f64>,     // NEW
 ) -> Result<()> {
     let now = opsense_components::signal::now_secs();
     let out = client(endpoint)?
@@ -166,6 +168,8 @@ pub async fn orders(
             time_arg(to.as_deref(), now)?,
             limit,
             order.as_deref(),
+            interval.as_deref(),
+            mark_price,
         )
         .await
         .context("Query.orders")?;

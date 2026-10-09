@@ -85,6 +85,15 @@ pub struct OrdersParams {
     pub limit: Option<i64>,
     #[schemars(description = "Row order: asc|desc, default desc (newest first)")]
     pub order: Option<String>,
+    /// Aggregation interval: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0".
+    /// Khi có giá trị này, server trả thêm `pnl` aggregation.
+    /// `limit` chỉ cắt `observations`, `pnl` luôn tính trên toàn bộ cửa sổ.
+    #[schemars(description = "Aggregation interval: 1m,5m,15m,30m,1h,4h,1d,1w,1M,0 (0 = total)")]
+    pub interval: Option<String>,
+    /// Mark price để tính unrealized PnL của lệnh đang mở.
+    /// Bỏ trống = không tính unrealized.
+    #[schemars(description = "Mark price for unrealized PnL of open orders")]
+    pub mark_price: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -218,7 +227,8 @@ impl OpsenseMcpServer {
     /// `signal = "order"` (`labels.status = open|closed`) và cursor T+N
     /// (`labels.kind = "trading_step"`).
     #[tool(
-        description = "Trading state in a station: orders (labels.status open/closed) plus the T+N cursor (labels.kind trading_step). Calls Query.orders directly — one round-trip, with order_id de-duplication and the status filter applied server-side AFTER it (a closed order's old `open` row is still in the station, so filtering before merging reports closed orders as open). Supports limit/order and unix-seconds or relative from_ts/to_ts (\"2h\", \"now-1d\")."
+        description = "Trading state in a station: orders (labels.status open/closed) plus the T+N cursor (labels.kind trading_step). Calls Query.orders directly — one round-trip, with order_id de-duplication and the status filter applied server-side AFTER it (a closed order's old `open` row is still in the station, so filtering before merging reports closed orders as open). Supports limit/order and unix-seconds or relative from_ts/to_ts (\"2h\", \"now-1d\").
+When `interval` is provided, server returns additional `pnl` aggregation (trades, PnL, win rate, etc. per bucket). `limit` only affects `observations`; `pnl` is computed on the full deduped window. Optional `mark_price` enables unrealized PnL for open orders. One call replaces 3 calls (closed + open + price)."
     )]
     async fn opsense_orders(
         &self,
@@ -232,6 +242,8 @@ impl OpsenseMcpServer {
             p.to_ts,
             p.limit,
             p.order.as_deref(),
+            p.interval.as_deref(),
+            p.mark_price,
         )
         .await
     }

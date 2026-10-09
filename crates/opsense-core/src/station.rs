@@ -674,6 +674,21 @@ impl TimeseriesStation {
         Some(result)
     }
 
+    /// Kiểm tra xem cửa sổ `[from_ts, to_ts]` có nằm trong trần block của
+    /// [`query_recent`] hay không.
+    ///
+    /// `query_recent` cắt cửa sổ về `MAX_BLOCKS_PER_QUERY` block gần nhất khi
+    /// vượt trần (chỉ `warn!` log, không báo lỗi) — do đó aggregation chạy trên
+    /// cửa sổ bị cắt sẽ **âm thầm** thiếu dữ liệu cũ. Method này để caller
+    /// (ví dụ PnL aggregation) tự quyết định: bỏ qua, chia nhỏ cửa sổ, hoặc
+    /// báo cho client biết qua field `complete = false`.
+    #[must_use]
+    pub fn window_fits_block_cap(&self, from_ts: i64, to_ts: i64) -> bool {
+        let end_block = self.get_block_id(to_ts);
+        let start_block = self.get_block_id(from_ts);
+        end_block - start_block + 1 <= MAX_BLOCKS_PER_QUERY
+    }
+
     pub fn update_range(
         &self,
         records: &[Observation],
@@ -1495,5 +1510,34 @@ mod tests {
 
         // Phần tương lai chưa ghi: block mới nhất không tồn tại → kết quả rỗng.
         assert!(st.query_recent(400, 2000).await.unwrap().is_empty());
+    }
+
+    /// [`window_fits_block_cap`] báo `false` khi cửa sổ vượt trần block cap.
+    ///
+    /// Aggregation (PnL, v.v.) dùng cái này để biết kết quả có **đủ lịch sử**
+    /// hay đã bị `query_recent` cắt bớt block cũ (chỉ `warn!` log). `true` =
+    /// cửa sổ trọn vẹn; `false` = thiếu phần cũ.
+    #[test]
+    fn window_fits_block_cap_rejects_spans_beyond_cap() {
+        // block 5s: 20k block ≈ 27h. Cửa sổ 30 ngày = 518.400 block → vượt trần.
+        let st = TimeseriesStation::new(32, Some(5));
+
+        let to = 1_000_000;
+        let from = to - 30 * 24 * 3600;
+        assert!(!st.window_fits_block_cap(from, to), "30 ngày ở block 5s phải vượt trần");
+
+        // 1 tuần = 120.960 block → vẫn vượt trần (cap = 20.000).
+        assert!(!st.window_fits_block_cap(to - 7 * 24 * 3600, to), "1 tuần ở block 5s vẫn vượt trần");
+
+        // 1 ngày = 17.280 block → **không** vượt trần (cap = 20.000).
+        assert!(st.window_fits_block_cap(to - 24 * 3600, to), "1 ngày ở block 5s phải trong trần");
+
+        // block 3600s: 20k block ≈ 2.3 năm. 30 ngày chỉ 720 block.
+        let st_1h = TimeseriesStation::new(32, Some(3_600));
+        assert!(st_1h.window_fits_block_cap(from, to), "30 ngày ở block 1h phải trong trần");
+
+        // Cửa sổ rỗng/vừa đủ 1 block.
+        assert!(st.window_fits_block_cap(to, to), "cửa sổ 0s phải trong trần");
+        assert!(st.window_fits_block_cap(to - 4, to), "cửa sổ 1 block (5s) phải trong trần");
     }
 }

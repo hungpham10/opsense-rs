@@ -145,6 +145,13 @@ enum Commands {
         /// Thứ tự dòng: `asc` | `desc` (mặc định `desc`).
         #[arg(long)]
         order: Option<String>,
+        /// Aggregation interval: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0".
+        /// Khi có giá trị này, output bao gồm `pnl` aggregation.
+        #[arg(long)]
+        interval: Option<String>,
+        /// Mark price để tính unrealized PnL của lệnh đang mở.
+        #[arg(long)]
+        mark_price: Option<f64>,
         #[arg(long)]
         endpoint: Option<String>,
     },
@@ -337,9 +344,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     to,
                     limit,
                     order,
+                    interval,
+                    mark_price,
                     endpoint,
                 }) => {
-                    if let Err(e) = opsense::cli::orders(endpoint, &node, status, from, to, limit, order).await {
+                    if let Err(e) = opsense::cli::orders(endpoint, &node, status, from, to, limit, order, interval, mark_price).await {
                         eprintln!("orders error: {e}");
                         std::process::exit(1);
                     }
