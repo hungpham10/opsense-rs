@@ -488,13 +488,28 @@ fn perf_metrics(state, symbol, closed_price) {
     let win_rate = if total > 0 { outcomes.wins.to_float() / total.to_float() } else { 0.0 };
     let open_notional = 0.0;
     let open_count = 0;
+    let long_notional = 0.0;
+    let short_notional = 0.0;
+    let long_count = 0;
+    let short_count = 0;
     let pnl_last = 0.0;
     for o in state {
         if o["signal"] == "order" {
             if o["labels"]["status"] == "open" {
                 open_count += 1;
                 let sz = o["labels"]["size"];
-                if type_of(sz) != "()" { open_notional += sz.to_float(); }
+                if type_of(sz) != "()" {
+                    let sz_f = sz.to_float();
+                    open_notional += sz_f;
+                    let dt = o["labels"]["dtype"];
+                    if type_of(dt) != "()" && dt == "long" {
+                        long_notional += sz_f;
+                        long_count += 1;
+                    } else if type_of(dt) != "()" && dt == "short" {
+                        short_notional += sz_f;
+                        short_count += 1;
+                    }
+                }
             } else if o["labels"]["status"] == "closed" && type_of(o["labels"]["pnl_pct"]) != "()" {
                 pnl_last = o["labels"]["pnl_pct"].to_float(); // lệnh gần nhất (state đã sort)
             }
@@ -509,6 +524,14 @@ fn perf_metrics(state, symbol, closed_price) {
                value: open_count.to_float(), labels: #{ kind: "perf" } }];
     out += [#{ ts: now, metric_id: "grid_open_notional", kind: "metric", signal: "summary",
                value: open_notional, labels: #{ kind: "perf" } }];
+    out += [#{ ts: now, metric_id: "grid_long_notional", kind: "metric", signal: "summary",
+               value: long_notional, labels: #{ kind: "perf" } }];
+    out += [#{ ts: now, metric_id: "grid_short_notional", kind: "metric", signal: "summary",
+               value: short_notional, labels: #{ kind: "perf" } }];
+    out += [#{ ts: now, metric_id: "grid_long_count", kind: "metric", signal: "summary",
+               value: long_count.to_float(), labels: #{ kind: "perf" } }];
+    out += [#{ ts: now, metric_id: "grid_short_count", kind: "metric", signal: "summary",
+               value: short_count.to_float(), labels: #{ kind: "perf" } }];
     out += [#{ ts: now, metric_id: "grid_pnl_pct_last", kind: "metric", signal: "summary",
                value: pnl_last, labels: #{ kind: "perf" } }];
     out += [#{ ts: now, metric_id: "grid_price_last", kind: "metric", signal: "summary",
