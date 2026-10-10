@@ -13,6 +13,14 @@ name: opsense
 #
 # The Opsense images are built locally with `earthly +integration-images`,
 # then `docker compose up`. See Makefile shortcuts.
+#
+# Chọn config pipeline (trước đây là docker-compose.grid.yml / .ladder.yml,
+# nay gộp vào đây qua env):
+#   Grid  : OPSENSE_CONFIG_TOML=./conf/grid.local.toml docker compose up -d opsense-serve
+#   Ladder: OPSENSE_CONFIG_TOML=./conf/ladder/E.toml GRID_RHAI_SCRIPT=./conf/ladder/S0.rhai \
+#             docker compose up -d opsense-serve
+# Mặc định (không set env) dùng config tối giản `conf/opsense.conf.toml`
+# (clock → print) — đúng hành vi an toàn như trước.
 
 services:
   postgres:
@@ -119,7 +127,8 @@ services:
       - "8080:8080"
     volumes:
       - ./env/secrets.dev.enc.yaml:/app/secrets/secrets.dev.enc.yaml:ro
-      - ./conf/opsense.conf.toml:/app/opsense.conf.toml:ro
+      # Config chạy pipeline: override qua OPSENSE_CONFIG_TOML (xem header).
+      - ${OPSENSE_CONFIG_TOML:-./conf/opsense.conf.toml}:/app/opsense.conf.toml:ro
       # Mount the whole sql tree so release.sh can run schema (depth=1) then
       # the env-specific seed (depth=2) at boot.
       - ./sql:/app/sql:ro
@@ -131,6 +140,9 @@ services:
       # directory` on every batch and the station stays empty.
       # Read-only: the runtime only ever reads these files.
       - ./strategies:/app/strategies:ro
+      # Override script rhai khi thử biến thể ladder (xem header). Mặc định
+      # mount file lên chính nó — no-op.
+      - ${GRID_RHAI_SCRIPT:-./strategies/binance/grid.rhai}:/app/strategies/binance/grid.rhai:ro
       # Dex OIDC config (mounted into image for consistency with compose service).
       - ./conf/dex/config.dev.yaml:/etc/dex/config.dev.yaml:ro
     environment:

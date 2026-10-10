@@ -264,6 +264,23 @@ struct Settings {
     grid_max_bit: usize,
     /// Biên độ win-prob lệch theo bậc (None = không lệch).
     grid_level_edge_amp: Option<f64>,
+    /// SL tính bằng **số bước lưới** (k), không phải % giá.
+    /// `k = 1.0` ⇒ SL đúng 1 bước, RR = tp_levels / sl_levels = hằng số.
+    sl_levels: f64,
+    /// TP tính bằng **số bước lưới** (m). Cùng `min_rr` ở config:
+    /// kernel chọn TP bậc đầu đủ `reward/risk >= min_rr`.
+    tp_levels: f64,
+    /// Mật độ đặt lệnh nghịch đảo occupancy: `occ_beta > 0` ⇒ nhân trọng số
+    /// ô bằng `occupancy^-beta`. `0` = tắt, dùng lại `weight_sharpness`.
+    edge_density_beta: i64,
+    /// Phân bổ vốn theo xu hướng: `alloc_long = 0.5 ± trend_bias_max`.
+    /// `0` = tắt (mặc định an toàn, hành vi y như cũ).
+    trend_bias_max: f64,
+    /// Cổng ER (Kaufman Efficiency Ratio) để bật bias.
+    /// ER thực tế BTC 1m ~0.05–0.30; dưới ngưỡng này về 50/50.
+    trend_er_gate: f64,
+    /// Sàn bước lưới cho sieve (tỉ lệ giá). None = tự tính `2×fee×levels×1.2`.
+    grid_min_step_frac: Option<f64>,
     /// Script của node đang chạy (`strategy = "rhai"`). Không đọc từ `cfg`:
     /// `portfolio_feed` nằm trong lời gọi script nên lấy từ
     /// [`crate::runtime::current_script`] — không bắt user khai đường dẫn thêm ở
@@ -291,6 +308,12 @@ impl Default for Settings {
             grid_weight_sharpness: 4.0,
             grid_max_bit: 20,
             grid_level_edge_amp: Some(0.10),
+            sl_levels: 1.0,
+            tp_levels: 2.0,
+            edge_density_beta: 1,
+            trend_bias_max: 0.0,
+            trend_er_gate: 0.15,
+            grid_min_step_frac: None,
             script: None,
         }
     }
@@ -353,6 +376,24 @@ impl Settings {
         }
         if let Some(v) = int("settlement_candles") {
             s.settlement_candles = v.max(0) as u64;
+        }
+        if let Some(v) = num("sl_levels") {
+            s.sl_levels = v;
+        }
+        if let Some(v) = num("tp_levels") {
+            s.tp_levels = v;
+        }
+        if let Some(v) = int("edge_density_beta") {
+            s.edge_density_beta = v.max(0) as i64;
+        }
+        if let Some(v) = num("trend_bias_max") {
+            s.trend_bias_max = v;
+        }
+        if let Some(v) = num("trend_er_gate") {
+            s.trend_er_gate = v;
+        }
+        if let Some(v) = num("grid_min_step_frac") {
+            s.grid_min_step_frac = Some(v);
         }
         if let Some(dag) = cfg.get("dag") {
             s.dag = rhai::serde::from_dynamic(dag).ok();
@@ -422,7 +463,17 @@ impl Settings {
                     // `fn rebuild` của script vẫn đọc được `param_min_rr` và
                     // round-trip nó vào `trading_cfg()` cho lần `portfolio_feed`
                     // kế tiếp.
-                    .with_knob("min_rr", self.min_rr.into());
+                    .with_knob("min_rr", self.min_rr.into())
+                    // Hình học rủi ro theo bước lưới (RR = tp_levels / sl_levels = hằng số).
+                    .with_knob("sl_levels", self.sl_levels.into())
+                    .with_knob("tp_levels", self.tp_levels.into())
+                    // Mật độ đặt lệnh nghịch đảo occupancy.
+                    .with_knob("edge_density_beta", self.edge_density_beta.into())
+                    // Phân bổ vốn theo xu hướng (tắt = 0.0 mặc định an toàn).
+                    .with_knob("trend_bias_max", self.trend_bias_max.into())
+                    .with_knob("trend_er_gate", self.trend_er_gate.into())
+                    // Sàn bước lưới cho sieve.
+                    .with_knob("grid_min_step_frac", self.grid_min_step_frac.unwrap_or(0.0).into());
                 if let Some(amp) = self.grid_level_edge_amp {
                     s = s.with_knob("level_edge_amp", amp.into());
                 }

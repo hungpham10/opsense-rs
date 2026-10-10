@@ -58,6 +58,6 @@ build/
 # Playground
 playground/
 
-# Local runtime configs (xem docker-compose.grid.yml)
+# Local runtime configs (xem biến OPSENSE_CONFIG_TOML trong docker-compose.yml)
 conf/*.local.toml
 conf/*.notick.local.toml

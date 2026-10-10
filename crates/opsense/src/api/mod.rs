@@ -8,16 +8,19 @@
 
 pub mod admin;
 pub mod oauth;
+pub mod prometheus;
 pub mod repl;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_graphql::SimpleObject;
 use aws_sdk_s3::Client as S3Client;
 use axum::Json;
 use axum::extract::State;
+use axum::response::IntoResponse;
 use headers::Header;
 use http::{HeaderName, HeaderValue};
 use tokio::sync::RwLock;
@@ -27,6 +30,7 @@ use opsense_mlib::vector::components::{clock, null};
 use opsense_mlib::vector::runtime::{Component, Event, Fault, Runtime, Severity};
 use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
+
 
 use crate::api::oauth::OAuthMetrics;
 
@@ -83,6 +87,10 @@ pub struct AppState {
     runtime: Arc<RwLock<Runtime>>,
     admin_entity: Arc<opsense_model::entities::admin::Admin>,
     oauth_metrics: Arc<OAuthMetrics>,
+    prometheus: axum_prometheus::Handle,
+    pub prometheus_config: opsense_core::config::PrometheusConfig,
+    // Set của key series đã thấy ở scrape trước — dùng để detect staleness
+    stale_keys: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl AppState {
@@ -101,6 +109,10 @@ impl AppState {
 
         let admin_entity = Arc::new(opsense_model::entities::admin::Admin::new(&connector));
         let oauth_metrics = Arc::new(OAuthMetrics::new());
+
+        // Prometheus handle: pair() cài global recorder và trả về handle để render.
+        // Chỉ được gọi **một lần** ở đây — gọi lần 2 sẽ panic.
+        let (_, prometheus_handle) = axum_prometheus::PrometheusMetricLayer::pair();
 
         // Clone **trước** khi  bị shadow bởi write guard bên dưới —
         // handler cần `Arc`, không phải guard.
@@ -182,6 +194,9 @@ impl AppState {
             oauth_metrics,
             secret,
             connector,
+            prometheus: axum_prometheus::Handle(prometheus_handle),
+            prometheus_config: config.prometheus.clone(),
+            stale_keys: Arc::new(Mutex::new(BTreeSet::new())),
         })
     }
 
@@ -354,6 +369,80 @@ pub fn node_descriptions(cfg: &Config) -> BTreeMap<String, String> {
 
 pub async fn health_check(State(_): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// Handler cho `/metrics` endpoint — render Prometheus text format.
+/// Chỉ được gọi khi `app_state.prometheus_config.enabled == true`.
+pub async fn prometheus_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if !state.prometheus_config.enabled {
+        return (
+            [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+            "".to_string(),
+        );
+    }
+
+    let mut series = Vec::new();
+
+    // Tầng 1: Node health metrics
+    let topology = state.runtime.read().await.topology();
+    let now = opsense_components::signal::now_secs();
+    series.extend(crate::api::prometheus::collect_nodes(&topology, now));
+
+    // Tầng 2: Station metrics (opt-in qua config)
+    let prom_cfg = &state.prometheus_config;
+    for st in &prom_cfg.stations {
+        if !st.enabled {
+            continue;
+        }
+        // Window per station (nếu khai báo) — fallback global.
+        let window_secs = st.window_secs.unwrap_or(prom_cfg.default_window_secs).max(1);
+        if let Ok(station) = state
+            .context
+            .station::<Arc<RwLock<opsense_core::TimeseriesStation>>>(&st.station)
+            .await
+        {
+            let obs = {
+                let station = station.read().await;
+                station
+                    .query_recent(now - window_secs as i64, now)
+                    .await
+                    .unwrap_or_default()
+            };
+            series.extend(crate::api::prometheus::collect_station(&obs, st, now as i64));
+        }
+    }
+
+    // Tầng 4: OAuth metrics
+    series.extend(crate::api::prometheus::collect_oauth(&state.oauth_metrics.snapshot()));
+
+    // Render HTTP metrics từ axum-prometheus layer
+    let mut output = state.prometheus.0.render();
+
+    // Render custom series
+    let (series, dropped) = crate::api::prometheus::cap_series(
+        series,
+        state.prometheus_config.max_series as usize,
+    );
+    let custom = crate::api::prometheus::render_prometheus(&series, dropped);
+    output.push_str(&custom);
+
+    // Staleness: so sánh key cũ/mới, set NaN cho key biến mất
+    let mut stale = state.stale_keys.lock().unwrap();
+    let current_keys: BTreeSet<String> = series.iter().map(crate::api::prometheus::series_key).collect();
+    for old in stale.iter() {
+        if !current_keys.contains(old) {
+            output.push_str(&format!(
+                "# TYPE opsense_prometheus_stale gauge\nopsense_prometheus_stale{{key=\"{}\"}} NaN\n",
+                old.replace('"', "\\\"")
+            ));
+        }
+    }
+    *stale = current_keys;
+
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        output,
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

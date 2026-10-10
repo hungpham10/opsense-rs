@@ -60,38 +60,12 @@ poll_interval_seconds = 10
 # là giới hạn cứng của engine, không chỉnh được bằng config (xem comment trên).
 
 [storage]
-# "redis" = state nằm trên server Redis/Valkey, **không** đụng `data_dir` và
-# không đụng `[storage.s3]`. Đổi từ "memory" sang backend này là đổi bản chất:
-# restart process không còn xoá lệnh đang mở.
-#
-# Cần binary build có feature `opsense-core/redis` — image release đã bật
-# (xem `.github/workflows/image.yml`), bản `cargo run` mặc định thì không có và
-# sẽ báo `storage backend 'redis' ... requires opsense-core feature 'redis'`.
+# Using memory backend for simplicity
 backend = "redis"
-#
-# **Không có retention cho backend này.** `storage.retention_secs` gọi
-# `TimeseriesStorage::retain_older_than`, mà `RedisStorage` chưa hiện thực nên
-# lịch trim chạy và làm rỗng — key cũ nằm lại mãi. Dọn bằng tay khi cần:
-#   docker exec opsense-valkey valkey-cli --scan --pattern 'opsense:grid-*' \
-#     | xargs -r docker exec -i opsense-valkey valkey-cli del
-#
-# `s3_flush_interval_secs` / `s3_snapshot_interval_secs` cũng vô nghĩa ở đây:
-# chúng gọi `flush()` / `checkpoint()`, mà Redis ghi thẳng từng entry nên hai
-# hàm đó là no-op.
 
    [storage.redis]
-   # DSN. Khai ở đây thắng env; bỏ trống thì đọc `OPSENSE_REDIS_URL` rồi
-   # `REDIS_URL`. **Không có giá trị mặc định** — không có env thì `validate()`
-   # chặn ngay lúc khởi động, vì đoán sai host là mất state chứ không chỉ chậm.
-   #
-   # `opsense-valkey` là container trong `docker-compose.yml` (cùng host mà
-   # `REDIS_HOST` đặt cho model cache). Chạy ngoài compose thì sửa thành host
-   # thật, VD `redis://127.0.0.1:6379`.
-   url = "redis://opsense-valkey:6379"
-   # Prefix key gốc. Station cuối cùng đặt ở `opsense:<station>-<kind>` —
-   # VD `opsense:grid-timeseries`, `opsense:grid-pattern`, `opsense:grid-category`.
-   # Nhờ vậy các station không đè key lẫn nhau, và xoá sạch thì
-   # `valkey-cli --scan --pattern 'opsense:*'`.
+   # Dummy Redis URL (not used since backend is memory)
+   url = "redis://localhost:6379"
    prefix = "opsense"
 
    # `history` để RAM: nó là gương của Binance /klines, mỗi 60s quét lại là có
@@ -337,3 +311,68 @@ station = true
    base_capital = 50000.0
    # T+N — 0 = theo thị trường (crypto T+0). Ví dụ 1 = chỉ đóng lệnh từ nến kế tiếp.
    settlement_candles = 0
+
+# ════════════════════════════════════════════════════════════════════════
+# RISK GOVERNOR — giảm nhiệt khi thua liên tiếp
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Ba cơ chế (reset ngay khi có 1 lệnh thắng):
+# 1. Kích thước: base_capital × risk_scale,  risk_scale ∈ [risk_size_floor, 1]
+# 2. Xác suất apply: apply_skip ≥ 1 (1 lệnh / apply_skip nến), pause cứng có timeout
+# 3. Nới SL (rebuild): sl_levels/tp_levels nhân gov.sl_widen ∈ [1, risk_sl_widen_max]
+#
+# Tín hiệu: quét state (signal=order, status=closed) trong cửa sổ risk_window.
+# Thiếu dữ liệu ⇒ streak=0 ⇒ hành vi y nguyên bản cũ.
+risk_enable = true
+risk_window = 10
+risk_size_step = 0.2
+risk_size_floor = 0.15
+risk_rate_ref = 0.5
+risk_rate_penalty = 0.5
+risk_soft_streak = 2
+risk_skip_cap = 5
+risk_hard_streak = 6
+risk_pause_secs = 900
+risk_model_win = 0.5
+risk_sl_widen_max = 1.5
+
+# ════════════════════════════════════════════════════════════════════════
+# KNOB CHO fn rebuild (đọc qua with_knob từ Rust, KHÔNG phải param_* global)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Hình học rủi ro theo BƯỚC LƯỚI (RR = tp_levels / sl_levels = hằng số).
+# sl_levels = 1.0 ⇒ SL đúng 1 bước; tp_levels = 2.0 ⇒ TP 2 bước (với min_rr=2.0).
+sl_levels = 1.0
+tp_levels = 2.0
+# Mật độ đặt lệnh nghịch đảo occupancy: occ_beta > 0 ⇒ nhân trọng số ô bằng occupancy^-beta.
+edge_density_beta = 1
+# Phân bổ vốn theo xu hướng: alloc_long = 0.5 ± trend_bias_max. 0 = tắt (mặc định an toàn).
+trend_bias_max = 0.0
+# Cổng ER (Kaufman Efficiency Ratio) để bật bias. ER thực tế BTC 1m ~0.05–0.30.
+trend_er_gate = 0.15
+# Sàn bước lưới cho sieve (tỉ lệ giá). Thiếu thì tự tính 2×fee×levels×1.2.
+# grid_min_step_frac = 0.00192
+
+# ════════════════════════════════════════════════════════════════════════
+# PROMETHEUS METRICS — expose /metrics endpoint cho Grafana Cloud
+# ═══════════════════════════════════════════════════════════════════════
+#
+# enabled = true ⇒ expose /metrics trên HTTP server (port 8080).
+# default_window_secs = 120 ⇒ chỉ export obs trong 2 phút gần nhất.
+# max_series = 5000 ⇒ trần cứng series (vượt ⇒ cắt deterministic + opsense_prometheus_dropped_series).
+# stations = chỉ khai station cần thiết (vd "grid") để giảm cardinality.
+# exclude_kinds = loại kind có nhiều label số (snapshot, trend_probe).
+#
+# ⚠ /metrics KHÔNG CÓ AUTH — chỉ bind nội bộ/firewall, đừng public ra internet.
+# Grafana Alloy/Prometheus scrape :8080/metrics → remote_write Grafana Cloud.
+#
+[prometheus]
+enabled = true
+path = "/metrics"
+default_window_secs = 120
+max_series = 5000
+
+[[prometheus.stations]]
+station = "grid"
+signals = ["summary"]
+exclude_kinds = ["snapshot", "trend_probe"]

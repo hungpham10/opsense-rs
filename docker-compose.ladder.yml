@@ -1,8 +1,0 @@
-# Override cho phép thử tầng + thử biến thể rhai script.
-#   LADDER_CONFIG=./conf/ladder/E.toml LADDER_SCRIPT=./conf/ladder/S0.rhai \
-#     docker-compose -f docker-compose.yml -f docker-compose.ladder.yml up -d opsense-serve
-services:
-  opsense-serve:
-    volumes:
-      - ${LADDER_CONFIG:-./conf/grid.local.toml}:/app/opsense.conf.toml:ro
-      - ${LADDER_SCRIPT:-./strategies/binance/grid.rhai}:/app/strategies/binance/grid.rhai:ro

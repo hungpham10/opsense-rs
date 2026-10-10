@@ -116,7 +116,77 @@ fn process(observations) {
     state += empty_if_missing(station_query(own, now - hw, now, "summary", "trading_step"));
     state += empty_if_missing(station_query(own, now - hw, now, "summary", "plan"));
 
-    let do_apply = mode == "trading" && !seen_step(marks, "apply_step", closed_ts);
+    // ── Risk Governor: tính streak/fail-rate từ state để giảm nhiệt khi thua liên tiếp ──
+    //
+    // Chỉ chạy khi mode = "trading". Governor đọc lệnh đóng từ `state` (signal=order, status=closed),
+    // tính streak thua liên tiếp + fail rate trong cửa sổ risk_window, rồi ra:
+    //   risk_scale ∈ [risk_size_floor, 1]  — nhân vào base_capital
+    //   apply_skip ≥ 1                       — thưa nhịp apply (1 lệnh / apply_skip nến)
+    //   paused = true                        — dừng đặt lệnh mới (có timeout auto-recover)
+    // Cả ba đều reset ngay khi có 1 lệnh thắng.
+    let risk_enable = true;
+    if is_def_var("param_risk_enable") && type_of(param_risk_enable) != "()" {
+        risk_enable = param_risk_enable;
+    }
+    let risk_window = 10;
+    if is_def_var("param_risk_window") && type_of(param_risk_window) != "()" {
+        risk_window = param_risk_window.to_int();
+    }
+    let risk_size_step = 0.2;
+    if is_def_var("param_risk_size_step") && type_of(param_risk_size_step) != "()" {
+        risk_size_step = param_risk_size_step.to_float();
+    }
+    let risk_size_floor = 0.15;
+    if is_def_var("param_risk_size_floor") && type_of(param_risk_size_floor) != "()" {
+        risk_size_floor = param_risk_size_floor.to_float();
+    }
+    let risk_rate_ref = 0.5;
+    if is_def_var("param_risk_rate_ref") && type_of(param_risk_rate_ref) != "()" {
+        risk_rate_ref = param_risk_rate_ref.to_float();
+    }
+    let risk_rate_penalty = 0.5;
+    if is_def_var("param_risk_rate_penalty") && type_of(param_risk_rate_penalty) != "()" {
+        risk_rate_penalty = param_risk_rate_penalty.to_float();
+    }
+    let risk_soft_streak = 2;
+    if is_def_var("param_risk_soft_streak") && type_of(param_risk_soft_streak) != "()" {
+        risk_soft_streak = param_risk_soft_streak.to_int();
+    }
+    let risk_skip_cap = 5;
+    if is_def_var("param_risk_skip_cap") && type_of(param_risk_skip_cap) != "()" {
+        risk_skip_cap = param_risk_skip_cap.to_int();
+    }
+    let risk_hard_streak = 6;
+    if is_def_var("param_risk_hard_streak") && type_of(param_risk_hard_streak) != "()" {
+        risk_hard_streak = param_risk_hard_streak.to_int();
+    }
+    let risk_pause_secs = 900;
+    if is_def_var("param_risk_pause_secs") && type_of(param_risk_pause_secs) != "()" {
+        risk_pause_secs = param_risk_pause_secs.to_int();
+    }
+    let risk_model_win = 0.5;
+    if is_def_var("param_risk_model_win") && type_of(param_risk_model_win) != "()" {
+        risk_model_win = param_risk_model_win.to_float();
+    }
+    let risk_sl_widen_max = 1.5;
+    if is_def_var("param_risk_sl_widen_max") && type_of(param_risk_sl_widen_max) != "()" {
+        risk_sl_widen_max = param_risk_sl_widen_max.to_float();
+    }
+
+    // Tính governor ngay sau khi đọc state, trước gate do_apply
+    let gov = #{};
+    if risk_enable && mode == "trading" {
+        gov = risk_governor(state, now, risk_window, risk_size_step, risk_size_floor,
+                           risk_rate_ref, risk_rate_penalty, risk_soft_streak, risk_skip_cap,
+                           risk_hard_streak, risk_pause_secs, risk_model_win, risk_sl_widen_max);
+    } else {
+        gov = #{ risk_scale: 1.0, apply_skip: 1, paused: false, streak: 0, fail_rate: 0.0,
+                 sl_widen: 1.0, last_fail_ts: 0 };
+    }
+
+    let do_apply = mode == "trading" && !seen_step(marks, "apply_step", closed_ts)
+        && !gov.paused
+        && (gov.apply_skip <= 1 || (closed_ts / step) % gov.apply_skip == 0);
 
     let review_secs = 3600;
     if is_def_var("param_review_interval_secs") && type_of(param_review_interval_secs) != "()" {
@@ -137,8 +207,21 @@ fn process(observations) {
     if type_of(series) == "()" { return []; }
 
     let out = [];
+
+    // Phát metrics risk/perf mỗi nhịp apply_due (kể cả paused/skip) để Grafana không thấy NaN.
+    // Chỉ khi mode=trading và có nến đóng mới.
+    let apply_due = mode == "trading" && !seen_step(marks, "apply_step", closed_ts);
+    if apply_due {
+        let closed_for_metrics = last_closed(series.candles, now, step);
+        let closed_price = if type_of(closed_for_metrics) != "()" { closed_for_metrics.c.to_float() } else { 0.0 };
+        out += risk_metrics(gov, symbol);
+        out += perf_metrics(state, symbol, closed_price);
+    }
+
     if do_review {
         out += snapshot(series, symbol);
+        out += trend_probe(series.candles, symbol);
+        out += trend_slope(series.candles, symbol);
         // Marker review: ghi kèm để lần sau biết đã review tới lúc nào, kể
         // cả khi `snapshot()` trả rỗng (thiếu dữ liệu) — nếu không thì thiếu
         // dữ liệu sẽ thử lại mỗi heartbeat.
@@ -201,6 +284,8 @@ fn process(observations) {
             if is_def_var("param_base_capital") && type_of(param_base_capital) != "()" {
                 cfg_capital = param_base_capital.to_float();
             }
+            // Áp dụng risk governor: giảm base_capital theo risk_scale
+            cfg_capital = cfg_capital * gov.risk_scale;
             let cfg_settlement = 0;
             if is_def_var("param_settlement_candles") && type_of(param_settlement_candles) != "()" {
                 cfg_settlement = param_settlement_candles.to_int();
@@ -208,6 +293,17 @@ fn process(observations) {
             let cfg_min_rr = 0.0;
             if is_def_var("param_min_rr") && type_of(param_min_rr) != "()" {
                 cfg_min_rr = param_min_rr.to_float();
+            }
+            // Phân bổ vốn theo xu hướng — `rebuild` đọc hai key này. Phải đặt
+            // vào `cfg` ở đây vì hàm con KHÔNG thấy global `param_*` (xem
+            // comment `trading_cfg` bị bỏ ở trên).
+            let cfg_trend_bias_max = 0.0;
+            if is_def_var("param_trend_bias_max") && type_of(param_trend_bias_max) != "()" {
+                cfg_trend_bias_max = param_trend_bias_max.to_float();
+            }
+            let cfg_trend_er_gate = 0.15;
+            if is_def_var("param_trend_er_gate") && type_of(param_trend_er_gate) != "()" {
+                cfg_trend_er_gate = param_trend_er_gate.to_float();
             }
 
             let cfg = #{
@@ -225,7 +321,13 @@ fn process(observations) {
                 kelly_fraction: cfg_kelly,
                 base_capital: cfg_capital,
                 settlement_candles: cfg_settlement,
-                min_rr: cfg_min_rr
+                min_rr: cfg_min_rr,
+                trend_bias_max: cfg_trend_bias_max,
+                trend_er_gate: cfg_trend_er_gate,
+                // Risk governor params cho rebuild (SL widening)
+                sl_levels: 1.0 * gov.sl_widen,
+                tp_levels: 2.0 * gov.sl_widen,
+                risk_sl_widen_max: risk_sl_widen_max
             };
             if is_def_var("param_dag") && type_of(param_dag) != "()" {
                 cfg.dag = param_dag;
@@ -251,6 +353,197 @@ fn seen_step(state, kind, ts_min) {
 fn step_marker(ts, symbol, kind) {
     [#{ ts: ts, metric_id: symbol, kind: "metric", signal: "summary", value: 0,
         labels: #{ kind: kind } }]
+}
+
+/// ============================================================================
+/// RISK GOVERNOR — giảm nhiệt khi thua liên tiếp
+/// ============================================================================
+///
+/// Ba cơ chế giảm nhiệt (reset ngay khi có 1 lệnh thắng):
+/// 1. Kích thước:   base_capital × risk_scale,  risk_scale ∈ [risk_size_floor, 1]
+/// 2. Xác suất apply: apply_skip ≥ 1 (1 lệnh / apply_skip nến), pause cứng có timeout
+/// 3. Nới SL (rebuild): sl_levels/tp_levels nhân gov.sl_widen ∈ [1, risk_sl_widen_max]
+///
+/// Tín hiệu: quét `state` (signal=order, status=closed) trong cửa sổ risk_window.
+/// Thiếu dữ liệu ⇒ streak=0 ⇒ hành vi y nguyên bản cũ.
+
+/// Trích win/loss từ state (chỉ lệnh đóng: signal=order, status=closed).
+/// Trả #{ wins: int, losses: int, last_fail_ts: int }.
+fn closed_outcomes(state) {
+    let wins = 0;
+    let losses = 0;
+    let last_fail_ts = 0;
+    for o in state {
+        if o["signal"] == "order" && o["labels"]["status"] == "closed" {
+            let pnl = o["labels"]["pnl_pct"];
+            if type_of(pnl) != "()" && pnl.to_float() < 0.0 {
+                losses += 1;
+                if o["ts"].to_int() > last_fail_ts { last_fail_ts = o["ts"].to_int(); }
+            } else {
+                wins += 1;
+            }
+        }
+    }
+    #{ wins: wins, losses: losses, last_fail_ts: last_fail_ts }
+}
+
+/// Tính streak thua liên tiếp (đếm ngược từ mới nhất, dừng khi gặp thắng).
+/// Giới hạn trong risk_window lệnh gần nhất.
+fn fail_streak(state, risk_window) {
+    let streak = 0;
+    let counted = 0;
+    for o in state {
+        if counted >= risk_window { break; }
+        if o["signal"] == "order" && o["labels"]["status"] == "closed" {
+            counted += 1;
+            let pnl = o["labels"]["pnl_pct"];
+            if type_of(pnl) != "()" && pnl.to_float() < 0.0 {
+                streak += 1;
+            } else {
+                break; // gặp thắng ⇒ reset streak
+            }
+        }
+    }
+    streak
+}
+
+/// Tính fail rate trong cửa sổ risk_window.
+fn fail_rate(state, risk_window) {
+    let total = 0;
+    let losses = 0;
+    for o in state {
+        if total >= risk_window { break; }
+        if o["signal"] == "order" && o["labels"]["status"] == "closed" {
+            total += 1;
+            let pnl = o["labels"]["pnl_pct"];
+            if type_of(pnl) != "()" && pnl.to_float() < 0.0 { losses += 1; }
+        }
+    }
+    if total > 0 { losses.to_float() / total.to_float() } else { 0.0 }
+}
+
+/// Governor chính: trả map gồm risk_scale, apply_skip, paused, streak, fail_rate, sl_widen, last_fail_ts.
+fn risk_governor(state, now, risk_window, risk_size_step, risk_size_floor,
+                 risk_rate_ref, risk_rate_penalty, risk_soft_streak, risk_skip_cap,
+                 risk_hard_streak, risk_pause_secs, risk_model_win, risk_sl_widen_max) {
+    let outcomes = closed_outcomes(state);
+    let streak = fail_streak(state, risk_window);
+    let rate = fail_rate(state, risk_window);
+
+    // risk_scale = max(floor, (1 - size_step*streak) * (1 - rate_penalty*max(0, rate - rate_ref)))
+    let scale1 = if streak > 0 { 1.0 - risk_size_step * streak.to_float() } else { 1.0 };
+    let scale2 = if rate > risk_rate_ref { 1.0 - risk_rate_penalty * (rate - risk_rate_ref) } else { 1.0 };
+    let risk_scale = (scale1 * scale2).max(risk_size_floor);
+
+    // apply_skip: thưa nhịp khi streak > soft_streak, tối đa skip_cap
+    let apply_skip = if streak > risk_soft_streak {
+        (1 + streak - risk_soft_streak).min(risk_skip_cap)
+    } else { 1 };
+
+    // paused: dừng hẳn khi streak >= hard_streak, nhưng có timeout auto-recover
+    let paused = streak >= risk_hard_streak && (now - outcomes.last_fail_ts) < risk_pause_secs;
+
+    // sl_widen: proxy toàn cục từ deficit win rate (rebuild áp per-cell từ prev)
+    // deficit = max(0, (model_win - real_win) / model_win)  ; real_win = wins/(wins+losses)
+    let total_closed = outcomes.wins + outcomes.losses;
+    let real_win = if total_closed > 0 { outcomes.wins.to_float() / total_closed.to_float() } else { risk_model_win };
+    let deficit = if risk_model_win > 0.0 { ((risk_model_win - real_win) / risk_model_win).max(0.0) } else { 0.0 };
+    let sl_widen = (1.0 + deficit * (risk_sl_widen_max - 1.0)).min(risk_sl_widen_max);
+
+    #{ risk_scale: risk_scale, apply_skip: apply_skip, paused: paused,
+       streak: streak, fail_rate: rate, sl_widen: sl_widen, last_fail_ts: outcomes.last_fail_ts }
+}
+
+/// ============================================================================
+/// METRICS EMISSION — phát obs cho Prometheus / Grafana
+/// ============================================================================
+///
+/// Tất cả dùng `ts = now_secs()` (KHÔNG dùng closed_ts) để không bị gate 120s chặn.
+/// Label chỉ giữ `kind` ổn định — số nằm ở `value` để tránh cardinality.
+
+/// Phát metrics risk governor (mỗi nhịp apply_due, kể cả khi paused/skip).
+fn risk_metrics(gov, symbol) {
+    let now = now_secs();
+    let out = [];
+    out += [#{ ts: now, metric_id: "grid_risk_scale", kind: "metric", signal: "summary",
+               value: gov.risk_scale, labels: #{ kind: "risk_state" } }];
+    out += [#{ ts: now, metric_id: "grid_risk_loss_streak", kind: "metric", signal: "summary",
+               value: gov.streak.to_float(), labels: #{ kind: "risk_state" } }];
+    out += [#{ ts: now, metric_id: "grid_risk_fail_rate", kind: "metric", signal: "summary",
+               value: gov.fail_rate, labels: #{ kind: "risk_state" } }];
+    out += [#{ ts: now, metric_id: "grid_risk_apply_skip", kind: "metric", signal: "summary",
+               value: gov.apply_skip.to_float(), labels: #{ kind: "risk_state" } }];
+    out += [#{ ts: now, metric_id: "grid_risk_paused", kind: "metric", signal: "summary",
+               value: if gov.paused { 1.0 } else { 0.0 }, labels: #{ kind: "risk_state" } }];
+    out += [#{ ts: now, metric_id: "grid_risk_sl_widen", kind: "metric", signal: "summary",
+               value: gov.sl_widen, labels: #{ kind: "risk_state" } }];
+    out
+}
+
+/// Phát metrics hiệu năng chiến lược (window từ state).
+fn perf_metrics(state, symbol, closed_price) {
+    let now = now_secs();
+    let outcomes = closed_outcomes(state);
+    let total = outcomes.wins + outcomes.losses;
+    let win_rate = if total > 0 { outcomes.wins.to_float() / total.to_float() } else { 0.0 };
+    let open_notional = 0.0;
+    let open_count = 0;
+    let pnl_last = 0.0;
+    for o in state {
+        if o["signal"] == "order" {
+            if o["labels"]["status"] == "open" {
+                open_count += 1;
+                let sz = o["labels"]["size"];
+                if type_of(sz) != "()" { open_notional += sz.to_float(); }
+            } else if o["labels"]["status"] == "closed" && type_of(o["labels"]["pnl_pct"]) != "()" {
+                pnl_last = o["labels"]["pnl_pct"].to_float(); // lệnh gần nhất (state đã sort)
+            }
+        }
+    }
+    let out = [];
+    out += [#{ ts: now, metric_id: "grid_win_rate", kind: "metric", signal: "summary",
+               value: win_rate, labels: #{ kind: "perf" } }];
+    out += [#{ ts: now, metric_id: "grid_trades_closed", kind: "metric", signal: "summary",
+               value: total.to_float(), labels: #{ kind: "perf" } }];
+    out += [#{ ts: now, metric_id: "grid_trades_open", kind: "metric", signal: "summary",
+               value: open_count.to_float(), labels: #{ kind: "perf" } }];
+    out += [#{ ts: now, metric_id: "grid_open_notional", kind: "metric", signal: "summary",
+               value: open_notional, labels: #{ kind: "perf" } }];
+    out += [#{ ts: now, metric_id: "grid_pnl_pct_last", kind: "metric", signal: "summary",
+               value: pnl_last, labels: #{ kind: "perf" } }];
+    out += [#{ ts: now, metric_id: "grid_price_last", kind: "metric", signal: "summary",
+               value: closed_price, labels: #{ kind: "perf" } }];
+    out
+}
+
+/// Probe xu hướng — metric_id riêng để Grafana có tên sạch (opsense_grid_trend_er).
+/// Bỏ n/er/slope/net/tv khỏi label — số nằm ở value các metric riêng nếu cần.
+fn trend_probe(candles, symbol) {
+    let closes = [];
+    for k in candles { closes += [k.c]; }
+    let n = closes.len();
+    if n < 3 { return []; }
+    let net = closes[n - 1].to_float() - closes[0].to_float();
+    let tv = 0.0;
+    for k in 1..n { tv += (closes[k].to_float() - closes[k - 1].to_float()).abs(); }
+    let er = if tv > 0.0 { net.abs() / tv } else { 0.0 };
+    let slope = if tv > 0.0 { net / tv } else { 0.0 };
+    [#{ ts: now_secs(), metric_id: "grid_trend_er", kind: "metric", signal: "summary", value: er,
+        labels: #{ kind: "trend_probe" } }]
+}
+
+/// Probe trend slope (tùy chọn, emit riêng nếu cần).
+fn trend_slope(candles, symbol) {
+    let closes = [];
+    for k in candles { closes += [k.c]; }
+    let n = closes.len();
+    if n < 3 { return []; }
+    let net = closes[n - 1].to_float() - closes[0].to_float();
+    let tv = 0.0;
+    for k in 1..n { tv += (closes[k].to_float() - closes[k - 1].to_float()).abs(); }
+    let slope = if tv > 0.0 { net / tv } else { 0.0 };
+    [#{ ts: now_secs(), metric_id: "grid_trend_slope", kind: "metric", signal: "summary", value: slope,
+        labels: #{ kind: "trend_probe" } }]
 }
 
 /// Đọc nến history + live, merge và sort — **một lần** cho mọi nhánh.
@@ -393,8 +686,17 @@ fn rebuild(candles, prev, params) {
     // theo `b = 1/sl_pct` (rộng hơn ⇒ size nhỏ hơn).
     //
     // `tp_levels` chỉ đổi được TP khi kernel chọn mốc xa hơn mốc kề, tức là
-    // cần `min_rr > 0` ở config. Không set thì TP vẫn ở mốc kề (m = 1) và
-    // `sl_levels` là knob duy nhất điều chỉnh RR.
+    // cần `min_rr` ở config **bằng** `tp_levels`. Kernel quét `tp_for_rr` và
+    // lấy bậc kề đầu tiên có `reward/risk >= min_rr`, nên:
+    //   min_rr <= 1.0 ⇒ TP bậc kề (m = 1), `sl_levels` là knob duy nhất chỉnh RR
+    //   1.0 < min_rr <= 2.0 ⇒ TP 2 bậc, và bậc không còn đủ mốc phía kia thì
+    //                          lệnh bị TỪ CHỐI, không rơi về bậc kề
+    //
+    // ⚠ Hai knob này ở HAI FILE KHÁC NHAU (`grid.local.toml` vs `.rhai`) và đã
+    // lệch âm thầm một lần: `tp_levels = 2.0` mặc định ở đây, còn config để
+    // `min_rr = 0.12` ⇒ TP rơi về bậc kề (RR 1.0) trong khi `win_ceiling` bên
+    // dưới vẫn giả định 2 bước. Hệ quả: trần `win_p` tính trên nền RR 2.0,
+    // thực tế là RR 1.0. Đổi một bên thì phải đổi cả bên kia.
     let sl_levels = knob(params, "sl_levels", 1.0).to_float();
     let tp_levels = knob(params, "tp_levels", 2.0).to_float();
     // Mật độ đặt lệnh. 0 = tắt, dùng lại `weight_sharpness` cũ.
@@ -417,6 +719,52 @@ fn rebuild(candles, prev, params) {
         points += [#{ ts: k.t, value: k.c }];
     }
     if candles.len() < 2 || hi <= lo { return []; }
+
+    // ── Hướng + độ mạnh xu hướng (Kaufman Efficiency Ratio) ────────────────
+    //
+    // KHÔNG dùng `up/down_probabilities` cho việc này: đó là P(rời ô | hướng),
+    // mà ở ô đỉnh thì P(down) > P(up) **bất kể xu hướng là gì** vì giá không
+    // lên được cao hơn. Tổng hợp lại nó đo **hồi quy về trung bình**, không
+    // đo xu hướng — và lệch dấu trong thị trường tăng mạnh.
+    //
+    // ER đo trên `closes` (cửa sổ lookback sẵn có):
+    //   net  = c[-1] - c[0]        hướng
+    //   tv   = Σ |Δc|              tổng biến độ (gồm cả nhiễu hai chiều)
+    //   er   = |net| / tv          độ mạnh ∈ [0,1]: bao nhiêu phần biến độ là
+    //                             có hướng. Slope lớn mà ER thấp = nhiễu trộn
+    //                             ngược nhau ⇒ không nên tin hướng.
+    //
+    // ER thực tế của BTC 1m trên cửa sổ 16h chỉ quanh 0,05–0,30, nên `er_gate`
+    // phải **đo** trên dữ liệu thật, không lấy số từ tài liệu chỉ báo.
+    let n_c = closes.len();
+    let net = closes[n_c - 1].to_float() - closes[0].to_float();
+    let tv = 0.0;
+    for k in 1..n_c { tv += (closes[k].to_float() - closes[k - 1].to_float()).abs(); }
+    let er = if tv > 0.0 { net.abs() / tv } else { 0.0 };
+    let slope = if tv > 0.0 { net / tv } else { 0.0 };
+
+    // `trend_bias_max = 0` ⇒ tắt hoàn toàn, hành vi y như cũ (weights đều
+    // trong ô). Đây là mặc định CỐ Ý: deploy script không được đổi hành vi
+    // tiền thật, muốn bật thì đặt `trend_bias_max` ở config.
+    let bias_max = knob(params, "trend_bias_max", 0.0).to_float();
+    let er_gate = knob(params, "trend_er_gate", 0.15).to_float();
+    // `er_gate = 0` nghĩa là "không chặn" — dùng để ĐO ER thật qua log trước khi
+    // chọn ngưỡng. Nhưng phải chặn trước khi chia, không thì `slope / 0` ra
+    // Infinity và `bias` thành NaN ⇒ `alloc_long` hỏng, plan rỗng.
+    let no_gate = er_gate <= 0.0;
+    let bias = if bias_max <= 0.0 || (!no_gate && er < er_gate) {
+        0.0
+    } else {
+        let d = slope / (if no_gate { 1.0 } else { er_gate });
+        (if d > 1.0 { 1.0 } else if d < -1.0 { -1.0 } else { d }) * bias_max
+    };
+    // Yếu hơn `er_gate` ⇒ `bias = 0` ⇒ về đúng 50/50. Đặt hướng khi chưa đủ
+    // độ mạnh là đoán mò có tiền.
+    let alloc_long = 0.5 + bias;
+    if bias_max > 0.0 {
+        print("grid: xu huong er=" + er + " (gate " + er_gate + ") net=" + net
+            + " tv=" + tv + " => long " + alloc_long + " / short " + (1.0 - alloc_long));
+    }
 
     let interval = median_gap(candles);
 
@@ -522,9 +870,11 @@ fn rebuild(candles, prev, params) {
 
     // ── Trần `win_p`: kinh tế, không phải độ tin cậy ─────────────────────
     //
-    // TP thật của mọi mốc là **1 bước lưới** (`tp_above`/`tp_below` trả mốc
-    // kế, trừ mốc đầu/cuối). Nên `reward` = `spacing / giá`, và mọi mốc dùng
-    // chung một tỉ lệ nên tính một lần cho cả lưới.
+    // Số bước TP do `min_rr` ở config quyết định (xem `tp_for_rr`): TP thật là
+    // bậc **ĐẦU TIÊN** đủ `reward/risk >= min_rr`, nên `reward` phải bằng
+    // `spacing * tp_levels`. Nếu config để `min_rr` nhỏ hơn `tp_levels` thì
+    // trần này tính trên nền RR dở hơn thực tế, tức đặt lệnh ở mức không hòa
+    // vốn được — đã xảy ra một lần (`min_rr = 0.12` vs `tp_levels = 2.0`).
     //
     // Vì sao phải tính thay vì để hằng 0,75: đo thật trên Binance cho
     // `reward = 0,271%`, `sl_pct = 0,8%`, `fee = 0,02%/phía` ⇒ hòa vốn cần
@@ -611,7 +961,32 @@ fn rebuild(candles, prev, params) {
             // Chia đều trong ô để tổng của ô bằng `occ_w[cell]` (≤ 1): giữ được
             // thang tương đối giữa các ô mà vẫn không vượt 1.
             let per = occ_w[cell] / levels.to_float();
-            for j in 0..levels { w += [per]; }
+            // Tỉ lệ long/short theo xu hướng: scale TỪNG BẬC, giữ nguyên tổng
+            // của ô. Cơ chế: `weights` nhân vào `win_p` (portfolio.rs:1020) rồi
+            // `win_p` vào Kelly ⇒ `size ∝ weight`. Không cần sửa kernel.
+            //
+            // ⚠ Chiều phải theo **đúng** quy tắc kernel: `is_long = level <=
+            // (levels[0] + levels[last]) / 2` (portfolio.rs:1016). KHÔNG dùng
+            // `cell_mid`: với 4 bậc, kernel lấy `cell_lo + 3·step/8` còn
+            // `cell_mid = cell_lo + step/2` — lệch nửa bước, đúng giữa hai bậc
+            // giữa ô, nên dùng nhầm là gán trọng số sang sai chiều.
+            let half = (lv[0] + lv[levels - 1]) / 2.0;
+            let lv_f = levels.to_float();
+            let n_l = 0;
+            let n_s = 0;
+            for j in 0..levels {
+                if lv[j] <= half { n_l += 1; } else { n_s += 1; }
+            }
+            for j in 0..levels {
+                let a = if lv[j] <= half && n_l > 0 {
+                    lv_f * alloc_long / n_l.to_float()
+                } else if n_s > 0 {
+                    lv_f * (1.0 - alloc_long) / n_s.to_float()
+                } else {
+                    1.0
+                };
+                w += [per * a];
+            }
         }
 
         let cell_plan = #{ levels: lv,

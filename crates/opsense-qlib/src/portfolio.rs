@@ -1107,13 +1107,36 @@ impl Portfolio {
                     continue;
                 }
 
+                let size = Self::calculate_order_size(
+                    win_p,
+                    grid.stoploss_pct(),
+                    kelly_fraction,
+                    base_capital,
+                );
+
+                if size <= 0.0 {
+                    let reason = format!(
+                        "win_p={:.4} → calculate_order_size=0 (skip placing)",
+                        win_p
+                    );
+                    tracing::debug!(
+                        ts,
+                        grid = ig,
+                        level = il,
+                        dtype = ?dtype,
+                        "bị lo vì size=0"
+                    );
+                    events.push(OrderEvent::Rejected {
+                        ts,
+                        grid: ig,
+                        level: il,
+                        reason,
+                    });
+                    continue;
+                }
+
                 let order = Order {
-                    size: Self::calculate_order_size(
-                        win_p,
-                        grid.stoploss_pct(),
-                        kelly_fraction,
-                        base_capital,
-                    ),
+                    size,
                     grid_index: ig,
                     level_index: il,
                     dtype,
