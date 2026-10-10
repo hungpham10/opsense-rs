@@ -74,6 +74,10 @@ backend = "redis"
    [storage.stations.history]
    backend = "memory"
 
+   # `tick-candle` chỉ cần cửa sổ live 300s và sinh lại được ⇒ RAM.
+   [storage.stations.tick-candle]
+   backend = "memory"
+
 # Lịch sử nến — node terminal tự quét, không cần ai đẩy nhịp.
 #
 # `inputs = []` và là `ComponentType::Source` ⇒ node không cần node `clock`.

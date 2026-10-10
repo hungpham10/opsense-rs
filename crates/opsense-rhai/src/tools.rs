@@ -30,6 +30,24 @@ use opsense_mlib::transition::TransitionAnalysis;
 
 use crate::capacity::CapacityForecast;
 
+/// Overload `to_float`/`to_int` cho **string**.
+///
+/// `Observation.labels` là `BTreeMap<String, String>` — mọi label (`pnl_pct`,
+/// `size`, `sl`, `tp` …) về bản chất là chuỗi. Script đọc chúng rồi gọi
+/// `.to_float()` như số, và Rhai mặc định **không** có overload này ⇒ script
+/// chết ngay ở dòng đầu tiên có lệnh đóng (`Function not found: to_float
+/// (&str)`), kéo theo cả batch metrics trong `perf_metrics`/`risk_governor`
+/// không bao giờ được phát. Parse thủ công ở script là cái nhất quyết: có
+/// hàng chục chỗ đọc label, và chỗ nào quên là hỏng âm thầm.
+fn register_label_casts(eng: &mut rhai::Engine) {
+    eng.register_fn("to_float", |s: &str| -> f64 {
+        s.trim().parse::<f64>().unwrap_or(0.0)
+    });
+    eng.register_fn("to_int", |s: &str| -> i64 {
+        s.trim().parse::<i64>().unwrap_or(0)
+    });
+}
+
 /// Install every script-facing native function.
 pub fn register_all(eng: &mut rhai::Engine, attributes: std::collections::BTreeMap<String, String>) {
     // Custom types + constructors + accessors: khai báo ở `opsense-mlib`.
@@ -43,6 +61,8 @@ pub fn register_all(eng: &mut rhai::Engine, attributes: std::collections::BTreeM
     // Free functions qua macro (`#[rhai_func]` + `inventory`).
     crate::time_fns::register(eng);
     crate::ts_ops::register(eng);
+
+    register_label_casts(eng);
 
     // Per-call state: không macro được (xem module doc).
     crate::attributes::register(eng, attributes);
@@ -64,6 +84,7 @@ pub(crate) fn register_strategy_tools(eng: &mut rhai::Engine) {
     TransitionAnalysis::register(eng);
     TrendAnalysis::register(eng);
     CapacityForecast::register(eng);
+    register_label_casts(eng);
     crate::time_fns::register(eng);
     crate::ts_ops::register(eng);
     crate::attributes::register(eng, std::collections::BTreeMap::new());

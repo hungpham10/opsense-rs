@@ -49,6 +49,23 @@ services:
     container_name: opsense-valkey
     ports:
       - "${VALKEY_PORT:-6379}:6379"
+    command:
+      - valkey-server
+      # Không có volume ⇒ RDB vô nghĩa, và mỗi BGSAVE fork đôi RAM (COW). Tắt.
+      - --save
+      - ""
+      # Trần cứng: đầy thì valkey TỪ CHỐI ghi (lỗi rõ trong log / lastError của
+      # MCP) thay vì ăn hết RAM máy. KHÔNG dùng allkeys-lru: nó sẽ âm thầm xoá
+      # block đang giữ lệnh mở ⇒ kernel mất vị thế mà không ai biết.
+      - --maxmemory
+      - 2gb
+      - --maxmemory-policy
+      - noeviction
+      # Không client nào được giữ output buffer vô hạn (monitor / pubsub / chậm).
+      - --client-output-buffer-limit
+      - "normal 64mb 16mb 60"
+      - --client-query-buffer-limit
+      - 64mb
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
@@ -145,6 +162,9 @@ services:
       - ${GRID_RHAI_SCRIPT:-./strategies/binance/grid.rhai}:/app/strategies/binance/grid.rhai:ro
       # Dex OIDC config (mounted into image for consistency with compose service).
       - ./conf/dex/config.dev.yaml:/etc/dex/config.dev.yaml:ro
+      # Alloy config: image COPY sẵn bản cũ (Earthfile:133), mount để bật/tắt
+      # exporter mà không phải build lại image 1.2GB.
+      - ./conf/config.alloy:/etc/alloy/config.alloy:ro
     environment:
       # App
       APP_ENV: ${APP_ENV:-dev}
@@ -177,8 +197,14 @@ services:
       HTTP_SERVER: localhost
       ENVIRONMENT: dev
       USE_TOR: "false"
-      # Alloy metrics
-      USE_ALLOY: "false"
+      # Alloy metrics — scrape localhost:8080/metrics rồi remote_write lên
+      # Grafana Cloud (credentials lấy từ .env). Tắt ("false") là mất metrics.
+      USE_ALLOY: "true"
+      # Tempo đã gỡ khỏi conf/config.alloy (token thiếu scope ⇒ 401). Muốn bật
+      # lại: khôi phục khối otelcol trong file đó + 2 dòng TEMPO_* ở đây;
+      # .env vẫn giữ sẵn 2 giá trị đó.
+      GRAFANA_CLOUD_METRIC_ID: ${GRAFANA_CLOUD_METRIC_ID}
+      GRAFANA_CLOUD_METRIC_TOKEN: ${GRAFANA_CLOUD_METRIC_TOKEN}
       # Redis (valkey)
       REDIS_HOST: opsense-valkey
       REDIS_PORT: 6379
