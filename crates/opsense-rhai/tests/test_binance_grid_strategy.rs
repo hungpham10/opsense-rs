@@ -536,3 +536,80 @@ async fn perf_metrics_counts_open_orders_in_own_station() {
         "pnl lệnh gần nhất phải lấy từ state: {out:?}"
     );
 }
+
+/// Regression: `perf_metrics` phải phát metric long/short notional và count.
+///
+/// Grid có thể đặt cả long và short cùng lúc. Dashboard cần phân biệt
+/// notional và số lượng theo direction để theo dõi vị thế net.
+#[tokio::test]
+async fn perf_metrics_emits_long_short_metrics() {
+    let ctx = make_ctx().await;
+    let open_bucket = now() / 60 * 60;
+    seed_candles(&ctx, 40, open_bucket).await;
+
+    // Seed 2 long + 1 short đang mở vào own station.
+    let orders = vec![
+        Observation::new(
+            open_bucket - 60,
+            SYMBOL.into(),
+            TelemetryKind::Metric,
+            Signal::Order,
+            100.0,
+        )
+        .with_label("order_id", "o-long-1")
+        .with_label("status", "open")
+        .with_label("size", "2.5")
+        .with_label("dtype", "long"),
+        Observation::new(
+            open_bucket - 120,
+            SYMBOL.into(),
+            TelemetryKind::Metric,
+            Signal::Order,
+            101.0,
+        )
+        .with_label("order_id", "o-long-2")
+        .with_label("status", "open")
+        .with_label("size", "1.5")
+        .with_label("dtype", "long"),
+        Observation::new(
+            open_bucket - 180,
+            SYMBOL.into(),
+            TelemetryKind::Metric,
+            Signal::Order,
+            102.0,
+        )
+        .with_label("order_id", "o-short-1")
+        .with_label("status", "open")
+        .with_label("size", "3.0")
+        .with_label("dtype", "short"),
+    ];
+    write(&ctx, "grid", &orders, now()).await;
+
+    let out = run_with(&ctx, trading_params(), None, Value::Array(vec![])).await;
+    let perf = |id: &str| -> f64 {
+        out.iter()
+            .find(|v| v["metric_id"] == id)
+            .unwrap_or_else(|| panic!("thiếu metric {id}: {out:?}"))["value"]
+            .as_f64()
+            .expect("value là số")
+    };
+
+    // Tổng 3 lệnh mở
+    assert_eq!(perf("grid_trades_open"), 3.0);
+    assert_eq!(perf("grid_open_notional"), 7.0); // 2.5 + 1.5 + 3.0
+
+    // Long: 2 lệnh, notional 4.0
+    assert_eq!(perf("grid_long_count"), 2.0);
+    assert_eq!(perf("grid_long_notional"), 4.0); // 2.5 + 1.5
+
+    // Short: 1 lệnh, notional 3.0
+    assert_eq!(perf("grid_short_count"), 1.0);
+    assert_eq!(perf("grid_short_notional"), 3.0);
+
+    // Kiểm tra tổng khớp
+    assert_eq!(
+        perf("grid_long_notional") + perf("grid_short_notional"),
+        perf("grid_open_notional"),
+        "long + short = total notional"
+    );
+}
