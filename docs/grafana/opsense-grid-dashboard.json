@@ -11,7 +11,7 @@
   "editable": true,
   "graphTooltip": 1,
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "15s",
   "timezone": "browser",
   "time": {
@@ -1825,18 +1825,325 @@
       ]
     },
     {
-      "type": "text",
-      "id": 600,
-      "title": "Cạm bẫy khi đọc metric",
+      "type": "timeseries",
+      "id": 609,
+      "title": "Tuổi dữ liệu lưới (giây)",
+      "description": "Thời gian kẻ từ lần review cuối: `time() - timestamp(opsense_grid_cells)`. Nếu > 1200s (20 phút) nghĩa là grid không review được (thiếu nến hoặc tick feed chết). Cảnh báo quan trọ: pipeline có thể live nhưng không phát grid metric.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "gridPos": {
-        "h": 7,
-        "w": 24,
+        "h": 4,
+        "w": 12,
         "x": 0,
         "y": 59
       },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 600
+              },
+              {
+                "color": "red",
+                "value": 1200
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "time() - timestamp(opsense_grid_cells)",
+          "legendFormat": "tuổi lưới (s)",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 700,
+      "title": "6 — Xu hướng & Nguyên dữ liệu",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 701,
+      "title": "Efficiency Ratio (ER)",
+      "description": "ER = |net change| / total variation. Đã đo được 0.15%–6.7% — thấp hơn `trend_er_gate = 0.15` nên trend bias chưa bao giờ bật. ER thấp = đi ngang/choppy, cao = trending. Nhịp 1 mảu/15 phút.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "decimals": 4,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.015
+              },
+              {
+                "color": "green",
+                "value": 0.15
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "opsense_grid_trend_er",
+          "legendFormat": "ER",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 702,
+      "title": "Trend Slope",
+      "description": "Độ dốc xu hướng chuẩn hóa: +1 = đi lên thằng, -1 = đi xuống thằng, 0 = đi ngang. Dùng cùng ER để hiểu xu hướng: ER cao + slope dương = trending mạnh. Nhịp 1 mảu/15 phút.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": true,
+            "axisColorMode": "text",
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 4,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "opsense_grid_trend_slope",
+          "legendFormat": "slope",
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "text",
+      "id": 800,
+      "title": "Cạm bạy khi đọc metric",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 71
+      },
       "options": {
         "mode": "markdown",
-        "content": "**`opsense_grid_cells` / `grid_step_price` / `grid_up_prob` … chỉ có 1 mẫu mỗi 15 phút** (nhánh REVIEW của `snapshot()`, `review_interval_secs = 900`). Trên time series chúng đi như bậc thang với đoạn phẳng — đó là thiếu mẫu, không phải pipeline chết. Panel đổi mỗi phút (`grid_price_last`, `grid_trades_*`) là thứ dùng để xác nhận pipeline còn sống.\n\n**Đây là lưới PHÂN TÍCH, không phải lưới LỆNH** — 8 metric trên do `snapshot()` phát, lấy từ `grid_fit(points, v_min, v_max, 8)` (`max_bit = 8`, không có sàn `min_step_frac`). Lưới thật dùng để đặt lệnh do `fn rebuild` dựng bằng sieve, và nó KHÔNG phát metric (chỉ nằm trong station `grid` dưới `labelKind=plan`, `labels.cells` = JSON) — đọc bằng `opsense_query_station({node:\"grid\", labelKind:\"plan\"})` qua MCP. Nên `opsense_grid_cells` ≠ số ô đang có lệnh.\n\n**`opsense_grid_price_last` chỉ đổi khi có nến ĐÓNG** (`last_closed`), nên tối đa 1 mẫu/phút. Dashboard scan 15 phút ⇒ có ~15 mẫu.\n\n**`opsense_BTCUSDT{kind=\"apply_step\"|\"review_step\"|\"trading_step\"}` luôn có `value = 0`** — `grid.rhai:355` hardcode `value: 0`, mốc thời gian nằm ở timestamp của observation chứ không nằm ở value. Đừng chart chúng. Muốn theo nhịp thì dùng `timestamp(opsense_BTCUSDT{kind=\"trading_step\"})`, hoặc heartbeat `opsense_grid_price_last`.\n\n**`opsense_grid_win_rate = 0` chưa chắc là xấu** — nó là 0 khi tổng lệnh đóng bằng 0. Chỉ đọc được sau khi có ≥ `grid_min_trades` (3) lệnh đóng.\n\n**`opsense_grid_pnl_pct_last` là lệnh gần nhất, không phải PnL cộng dồn.** Muốn PnL cộng dồn / win rate theo bucket: `opsense_orders({node:\"grid\", interval:\"1h\"})` qua MCP.\n\n**Restart là mất sạch lịch sử** — `conf/grid.local.toml` để `[storage] backend = \"memory\"`, chỉ nằm trong RAM. Đổi tag image là mất toàn bộ lịch sử lệnh (giá cũ vẫn còn vì Grafana đã nhận).\n\n**Scrape 15s** (`conf/config.alloy:51`), nên dữ liệu trên panel mịn hơn thực tế nhịp 1 phút của pipeline.\n\n**`grid_*` đi trước `node_*` 15 phút** — 8 metric grid geometry phát ở nhịp review, còn `opsense_node_running` phát ở mọi tick của kernel. Một panel `grid_cells` đứng im không kéo theo `node_running = 0`; hai cái đó là hai nhịp khác nhau của cùng một pipeline.\n"
+        "content": "**`opsense_grid_cells` / `grid_step_price` / `grid_up_prob` … chỉ có 1 mảu mổi 15 phút** (nhánh REVIEW của `snapshot()`, `review_interval_secs = 900`). Trên time series chúng nó đi như bắc thang với đoạn phắng — đó là thiếu mảu, không phải pipeline chết. Panel đổi mổi phút (`grid_price_last`, `grid_trades_*`) là thứ dùng để xác nhận pipeline còn sống.\n\n**`opsense_grid_trend_er` / `grid_trend_slope` CÙNG nhịp 15 phút** — bị loại khỏi `/metrics` mạc định (`exclude_kinds = [\"trend_probe\"]`). Nếu không thấy panel 701/702, hãy bỏ `trend_probe` khỏi `exclude_kinds` trong `conf/grid.local.toml` và restart `opsense-serve` (config được mount, không cần rebuild image).\n\n**Tuổi dữ liệu lưới (panel 609)**: `time() - timestamp(opsense_grid_cells)`. Nếu > 1200s (20 phút) nghĩa là grid không review được (thiếu nến hoặc tick feed chết). Pipeline có thể vẫn live (`grid_price_last` đổi) nhưng không phát grid metric.\n\n**Này là lưới PHÂN TÍCH, không phải lưới LỆNH** — 8 metric trên do `snapshot()` phát, lấy từ `grid_fit(points, v_min, v_max, 8)` (`max_bit = 8`, không có sàn `min_step_frac`). Lưới thật dùng để đặt lệnh do `fn rebuild` dưng bằng sieve, và nó KHÔNG phát metric (chỉ nếm trong station `grid` dưới `labelKind=plan`, `labels.cells` = JSON) — đọc bằng `opsense_query_station({node:\"grid\", labelKind:\"plan\"})` qua MCP. Nên `opsense_grid_cells` ≠ số ô đang có lệnh.\n\n**`opsense_grid_price_last` chỉ đổi khi có nến ĐÓNG** (`last_closed`), nên tối đa 1 mảu/phút. Dashboard scan 15 phút ⇒ có ~15 mảu.\n\n**`opsense_BTCUSDT{kind=\"apply_step\"|\"review_step\"|\"trading_step\"}` luôn có `value = 0`** — `grid.rhai:355` hardcode `value: 0`, mốc thời gian nếm ở timestamp của observation chứ không nếm ở value. Đưng chart chùng. Muốn theo nhịp thì dùng `timestamp(opsense_BTCUSDT{kind=\"trading_step\"})`, hoặc heartbeat `opsense_grid_price_last`.\n\n**`opsense_grid_win_rate = 0` chưa chắc là xấu** — nó là 0 khi tổng lệnh đóng bằng 0. Chỉ đọc được sau khi có ≥ `grid_min_trades` (3) lệnh đóng.\n\n**`opsense_grid_pnl_pct_last` là lệnh gần nhất, không phải PnL cộng dộn.** Muốn PnL cộng dộn / win rate theo bucket: `opsense_orders({node:\"grid\", interval:\"1h\"})` qua MCP.\n\n**Restart là mất sắch lịch sử** — `conf/grid.local.toml` để `[storage] backend = \"memory\"`, chỉ nếm trong RAM. Đổi tag image là mất toàn bộ lịch sử lệnh (giá cũ vẫn có vì Grafana đã nhận).\n\n**Scrape 15s** (`conf/config.alloy:51`), nên dữ liệu trên panel mịn hơn thực tế nhịp 1 phút của pipeline."
       }
     }
   ],
