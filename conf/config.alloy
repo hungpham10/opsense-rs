@@ -1,4 +1,18 @@
-// --- TRACING CONFIGURATION ---
+// --- OTLP (metric only) ---
+// Receiver giữ lại vì app luôn init OTel khi USE_ALLOY=true (xem serve.rs:40):
+// gỡ hẳn receiver sẽ khiến app spam `Connection refused` mỗi 5s. Trace KHÔNG
+// khai báo `output` ⇒ otelcol tự drop, nên không còn 401 của Tempo (token thiếu
+// scope) mà cũng không mất đường scrape metrics.
+//
+// Muốn bật lại trace: thêm
+//   traces = [otelcol.processor.filter.drop_health_metrics.input]
+// rồi khai báo `otelcol.processor.filter` + `otelcol.exporter.otlp` (endpoint
+// tempo-prod-07-...) + `otelcol.auth.basic` (TEMPO_ID/TEMPO_TOKEN) — và đặt
+// GRAFANA_CLOUD_TEMPO_ID / _TOKEN trong .env.
+otelcol.exporter.prometheus "grafana_cloud" {
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
 otelcol.receiver.otlp "app_receiver" {
   grpc {
     endpoint = "127.0.0.1:4317"
@@ -9,38 +23,6 @@ otelcol.receiver.otlp "app_receiver" {
 
   output {
     metrics = [otelcol.exporter.prometheus.grafana_cloud.input]
-    traces  = [otelcol.processor.filter.drop_health_metrics.input]
-  }
-}
-
-otelcol.exporter.prometheus "grafana_cloud" {
-  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
-}
-
-otelcol.exporter.otlp "grafana_cloud_tempo" {
-  client {
-    endpoint = "tempo-prod-07-prod-ap-southeast-0.grafana.net:443"
-    auth     = otelcol.auth.basic.grafana_cloud_auth.handler
-  }
-}
-
-otelcol.auth.basic "grafana_cloud_auth" {
-  username = sys.env("GRAFANA_CLOUD_TEMPO_ID")
-  password = sys.env("GRAFANA_CLOUD_TEMPO_TOKEN")
-}
-
-otelcol.processor.filter "drop_health_metrics" {
-  error_mode = "ignore"
-
-  traces {
-    span = [
-      "attributes[\"uri\"] == \"/health\"",
-      "attributes[\"uri\"] == \"/metrics\"",
-    ]
-  }
-
-  output {
-    traces = [otelcol.exporter.otlp.grafana_cloud_tempo.input]
   }
 }
 
