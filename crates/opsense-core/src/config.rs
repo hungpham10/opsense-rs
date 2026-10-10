@@ -485,6 +485,69 @@ pub struct RaftConfig {
 }
 
 
+/// Cấu hình Prometheus /metrics endpoint.
+///
+/// Mặc định tắt (enabled = false) để không đổi hành vi hiện có.
+/// Khi bật, expose /metrics trên HTTP server (route /metrics).
+///
+/// Cardinality: station data có thể rất lớn (tick-candle: tick/giây;
+/// grid: order với nhiều label). Cơ chế kiểm soát:
+/// - default_window_secs: chỉ expose observation mới hơn cái này (mặc định 120s)
+/// - max_series: trần cứng series (mặc định 5000). Vượt trần ⇒ cắt deterministic
+///   + expose opsense_prometheus_dropped_series để thấy bị cắt.
+/// - Signal allowlist mặc định loại order (quyết định giao dịch) và trading_step (cursor).
+///
+/// Mặc định không khai báo [[prometheus.stations]] ⇒ tất cả station,
+/// áp dụng gate mặc định. Khai báo để thu hẹp.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrometheusConfig {
+    /// Bật /metrics endpoint. Mặc định false để không đổi hành vi cũ.
+    pub enabled: bool,
+    /// Path của endpoint. Mặc định /metrics. Phải bắt đầu bằng /.
+    pub path: String,
+    /// Chỉ expose observation có ts >= now - default_window_secs.
+    /// Mặc định 120s (2 phút).
+    pub default_window_secs: u64,
+    /// Trần số series. 0 = không giới hạn (không khuyến khích).
+    /// Mặc định 5000.
+    pub max_series: u64,
+    /// Danh sách station muốn expose. Bỏ trống = tất cả station.
+    pub stations: Vec<StationTarget>,
+}
+
+/// Một station trong allowlist Prometheus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StationTarget {
+    /// Station id (vd grid, tick-candle, history).
+    pub station: String,
+    /// Bật/tắt station này. Mặc định true.
+    pub enabled: bool,
+    /// Allowlist signal. Mặc định: [raw, summary] (loại order).
+    /// Hợp lệ: raw, summary, utilization, saturation, rate,
+    /// errors, duration, order.
+    pub signals: Vec<String>,
+    /// Cửa sổ thời gian (giây) cho station này — override global
+    /// `default_window_secs`. `0` = dùng global.
+    pub window_secs: Option<u64>,
+    /// Danh sách `labels.kind` muốn loại khỏi export.
+    /// Dùng để giảm cardinality (vd `snapshot`, `trend_probe` có nhiều label số).
+    pub exclude_kinds: Vec<String>,
+}
+
+impl Default for StationTarget {
+    fn default() -> Self {
+        Self {
+            station: String::new(),
+            enabled: true,
+            signals: vec!["raw".into(), "summary".into()],
+            window_secs: None,
+            exclude_kinds: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -519,7 +582,12 @@ pub struct Config {
     /// chạy pipeline nào, và có cắm engine quyết định chưa.
     #[serde(default)]
     pub raft: RaftConfig,
+
+    /// Prometheus /metrics endpoint configuration.
+    #[serde(default)]
+    pub prometheus: PrometheusConfig,
 }
+
 
 impl Config {
     /// Load and validate a TOML config from `path`.
@@ -604,6 +672,50 @@ impl Config {
                 ));
             }
         }
+        // Kiểm tra Prometheus config.
+        if self.prometheus.enabled {
+            if self.prometheus.path.trim().is_empty() {
+                return Err(ConfigError::Invalid(
+                    "prometheus.path must not be empty".into(),
+                ));
+            }
+            if !self.prometheus.path.starts_with('/') {
+                return Err(ConfigError::Invalid(
+                    "prometheus.path must start with '/'".into(),
+                ));
+            }
+            if self.prometheus.max_series == 0 {
+                return Err(ConfigError::Invalid(
+                    "prometheus.max_series must be > 0 (use a positive integer, 0 disables limit)".into(),
+                ));
+            }
+            if self.prometheus.default_window_secs == 0 {
+                return Err(ConfigError::Invalid(
+                    "prometheus.default_window_secs must be > 0".into(),
+                ));
+            }
+            // Validate signals in station targets
+            let valid_signals: std::collections::HashSet<&str> = [
+                "raw", "summary", "utilization", "saturation", "rate",
+                "errors", "duration", "order",
+            ].into_iter().collect();
+            for st in &self.prometheus.stations {
+                if st.station.trim().is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "prometheus.stations.station must not be empty".into(),
+                    ));
+                }
+                for sig in &st.signals {
+                    if !valid_signals.contains(sig.as_str()) {
+                        return Err(ConfigError::Invalid(format!(
+                            "prometheus.stations.signals contains unknown signal '{}'; valid: raw,summary,utilization,saturation,rate,errors,duration,order",
+                            sig
+                        )));
+                    }
+                }
+            }
+        }
+
         // Kiểm trên bản **đã áp env**: `OPSENSE_GOSSIP_*` có thể làm hỏng cấu
         // hình sau khi file đã hợp lệ, và lỗi đó phải lộ ra lúc khởi động chứ
         // không phải lúc node đã vào mesh.

@@ -70,6 +70,11 @@ pub struct CellStats {
     pub long_lost: Vec<usize>,
     pub short_win: Vec<usize>,
     pub short_lost: Vec<usize>,
+    /// Các mức giá (levels) của cell này — dùng để khớp với plan mới theo
+    /// độ chồng giá thay vì chỉ số cell. `[serde(default)]` để tương thích
+    /// với CellStats cũ chưa có field này.
+    #[serde(default)]
+    pub levels: Vec<f64>,
 }
 
 impl CellStats {
@@ -79,11 +84,13 @@ impl CellStats {
         let pick = |f: fn(&TradingGrid, usize) -> usize| {
             (0..n).map(|j| f(grid, j)).collect::<Vec<usize>>()
         };
+        let levels: Vec<f64> = (0..n).map(|j| grid.level_price(j)).collect();
         Self {
             long_win: pick(TradingGrid::long_win_count),
             long_lost: pick(TradingGrid::long_lost_count),
             short_win: pick(TradingGrid::short_win_count),
             short_lost: pick(TradingGrid::short_lost_count),
+            levels,
         }
     }
 }
@@ -93,7 +100,9 @@ impl GridPlan {
     ///
     /// Cell nào `levels` rỗng/≤ 1 giá hoặc không hợp lệ thì bị bỏ qua — script
     /// có thể trả ô rác mà kernel vẫn dựng được plan dùng được.
-    pub fn to_grid(&self, prev: Option<&TradingGrid>) -> Option<TradingGrid> {
+    /// Khớp thống kê cũ theo **độ chồng giá** (span overlap) thay vì chỉ số cell,
+    /// để số ô thay đổi (bị lo bởi spacing_floor) không làm dán sai bộ đếm.
+    pub fn to_grid(&self, prev: Option<&[TradingGrid]>) -> Option<TradingGrid> {
         let levels: Vec<f64> = self
             .levels
             .iter()
@@ -127,24 +136,51 @@ impl GridPlan {
         if let (Some(lw), Some(sw)) = (clamp_probs(&self.long_win), clamp_probs(&self.short_win)) {
             grid = grid.with_win_probabilities(lw, sw);
         }
-        if let Some(p) = prev {
-            let stats = CellStats::of(p);
-            grid = grid.with_outcome_counts(
-                stats.long_win,
-                stats.long_lost,
-                stats.short_win,
-                stats.short_lost,
-            );
+        if let Some(prev_grids) = prev {
+            // Khớp theo độ chồng giá: tìm grid cũ có overlap lớn nhất với cell mới.
+            // Tie-break: grid cũ có `levels` gần nhất (theo giữa ô).
+            let new_min = grid.min();
+            let new_max = grid.max();
+            let new_mid = (new_min + new_max) / 2.0;
+            let mut best_idx = None;
+            let mut best_overlap = 0.0f64;
+            let mut best_dist = f64::INFINITY;
+            for (i, old) in prev_grids.iter().enumerate() {
+                let old_min = old.min();
+                let old_max = old.max();
+                let overlap = new_max.min(old_max) - new_min.max(old_min);
+                if overlap <= 0.0 {
+                    continue;
+                }
+                let old_mid = (old_min + old_max) / 2.0;
+                let dist = (old_mid - new_mid).abs();
+                if overlap > best_overlap || (overlap == best_overlap && dist < best_dist) {
+                    best_overlap = overlap;
+                    best_dist = dist;
+                    best_idx = Some(i);
+                }
+            }
+            if let Some(idx) = best_idx {
+                let old_grid = &prev_grids[idx];
+                let stats = CellStats::of(old_grid);
+                grid = grid.with_outcome_counts(
+                    stats.long_win,
+                    stats.long_lost,
+                    stats.short_win,
+                    stats.short_lost,
+                );
+            }
         }
         Some(grid)
     }
 
     /// Dựng cả plan; `prev` = plan cũ (cùng thứ tự cell) để giữ thống kê.
+    /// Khớp từng cell theo độ chồng giá (xem `to_grid`).
     pub fn to_grids(plans: &[GridPlan], prev: &[TradingGrid]) -> Vec<TradingGrid> {
         plans
             .iter()
-            .enumerate()
-            .filter_map(|(i, p)| p.to_grid(prev.get(i)))
+            .map(|p| p.to_grid(Some(prev)))
+            .filter_map(|g| g)
             .collect()
     }
 }

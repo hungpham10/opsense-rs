@@ -2,7 +2,7 @@ use axum::{
     Router, body::Body, extract::connect_info, http::Request, routing::get, serve::IncomingStream,
 };
 
-use axum_prometheus::PrometheusMetricLayer;
+
 use tokio::net::unix::UCred;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::signal;
@@ -24,7 +24,7 @@ use tracing_subscriber::prelude::*;
 
 use opsense_core::Config;
 
-use crate::api::{AppState, admin, health_check, oauth, repl};
+use crate::api::{AppState, admin, health_check, oauth, prometheus_handler, repl};
 
 fn init_telemetry() -> Option<(SdkTracerProvider, SdkMeterProvider)> {
     // Log ra stdout **luôn**, kể cả khi không bật OTLP. Trước đây cả subscriber
@@ -118,14 +118,18 @@ impl connect_info::Connected<IncomingStream<'_, UnixListener>> for UdsConnectInf
 }
 
 pub async fn routes(app_state: AppState) -> Result<Router, Error> {
-    let (prometheus_layer, _metric_handle) = PrometheusMetricLayer::pair();
-
-    // TODO: xem thử có cách nào load cấu hình từ yaml bên ngoài luôn đươc không
     let router = Router::new()
         .route("/health", get(health_check))
         .nest("/api/repl", repl::routes(app_state.clone()))
         .nest("/api/admin", admin::routes())
         .nest("/api/oauth", oauth::routes());
+
+    // Thêm /metrics route nếu prometheus enabled trong config
+    let router = if app_state.prometheus_config.enabled {
+        router.route("/metrics", get(prometheus_handler))
+    } else {
+        router
+    };
 
     let router = router
         .with_state(app_state)
@@ -165,8 +169,7 @@ pub async fn routes(app_state: AppState) -> Result<Router, Error> {
                     is_guest = %is_guest,
                 )
             }),
-        )
-        .layer(prometheus_layer);
+        );
 
     Ok(router)
 }
