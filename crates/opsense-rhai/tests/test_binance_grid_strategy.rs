@@ -243,6 +243,81 @@ async fn snapshot_merges_history_and_live_candles() {
     );
 }
 
+/// Regression: hình học lưới phải ra dạng **scalar** `kind = "grid_state"`, không
+/// chỉ nằm trong label của obs `snapshot`.
+///
+/// Vì sao test này tồn tại: label của `snapshot` bị `exclude_kinds = ["snapshot"]`
+/// loại khỏi Prometheus nên Grafana không thấy gì về lưới; các `grid_*` scalar
+/// mới là đường duy nhất. Trước đây số này chỉ bị `.to_string()` bỏ vào label —
+/// nếu ai đó refactor `snapshot()` bỏ nhỡ phần phát scalar thì gauge **im lặng**
+/// biến mất khỏi dashboard, đúng triệu chứng gốc của ticket này.
+#[tokio::test]
+async fn snapshot_emits_grid_geometry_as_scalar_metrics() {
+    let ctx = make_ctx().await;
+    let now = now();
+    let base = now / 60 * 60;
+
+    // Cùng fixture với `snapshot_merges_history_and_live_candles`: ramp 100.5 → 106.
+    let mut hist = Vec::new();
+    for i in 1..=12 {
+        let o = 100.0 + 0.5 * (i as f64 - 1.0);
+        let c = 100.0 + 0.5 * i as f64;
+        hist.extend(candle_rows(base - 60 * i, o, c + 0.2, o - 0.2, c, 10.0));
+    }
+    write(&ctx, "history", &hist, now).await;
+    write(&ctx, "grid", &candle_rows(base, 106.0, 107.0, 105.5, 106.5, 4.0), now).await;
+
+    let out = run(&ctx, None, Value::Array(vec![])).await;
+    let val = |id: &str| -> f64 {
+        out.iter()
+            .find(|v| v["metric_id"] == id && v["labels"]["kind"] == "grid_state")
+            .unwrap_or_else(|| panic!("thiếu metric scalar {id}: {out:?}"))["value"]
+            .as_f64()
+            .expect("value là số")
+    };
+
+    assert_eq!(
+        out.iter()
+            .filter(|v| v["labels"]["kind"] == "grid_state")
+            .count(),
+        8,
+        "đúng 8 metric grid_state (5 hình học + 3 xác suất): {out:?}"
+    );
+
+    let cells = val("grid_cells");
+    let step = val("grid_step_price");
+    let cell_now = val("grid_cell_now");
+    assert!(cells >= 1.0, "grid có ít nhất 1 ô: {out:?}");
+    assert!(step > 0.0, "bước lưới dương: {out:?}");
+    assert!(
+        cell_now >= 0.0 && cell_now < cells,
+        "ô của giá phải nằm trong [0, cells): {out:?}"
+    );
+
+    // Biên = min/max của cửa sổ vừa khớp (100.5 → 106.5 chừa close cuối).
+    let lo = val("grid_lo");
+    let hi = val("grid_hi");
+    assert!(lo < hi, "biên hợp lệ: {lo} < {hi}");
+    assert!((lo - 100.5).abs() < 1e-9, "lo = giá thấp nhất cửa sổ: {out:?}");
+    assert!((hi - 106.5).abs() < 1e-9, "hi = giá cao nhất cửa sổ: {out:?}");
+
+    let up = val("grid_up_prob");
+    let down = val("grid_down_prob");
+    let stay = val("grid_stay_prob");
+    assert!(
+        (up + down + stay - 1.0).abs() < 1e-6,
+        "xác suất transition cộng lại = 1: {out:?}"
+    );
+
+    // `ts` phải là `now_secs()` chứ không phải ts nến: `collect_station` chặn obs
+    // cũ hơn `window_secs`, nếu dùng ts nến thì nến chưa review lại sẽ bị cắt.
+    let ts_ok = out
+        .iter()
+        .filter(|v| v["labels"]["kind"] == "grid_state")
+        .all(|v| (v["ts"].as_i64().unwrap() - now).abs() <= 5);
+    assert!(ts_ok, "ts metric grid_state = now_secs(): {out:?}");
+}
+
 #[tokio::test]
 async fn snapshot_also_runs_on_history_trigger() {
     let ctx = make_ctx().await;
@@ -394,4 +469,70 @@ async fn trading_mode_skips_open_candle_only() {
     let out = run_with(&ctx, trading_params(), None, Value::Array(vec![])).await;
     let orders = out.iter().filter(|v| v["signal"] == "order").count();
     assert_eq!(orders, 0, "nến chưa đóng thì không đặt lệnh: {out:?}");
+}
+
+/// Regression: `grid_trades_open` phải ≥ 1 khi station có lệnh đang mở.
+///
+/// `perf_metrics` đếm trong `state` — mảng obs đọc bằng `station_query(own, …,
+/// "order")` — nên nếu filter theo `signal` hoặc nhãn `status` hỏng, gauge im
+/// lặng về 0 trong khi lệnh vẫn treo (đúng triệu chứng đã thấy trên Grafana).
+#[tokio::test]
+async fn perf_metrics_counts_open_orders_in_own_station() {
+    let ctx = make_ctx().await;
+    let open_bucket = now() / 60 * 60;
+    seed_candles(&ctx, 40, open_bucket).await;
+
+    // Seed 1 lệnh đang mở + 1 lệnh đã đóng vào own station, đúng shape mà
+    // transform ghi khi nhận output của script.
+    let orders = vec![
+        Observation::new(
+            open_bucket - 60,
+            SYMBOL.into(),
+            TelemetryKind::Metric,
+            Signal::Order,
+            100.0,
+        )
+        .with_label("order_id", "o-seed-open")
+        .with_label("status", "open")
+        .with_label("size", "2.5"),
+        Observation::new(
+            open_bucket - 120,
+            SYMBOL.into(),
+            TelemetryKind::Metric,
+            Signal::Order,
+            101.0,
+        )
+        .with_label("order_id", "o-seed-closed")
+        .with_label("status", "closed")
+        .with_label("pnl_pct", "0.012"),
+    ];
+    write(&ctx, "grid", &orders, now()).await;
+
+    let out = run_with(&ctx, trading_params(), None, Value::Array(vec![])).await;
+    let perf = |id: &str| -> f64 {
+        out.iter()
+            .find(|v| v["metric_id"] == id)
+            .unwrap_or_else(|| panic!("thiếu metric {id}: {out:?}"))["value"]
+            .as_f64()
+            .expect("value là số")
+    };
+
+    assert_eq!(
+        perf("grid_trades_open"),
+        1.0,
+        "1 lệnh status=open phải được đếm: {out:?}"
+    );
+    assert_eq!(
+        perf("grid_open_notional"),
+        2.5,
+        "notional = tổng size lệnh đang mở: {out:?}"
+    );
+    assert!(
+        perf("grid_trades_closed") >= 1.0,
+        "lệnh closed phải vào bộ đếm (closed_outcomes đọc state): {out:?}"
+    );
+    assert!(
+        perf("grid_pnl_pct_last") > 0.0,
+        "pnl lệnh gần nhất phải lấy từ state: {out:?}"
+    );
 }

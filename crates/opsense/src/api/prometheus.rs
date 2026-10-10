@@ -390,6 +390,53 @@ mod tests {
         assert_eq!(series.len(), 0);
     }
 
+    /// Regression (dashboard không có thông tin về lưới): `conf/grid.local.toml`
+    /// khai `exclude_kinds = ["snapshot", "trend_probe"]` nên obs `snapshot` —
+    /// nơi `grid.rhai` từng nhét toàn bộ hình học lưới vào label — bị cắt khỏi
+    /// Prometheus. Giải pháp là phát `kind = "grid_state"`, và kind đó **phải**
+    /// sống qua đúng config thật.
+    ///
+    /// Nếu ai đó thêm `"grid_state"` vào `exclude_kinds` ở config (hoặc đổi
+    /// macro `station` sang loại mặc định khác) thì 8 panel row 5 của dashboard
+    /// Grafana im lặng rỗng — cũng chính triệu chứng gốc của ticket này.
+    #[test]
+    fn grid_state_survives_the_exclude_kinds_of_the_real_config() {
+        let now = 1_000_000;
+        // Đúng `[[prometheus.stations]]` của `conf/grid.local.toml`.
+        let cfg = StationTarget {
+            station: "grid".into(),
+            enabled: true,
+            signals: vec!["summary".into()],
+            window_secs: Some(300),
+            exclude_kinds: vec!["snapshot".into(), "trend_probe".into()],
+        };
+
+        // Nguồn duy nhất còn lại của hình học lưới trên Prometheus.
+        let grid_state = obs(now, "grid_cells", Signal::Summary, 64.0, vec![("kind", "grid_state")]);
+        // Obs mà `snapshot()` gắn grid vào label — bị cắt có chủ đích.
+        let snapshot = obs(
+            now,
+            "BTCUSDT",
+            Signal::Summary,
+            106.5,
+            vec![("kind", "snapshot"), ("grid_step", "0.09"), ("cells", "64")],
+        );
+
+        let series = collect_station(&[grid_state, snapshot], &cfg, now);
+
+        let grid: Vec<&Series> = series.iter().filter(|s| s.name == "opsense_grid_cells").collect();
+        assert_eq!(grid.len(), 1, "grid_cells không được exclude: {series:?}");
+        assert_eq!(grid[0].value, 64.0);
+        assert!(
+            series.iter().all(|s| s.name != "opsense_BTCUSDT"),
+            "snapshot phải vẫn bị exclude (không sống bằng cách mở rộng allowlist): {series:?}"
+        );
+        assert!(
+            series.iter().all(|s| !s.labels.iter().any(|(k, _)| k == "grid_step")),
+            "không metric số nào được nhét vào label: {series:?}"
+        );
+    }
+
     #[test]
     fn stale_observation_is_not_refreshed() {
         let now = 1_000_000;

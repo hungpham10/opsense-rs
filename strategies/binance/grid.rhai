@@ -516,6 +516,56 @@ fn perf_metrics(state, symbol, closed_price) {
     out
 }
 
+/// ============================================================================
+/// GRID METRICS — hình học lưới phân tích (nhịp REVIEW)
+/// ============================================================================
+///
+/// Trước đây toàn bộ số này chỉ bị `.to_string()` đổ vào label của obs
+/// `snapshot`, mà `conf/*.toml` lại có `exclude_kinds = ["snapshot", ...]`
+/// ⇒ Grafana không thấy gì về lưới.
+///
+/// Vì sao phát scalar riêng thay vì bỏ `snapshot` khỏi `exclude_kinds`:
+/// `grid_step`/`up_prob`/`down_prob`/`grid_cell` đổi mỗi review ⇒ nếu để ở label
+/// thì mỗi lần đổi sinh một series MỚI trên Grafana Cloud (bill theo series-hour).
+/// Scalar mang `kind = "grid_state"` (không nằm trong `exclude_kinds`) nên mỗi
+/// metric là **một** series cố định.
+///
+/// ⚠ Đây là lưới **phân tích** — `grid_fit(points, v_min, v_max, 8)` trong
+/// `snapshot()`, `max_bit = 8`, KHÔNG có sàn `min_step_frac`. KHÔNG phải lưới
+/// lệnh do `rebuild()` dựng bằng sieve. Nhịp: 1 mẫu / `review_interval_secs`.
+
+/// Biên và bậc của lưới phân tích: số ô, bước một ô (giá), ô đang đứng của giá.
+fn grid_geometry(cells, step_price, cell_now, lo, hi, symbol) {
+    let now = now_secs();
+    let out = [];
+    out += [#{ ts: now, metric_id: "grid_cells", kind: "metric", signal: "summary",
+               value: cells.to_float(), labels: #{ kind: "grid_state" } }];
+    out += [#{ ts: now, metric_id: "grid_step_price", kind: "metric", signal: "summary",
+               value: step_price, labels: #{ kind: "grid_state" } }];
+    out += [#{ ts: now, metric_id: "grid_cell_now", kind: "metric", signal: "summary",
+               value: cell_now.to_float(), labels: #{ kind: "grid_state" } }];
+    out += [#{ ts: now, metric_id: "grid_lo", kind: "metric", signal: "summary",
+               value: lo, labels: #{ kind: "grid_state" } }];
+    out += [#{ ts: now, metric_id: "grid_hi", kind: "metric", signal: "summary",
+               value: hi, labels: #{ kind: "grid_state" } }];
+    out
+}
+
+/// Xác suất chuyển trạng thái trong một bước của lưới.
+/// `stay_prob` cao ⇒ giá đi ngang, lệnh giới hạn khớp đều; `up/down` cao ⇒ đi
+/// một chiều, lệnh giới hạn khó khớp và `grid_open_notional` sẽ đứng.
+fn grid_transition(up_p, down_p, stay_p, symbol) {
+    let now = now_secs();
+    let out = [];
+    out += [#{ ts: now, metric_id: "grid_up_prob", kind: "metric", signal: "summary",
+               value: up_p, labels: #{ kind: "grid_state" } }];
+    out += [#{ ts: now, metric_id: "grid_down_prob", kind: "metric", signal: "summary",
+               value: down_p, labels: #{ kind: "grid_state" } }];
+    out += [#{ ts: now, metric_id: "grid_stay_prob", kind: "metric", signal: "summary",
+               value: stay_p, labels: #{ kind: "grid_state" } }];
+    out
+}
+
 /// Probe xu hướng — metric_id riêng để Grafana có tên sạch (opsense_grid_trend_er).
 /// Bỏ n/er/slope/net/tv khỏi label — số nằm ở value các metric riêng nếu cần.
 fn trend_probe(candles, symbol) {
@@ -1118,6 +1168,11 @@ fn candle_obs(ts, field, value, symbol, resolution) {
 // Nhánh REVIEW: dựng lại lưới phân tích + xác suất chuyển trạng thái, nhịp
 // riêng (`review_interval_secs`). Nhận `series` dựng sẵn — không tự đọc
 // station, vì `process()` đã merge/sort một lần cho cả hai nhánh.
+//
+// Trả về: obs `snapshot` (giá dự đoán + grid ở **label**) + obs `grid_*` scalar
+// (`grid_geometry` / `grid_transition`) — obs `snapshot` bị `exclude_kinds` loại
+// khỏi Prometheus, nên muốn Grafana thấy lưới thì các scalar kia mới là đường
+// sống. Cả hai nhánh return đều phải gồm `geo`.
 fn snapshot(series, symbol) {
     let now = series.now;
     let live = series.live;
@@ -1150,26 +1205,36 @@ fn snapshot(series, symbol) {
 
     let predicted = v_last;
     let g = grid_fit(points, v_min, v_max, 8);
+    // Metric scalar của lưới — xem `grid_geometry`/`grid_transition`.
+    let geo = [];
     if type_of(g) != "()" {
-        labels.grid_step = grid_step(g).to_string();
-        labels.grid_cell = grid_cell(g, v_last).to_string();
-        labels.cells = num_cells(g).to_string();
+        let n_cells = num_cells(g);
+        let step_price = grid_step(g);
+        let cell_now = grid_cell(g, v_last);
+        labels.grid_step = step_price.to_string();
+        labels.grid_cell = cell_now.to_string();
+        labels.cells = n_cells.to_string();
+        geo += grid_geometry(n_cells, step_price, cell_now, v_min, v_max, symbol);
 
         let interval = interval_secs_of(points);
         if interval > 0 {
             let ta = transition_analysis(g, points, interval);
             if type_of(ta) != "()" {
-                labels.up_prob = up_probability(ta).to_string();
-                labels.down_prob = down_probability(ta).to_string();
-                labels.stay_prob = stay_probability(ta).to_string();
+                let up_p = up_probability(ta);
+                let down_p = down_probability(ta);
+                let stay_p = stay_probability(ta);
+                labels.up_prob = up_p.to_string();
+                labels.down_prob = down_p.to_string();
+                labels.stay_prob = stay_p.to_string();
                 labels.method = "grid-transition";
+                geo += grid_transition(up_p, down_p, stay_p, symbol);
                 // Bước giá kỳ vọng theo xu hướng grid (một cell).
-                return [
-                    #{ ts: candles[candles.len() - 1]["t"], metric_id: symbol, kind: "metric",
-                       signal: "summary",
-                       value: v_last + (up_probability(ta) - down_probability(ta)) * grid_step(g),
-                       labels: labels }
-                ];
+                let main = #{ ts: candles[candles.len() - 1]["t"], metric_id: symbol,
+                             kind: "metric", signal: "summary",
+                             value: v_last + (up_p - down_p) * step_price, labels: labels };
+                let out = [main];
+                out += geo;
+                return out;
             }
         }
         if labels.method == "" {
@@ -1180,8 +1245,10 @@ fn snapshot(series, symbol) {
         labels.method = "steady";
     }
 
-    [ #{ ts: candles[candles.len() - 1]["t"], metric_id: symbol, kind: "metric",
-        signal: "summary", value: predicted, labels: labels } ]
+    let out = [ #{ ts: candles[candles.len() - 1]["t"], metric_id: symbol, kind: "metric",
+                  signal: "summary", value: predicted, labels: labels } ];
+    out += geo;
+    out
 }
 
 /// Merge: live candle thắng history cùng bucket, bucket live-only được thêm
