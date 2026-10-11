@@ -30,7 +30,7 @@ use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, Observation, StationKind};
 use opsense_mlib::vector::components::{clock, null};
-use opsense_mlib::vector::runtime::{Component, Event, Fault, Runtime, Severity, registry::build as registry_build};
+use opsense_mlib::vector::runtime::{Component, Event, Fault, Runtime, Severity, build as registry_build};
 use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
 
@@ -336,7 +336,7 @@ fn build_component(value: &serde_json::Value) -> Result<Arc<dyn Component>, Erro
 /// Lỗi rõ ràng hơn typetag mặc định: nói type lạ + liệt kê type đã biết.
 fn component_error(value: &serde_json::Value, e: std::io::Error) -> std::io::Error {
     let type_name = value.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
-    let known: Vec<&str> = opsense_mlib::vector::runtime::registry::types();
+    let known: Vec<&str> = opsense_mlib::vector::runtime::types();
     let hint = if known.is_empty() {
         "không có type động nào".into()
     } else {

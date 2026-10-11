@@ -6,9 +6,6 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(test)]
-use serde_json::Value;
-
 use super::{Component, IoError as Error};
 
 /// Dựng component từ JSON config. `type_name` là key (vd `"xt_pnl"`).
@@ -75,12 +72,11 @@ pub fn types() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vector::runtime::{Component, Error, Message, Outbound};
-    use std::sync::Arc;
-    use serde_json::Value;
-
+    use crate::vector::runtime::{Component, Message, Outbound};
+    compile_error!("TEST MODULE COMPILED");  // This should cause a compile error if the module is compiled
+    
     // Dummy component để test registry
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
     struct DummyComponent {
         id: String,
         value: i32,
@@ -100,6 +96,20 @@ mod tests {
         }
     }
 
+    // Required by typetag for Component trait
+    impl DummyComponent {
+        fn typetag_name() -> &'static str { "test_dummy" }
+        
+        fn typetag_deserialize<'de, D>(_deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::de::Deserializer<'de>,
+        {
+            // For test purposes, we don't actually deserialize from JSON
+            // The registry builds components via factory functions, not deserialization
+            Err(serde::de::Error::custom("DummyComponent should not be deserialized via typetag in tests"))
+        }
+    }
+
     #[async_trait::async_trait]
     impl Component for DummyComponent {
         async fn run(
@@ -107,10 +117,10 @@ mod tests {
             _id: usize,
             _rx: &mut tokio::sync::mpsc::Receiver<Message>,
             _tx: Outbound,
-        ) -> Result<(), Error> { Ok(()) }
+        ) -> Result<(), std::io::Error> { Ok(()) }
     }
 
-    fn dummy_factory(_name: &str, cfg: serde_json::Value) -> Result<Box<dyn Component>, Error> {
+    fn dummy_factory(_name: &str, cfg: serde_json::Value) -> Result<Box<dyn Component>, std::io::Error> {
         let value = cfg.get("value").and_then(|v| v.as_i64()).unwrap_or(42) as i32;
         Ok(Box::new(DummyComponent { id: "test".into(), value }))
     }
@@ -135,7 +145,7 @@ mod tests {
     #[test]
     fn build_error_is_scoped() {
         let mut reg = ComponentRegistry::default();
-        reg.register("fail_type", |_name, _cfg| Err(super::Error::Internal("boom".into())));
+        reg.register("fail_type", |_name, _cfg| Err(std::io::Error::new(std::io::ErrorKind::Other, "boom")));
         let result = reg.build("fail_type", serde_json::json!({}));
         assert!(result.is_some());
         assert!(result.unwrap().is_err());
