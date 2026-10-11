@@ -191,7 +191,7 @@ async fn query_station_filters_server_side() {
     assert!(
         out.observations
             .iter()
-            .all(|o| o.labels.get("kind").is_some() || true),
+            .all(|o| o.labels.contains_key("kind") || true),
         "sanity"
     );
     assert!(

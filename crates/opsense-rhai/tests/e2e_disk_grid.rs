@@ -107,8 +107,10 @@ async fn e2e_disk_grid() {
     tokio::time::sleep(Duration::from_millis(5000)).await;
 
     // Verify HTTP request was made
-    let reqs = requests.lock().unwrap();
-    assert!(!reqs.is_empty(), "no HTTP request made");
+    {
+        let reqs = requests.lock().unwrap();
+        assert!(!reqs.is_empty(), "no HTTP request made");
+    }
 
     // Verify station has disk_grid_band observations
     let station = ctx
@@ -122,6 +124,4 @@ async fn e2e_disk_grid() {
     if !has_band {
         eprintln!("WARNING: no disk_grid_band observations found; got: {:?}", obs.iter().map(|o| &o.metric_id).collect::<Vec<_>>());
     }
-    // Just verify the test runs without panic - main goal is pipeline compiles and runs
-    assert!(true);
 }

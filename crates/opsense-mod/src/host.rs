@@ -1,7 +1,5 @@
 //! Host services available to modules via the FFI `call` function.
 
-use std::future::Future;
-use std::pin::Pin;
 use serde_json::Value;
 
 use super::BoxFut;
@@ -81,7 +79,11 @@ impl HostOp {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse an op name back from its wire string (inverse of `as_str`).
+    ///
+    /// Deliberately not named `from_str` — it returns `Option`, not
+    /// `Result<_, _>`, so it does not implement `std::str::FromStr`.
+    pub fn from_name(s: &str) -> Option<Self> {
         match s {
             "status" => Some(HostOp::Status),
             "components" => Some(HostOp::Components),
@@ -166,6 +168,7 @@ impl dyn HostServices + '_ {
         HostCall::new(self, HostOp::AttrRemove).arg("name", name)?.execute().await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn query_station(
         &self,
         node: &str,
@@ -189,6 +192,7 @@ impl dyn HostServices + '_ {
         call.execute().await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn orders(
         &self,
         node: &str,
@@ -225,8 +229,8 @@ mod tests {
             HostOp::Orders, HostOp::ClearStation, HostOp::ClearAllStations,
             HostOp::ConfigRead, HostOp::AuditWrite, HostOp::StationQuery,
         ] {
-            assert_eq!(HostOp::from_str(op.as_str()), Some(op));
+            assert_eq!(HostOp::from_name(op.as_str()), Some(op));
         }
-        assert_eq!(HostOp::from_str("unknown"), None);
+        assert_eq!(HostOp::from_name("unknown"), None);
     }
 }

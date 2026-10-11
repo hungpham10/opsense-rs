@@ -13,10 +13,8 @@
 //! - JSON strings are UTF-8 encoded, NUL-terminated C strings.
 
 use std::ffi::c_char;
-use std::pin::Pin;
-use std::future::Future;
 
-use super::{Manifest, HttpRequest, HttpResponse, ModuleError, HostServices, ABI_VERSION, OpsenseModule};
+use super::{HttpRequest, ModuleError, ABI_VERSION, OpsenseModule};
 
 /// Opaque module state pointer for FFI (C-ABI compatible).
 /// We use `*mut c_void` for FFI compatibility, but wrap it in a Send/Sync type on the host side.
@@ -96,14 +94,6 @@ pub struct ModuleV1 {
 /// - The returned `ModuleV1` must have `abi_version == ABI_VERSION`.
 pub type ModuleInitFn = unsafe extern "C" fn(host: *const HostV1) -> *mut ModuleV1;
 
-/// Helper for FFI: convert `ModuleHandle` to `ModuleState` for backward compatibility.
-/// Since `ModuleHandle` is `#[repr(transparent)]` over `ModuleState`, they have the same memory layout.
-impl ModuleHandle {
-    pub fn to_state(self) -> ModuleState {
-        self.0
-    }
-}
-
 /// Internal wrapper to hold the module with proper lifetime and Send/Sync.
 /// This is a fat pointer to `dyn OpsenseModule`, which implements Send/Sync.
 pub struct ModuleWrapper {
@@ -111,19 +101,44 @@ pub struct ModuleWrapper {
 }
 
 /// A Send/Sync wrapper around the raw module state pointer.
-/// This allows the host to safely use the state across async boundaries.
+///
+/// `#[repr(transparent)]` over `*mut c_void` so the struct is FFI-safe: it has
+/// the same layout as a raw pointer, and the vtable fields in [`ModuleV1`]
+/// can take it by value without tripping `improper_ctypes_definitions`.
+///
+/// # Safety
+///
+/// The pointer must either be null or point to a live [`ModuleWrapper`]
+/// allocation that outlives every use. Only `ModuleExports::into_vtable`
+/// hands these pointers out, and it keeps the `Box` alive for the process
+/// lifetime.
+#[repr(transparent)]
 #[derive(Copy, Clone)]
 pub struct ModuleHandle(pub ModuleState);
 
+// SAFETY: the pointer is only ever dereferenced inside the same crate's
+// `ffi_*` shims, and `ModuleWrapper` holds a `Box<dyn OpsenseModule>` which is
+// itself `Send + Sync`. Both guarantees are established at `into_vtable`.
 unsafe impl Send for ModuleHandle {}
+// SAFETY: see `Send` above — the pointee is immutable after construction.
 unsafe impl Sync for ModuleHandle {}
 
 impl ModuleHandle {
+    /// Wrap a raw module-state pointer.
     pub fn new(state: ModuleState) -> Self {
         Self(state)
     }
 
+    /// Recover the raw pointer.
     pub fn as_ptr(&self) -> ModuleState {
+        self.0
+    }
+
+    /// Helper for FFI: convert `ModuleHandle` to `ModuleState`.
+    ///
+    /// `ModuleHandle` is `#[repr(transparent)]` over `ModuleState`, so the two
+    /// have identical memory layout.
+    pub fn to_state(self) -> ModuleState {
         self.0
     }
 }
@@ -131,13 +146,22 @@ impl ModuleHandle {
 /// Helper: convert Rust string to C string (caller must free with `free`).
 fn to_c_string(s: String) -> *mut c_char {
     use std::ffi::CString;
-    CString::new(s).unwrap_or_else(|_| CString::new("").unwrap()).into_raw()
+    CString::new(s)
+        .unwrap_or_else(|_| CString::new("").unwrap())
+        .into_raw()
 }
 
 /// Helper: convert C string to owned Rust String.
+///
+/// # Safety
+///
+/// `ptr` must be null or point to a valid NUL-terminated C string that stays
+/// alive for the duration of the call.
 unsafe fn from_c_str(ptr: *const c_char) -> String {
-    if ptr.is_null() { return String::new(); }
-    std::ffi::CStr::from_ptr(ptr).to_str().unwrap_or("").to_string()
+    if ptr.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str().unwrap_or("").to_string()
 }
 
 /// Helper: call a host operation from plugin Rust code.
@@ -148,32 +172,49 @@ unsafe fn from_c_str(ptr: *const c_char) -> String {
 /// let res_json = host_call(host_vtable, "status", &req)?;
 /// let response: Value = serde_json::from_str(&res_json)?;
 /// ```
-pub unsafe fn host_call(host: &HostV1, op: &str, req: &serde_json::Value) -> Result<String, ModuleError> {
+///
+/// # Safety
+///
+/// `host` must be a live [`HostV1`] whose `call`/`free` callbacks are valid
+/// for the whole call.
+pub unsafe fn host_call(
+    host: &HostV1,
+    op: &str,
+    req: &serde_json::Value,
+) -> Result<String, ModuleError> {
     let op_c = to_c_string(op.into());
-    let req_c = to_c_string(serde_json::to_string(req).map_err(|e| ModuleError::Json(e.to_string()))?);
+    let req_c = to_c_string(
+        serde_json::to_string(req).map_err(|e| ModuleError::Json(e.to_string()))?,
+    );
 
-    let res_ptr = (host.call)(op_c, req_c);
-    (host.free)(op_c);
-    (host.free)(req_c);
+    let res_ptr = unsafe { (host.call)(op_c, req_c) };
+    unsafe { (host.free)(op_c) };
+    unsafe { (host.free)(req_c) };
 
     if res_ptr.is_null() {
         return Err(ModuleError::HostCallFailed("null response".into()));
     }
 
-    let res_str = unsafe { std::ffi::CStr::from_ptr(res_ptr).to_str()
+    let res_str = unsafe { std::ffi::CStr::from_ptr(res_ptr) }
+        .to_str()
         .map_err(|e| ModuleError::Internal(format!("UTF-8 error: {e}")))?
-        .to_string() };
-    (host.free)(res_ptr);
+        .to_string();
+    unsafe { (host.free)(res_ptr) };
     Ok(res_str)
 }
 
 /// Helper: log from plugin.
+///
+/// # Safety
+///
+/// `host` must be a live [`HostV1`] whose `log`/`free` callbacks are valid
+/// for the whole call.
 pub unsafe fn host_log(host: &HostV1, level: u32, target: &str, msg: &str) {
     let t = to_c_string(target.into());
     let m = to_c_string(msg.into());
-    (host.log)(level, t, m);
-    (host.free)(t);
-    (host.free)(m);
+    unsafe { (host.log)(level, t, m) };
+    unsafe { (host.free)(t) };
+    unsafe { (host.free)(m) };
 }
 
 /// Wrapper trait implemented by plugins to bridge from the C ABI to Rust.
@@ -187,7 +228,9 @@ pub trait ModuleExports: super::OpsenseModule {
         Self: Sized,
     {
         // Box the module and get a raw pointer to it
-        let wrapper = Box::new(ModuleWrapper { module: Box::new(self) });
+        let wrapper = Box::new(ModuleWrapper {
+            module: Box::new(self),
+        });
         let state = ModuleHandle(Box::into_raw(wrapper) as ModuleState);
         Box::new(ModuleV1 {
             abi_version: ABI_VERSION,
@@ -198,19 +241,28 @@ pub trait ModuleExports: super::OpsenseModule {
         })
     }
 
+    /// # Safety
+    ///
+    /// `state` must come from [`ModuleExports::into_vtable`] on this same
+    /// module type (see the `ModuleHandle` safety contract).
     unsafe extern "C" fn ffi_manifest(state: ModuleHandle) -> *mut c_char {
-        let wrapper = &*(state.0 as *const ModuleWrapper);
+        let wrapper = unsafe { &*(state.0 as *const ModuleWrapper) };
         let manifest = wrapper.module.manifest();
         let json = serde_json::to_string(&manifest).unwrap_or_else(|_| "{}".into());
         to_c_string(json)
     }
 
+    /// # Safety
+    ///
+    /// `state` must come from [`ModuleExports::into_vtable`] on this same
+    /// module type, and `route_id`/`req_json` must be null or valid
+    /// NUL-terminated C strings.
     unsafe extern "C" fn ffi_handle(
         state: ModuleHandle,
         route_id: *const c_char,
         req_json: *const c_char,
     ) -> *mut c_char {
-        let wrapper = &*(state.0 as *const ModuleWrapper);
+        let wrapper = unsafe { &*(state.0 as *const ModuleWrapper) };
         let route_id = unsafe { from_c_str(route_id) };
         let req_json = unsafe { from_c_str(req_json) };
 
@@ -248,11 +300,13 @@ pub trait ModuleExports: super::OpsenseModule {
                 }),
                 Err(e) => serde_json::to_string(&super::HttpResponse::from(
                     ModuleError::Internal(format!("panic: {e:?}"))
-                )).unwrap(),
+                ))
+                .unwrap(),
             }
         } else {
             // Tool call: args are in req.body as JSON
-            let args: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+            let args: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
             let mut fut = wrapper.module.tool(route_id, args);
             let rt = tokio::runtime::Handle::try_current()
                 .ok()
@@ -280,9 +334,13 @@ pub trait ModuleExports: super::OpsenseModule {
         to_c_string(result_json)
     }
 
+    /// # Safety
+    ///
+    /// `s` must be null or a pointer previously returned by `ffi_manifest` /
+    /// `ffi_handle` that has not been freed yet.
     unsafe extern "C" fn ffi_free(s: *mut c_char) {
         if !s.is_null() {
-            unsafe { drop(std::ffi::CString::from_raw(s)); }
+            drop(unsafe { std::ffi::CString::from_raw(s) });
         }
     }
 }
@@ -303,7 +361,7 @@ mod tests {
             assert_eq!(back, s);
             unsafe extern "C" fn free_fn(s: *mut c_char) {
                 if !s.is_null() {
-                    drop(std::ffi::CString::from_raw(s));
+                    drop(unsafe { std::ffi::CString::from_raw(s) });
                 }
             }
             free_fn(c);

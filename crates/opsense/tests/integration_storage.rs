@@ -216,7 +216,7 @@ async fn query_timeseries(
 ) -> Value {
     let resp = client
         .post(format!("{}/api/repl/graphql", serve_url()))
-        .bearer_auth(&id_token)
+        .bearer_auth(id_token)
         .json(&serde_json::json!({
             "query": "query QueryTimeseries($node: String!, $fromTs: Int!, $toTs: Int!) { queryTimeseries(node: $node, fromTs: $fromTs, toTs: $toTs) { observations { ts value metricId signal } truncated scanned } }",
             "variables": {

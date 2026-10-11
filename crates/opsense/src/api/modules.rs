@@ -11,20 +11,26 @@ use axum::{
 };
 
 use opsense_mod::{
-    HttpMethod, HttpRequest, HttpResponse, OpsenseModule,
+    HttpMethod, HttpRequest, HttpResponse, Manifest, OpsenseModule,
 };
 
 #[cfg(feature = "dynamic-modules")]
-use opsense_mod::{
-    HostServices, Manifest, ModuleError, ModuleHandle, ModuleV1,
-};
+use opsense_mod::ModuleError;
+
+#[cfg(not(feature = "dynamic-modules"))]
+#[allow(unused_imports)]
+use opsense_mod::ModuleError;
+
+#[cfg(feature = "dynamic-modules")]
+use opsense_mod::{HostServices, ModuleV1};
 
 use crate::api::AppState;
 
 #[cfg(feature = "dynamic-modules")]
 use {
-    crate::modules_config::{ModuleConfig, ModulesConfig},
-    libloading::Library,
+    crate::modules_config::ModulesConfig,
+    opsense_mod::ffi::ModuleInitFn,
+    std::path::Path,
 };
 
 /// Registry of loaded API modules.
@@ -147,6 +153,26 @@ impl Default for ApiModuleRegistry {
     fn default() -> Self { Self::new() }
 }
 
+/// Tra `manifest.routes[].id` cho `(method, path)`.
+///
+/// `route_id` **phải** là id khai báo trong manifest: module tự dispatch dựa
+/// trên id này (`ReplApiModule` chỉ nhận `"graphql"`, trả `RouteNotFound` cho
+/// bất cứ id nào khác). Gửi tên bất kỳ — hay để trống — biến mọi request thành
+/// 404 trong im lặng.
+///
+/// Ưu tiên khớp cả method lẫn path; nếu không có thì chấp nhận chỉ khớp path
+/// (một số module dùng `any`). Không khớp gì thì trả chính `path`, để lỗi
+/// `RouteNotFound` mang đúng tên route thay vì chuỗi rỗng.
+fn resolve_route_id(manifest: &Manifest, method: HttpMethod, path: &str) -> String {
+    manifest
+        .routes
+        .iter()
+        .find(|r| r.path == path && r.method == method)
+        .or_else(|| manifest.routes.iter().find(|r| r.path == path))
+        .map(|r| r.id.clone())
+        .unwrap_or_else(|| path.to_string())
+}
+
 /// Handler for module routes — converts axum request to HttpRequest, dispatches,
 /// converts response back.
 async fn module_route_handler(
@@ -174,7 +200,7 @@ async fn module_route_handler(
         .to_vec();
 
     let http_req = HttpRequest {
-        route_id: "handler".to_string(), // will be matched inside module
+        route_id: resolve_route_id(&manifest, method, &path),
         method,
         path,
         query,
@@ -207,33 +233,39 @@ async fn module_route_handler(
 #[cfg(feature = "dynamic-modules")]
 struct DynamicModuleWrapper {
     vtable: Box<ModuleV1>,
-    handle: ModuleHandle,
 }
 
 #[cfg(feature = "dynamic-modules")]
 impl OpsenseModule for DynamicModuleWrapper {
     fn manifest(&self) -> Manifest {
-        let json = unsafe { std::ffi::CStr::from_ptr((self.vtable.manifest)(self.handle)) }
+        let json = unsafe { std::ffi::CStr::from_ptr((self.vtable.manifest)(self.vtable.state)) }
             .to_str()
             .unwrap_or("{}");
         serde_json::from_str(json).unwrap_or_default()
     }
 
     fn route(&self, req: HttpRequest) -> opsense_mod::BoxFut<'static, Result<HttpResponse, ModuleError>> {
-        let route_id = req.route_id.clone();
         let req_json = serde_json::to_string(&req).unwrap_or_default();
-        let handle = self.handle; // Copy the handle (it's Copy)
+        // `*const ModuleV1` khong phai `Send`; mang dia chi dang `usize` de future
+        // `BoxFut` (yeu cau `Send`) van hop le. Vtable song suot doi plugin.
+        let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
+        let handle = self.vtable.state;
 
         Box::pin(async move {
-            let vtable = handle.0 as *const ModuleV1;
-            let resp_ptr = unsafe { ((*vtable).handle)(handle, route_id.as_ptr() as *const _, req_json.as_ptr() as *const _) };
+            let vtable = vtable as *const ModuleV1;
+            let route_id = std::ffi::CString::new(req.route_id.clone()).unwrap_or_default();
+            let req_c = std::ffi::CString::new(req_json).unwrap_or_default();
+            let resp_ptr = unsafe {
+                ((*vtable).handle)(handle, route_id.as_ptr(), req_c.as_ptr())
+            };
             if resp_ptr.is_null() {
                 return Err(ModuleError::Internal("null response from plugin".into()));
             }
             let resp_json = unsafe { std::ffi::CStr::from_ptr(resp_ptr).to_str().unwrap_or("{}") };
-            let resp: Result<HttpResponse, ModuleError> = serde_json::from_str(resp_json).unwrap_or_else(|e| {
-                Err(ModuleError::Internal(format!("response parse: {e}")))
-            });
+            let resp: Result<HttpResponse, ModuleError> =
+                serde_json::from_str(resp_json).map_err(|e| {
+                    ModuleError::Internal(format!("response parse: {e}"))
+                });
             unsafe { ((*vtable).free)(resp_ptr) };
             resp
         })
@@ -241,11 +273,15 @@ impl OpsenseModule for DynamicModuleWrapper {
 
     fn tool(&self, name: String, args: serde_json::Value) -> opsense_mod::BoxFut<'static, Result<String, ModuleError>> {
         let req_json = serde_json::to_string(&args).unwrap_or_default();
-        let handle = self.handle; // Copy the handle
+        let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
+        let handle = self.vtable.state;
 
         Box::pin(async move {
-            let vtable = handle.0 as *const ModuleV1;
-            let resp_ptr = unsafe { ((*vtable).handle)(handle, name.as_ptr() as *const _, req_json.as_ptr() as *const _) };
+            let vtable = vtable as *const ModuleV1;
+            let name_c = std::ffi::CString::new(name).unwrap_or_default();
+            let args_c = std::ffi::CString::new(req_json).unwrap_or_default();
+            let resp_ptr =
+                unsafe { ((*vtable).handle)(handle, name_c.as_ptr(), args_c.as_ptr()) };
             if resp_ptr.is_null() {
                 return Err(ModuleError::Internal("null response from plugin".into()));
             }
@@ -263,16 +299,9 @@ impl OpsenseModule for DynamicModuleWrapper {
     }
 }
 
-#[cfg(feature = "dynamic-modules")]
-impl Drop for DynamicModuleWrapper {
-    fn drop(&mut self) {
-        // The module state is a pointer to ModuleWrapper
-        // We need to drop it properly
-        unsafe {
-            let _ = Box::from_raw(self.vtable.state.0 as *mut opsense_mod::ffi::ModuleWrapper);
-        }
-    }
-}
+// KHÔNG implement `Drop`: cả `ModuleV1` lẫn state bên trong đều do plugin cấp
+// phát (`Box::new` trong `into_vtable`). Host chỉ mượn con trỏ; tự `Box::from_raw`
+// sẽ free nhầm vùng nhớ của plugin.
 
 /// Global storage for host services (used by FFI callbacks).
 #[cfg(feature = "dynamic-modules")]
@@ -371,5 +400,49 @@ mod tests {
     fn registry_basic() {
         let reg = ApiModuleRegistry::new();
         assert!(reg.modules.is_empty());
+    }
+
+    /// Manifest của `ReplApiModule` — route `graphql` dưới prefix `/api/repl`.
+    fn repl_manifest() -> Manifest {
+        Manifest {
+            id: "repl".into(),
+            version: "0".into(),
+            builtin: true,
+            prefix: "/api/repl".into(),
+            routes: vec![opsense_mod::RouteSpec {
+                id: "graphql".into(),
+                method: HttpMethod::Post,
+                path: "/graphql".into(),
+            }],
+            tools: vec![],
+        }
+    }
+
+    /// Hồi quy cho bug đã làm CI đỏ: `route_id` từng được hardcode `"handler"`,
+    /// `ReplApiModule` trả `RouteNotFound` ⇒ **mọi** endpoint `/api/repl/*` 404.
+    #[test]
+    fn route_id_matches_manifest_id() {
+        let m = repl_manifest();
+        assert_eq!(
+            resolve_route_id(&m, HttpMethod::Post, "/graphql"),
+            "graphql"
+        );
+    }
+
+    /// Path lạ thì trả chính path để lỗi `RouteNotFound` nói đúng tên route.
+    #[test]
+    fn route_id_falls_back_to_path() {
+        let m = repl_manifest();
+        assert_eq!(resolve_route_id(&m, HttpMethod::Post, "/khong-co"), "/khong-co");
+    }
+
+    /// Method lệch vẫn khớp theo path — module dùng `any` cần điều này.
+    #[test]
+    fn route_id_matches_path_even_when_method_differs() {
+        let m = repl_manifest();
+        assert_eq!(
+            resolve_route_id(&m, HttpMethod::Get, "/graphql"),
+            "graphql"
+        );
     }
 }

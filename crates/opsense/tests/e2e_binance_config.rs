@@ -9,8 +9,8 @@
 //!      trigger/kind/signal/labels, params của script).
 //!   2. `full_pipeline_ticks_and_snapshot` — runtime thật với mock HTTP klines
 //!      + mock WebSocket aggTrade (axum `ws`): khẳng định history station có
-//!      OHLCV từ klines, station `grid` có candle từ tick VÀ snapshot grid
-//!      (`labels.kind="snapshot"`, `grid_step > 0`), sink terminal nhận data.
+//!        OHLCV từ klines, station `grid` có candle từ tick VÀ snapshot grid
+//!        (`labels.kind="snapshot"`, `grid_step > 0`), sink terminal nhận data.
 //!
 //! **Test này ép `[storage] backend = "memory"`** trước khi dựng runtime. Config
 //! thật khai `redis` (xem `strategies/binance/config.toml`), nhưng job unit test
@@ -379,7 +379,7 @@ async fn full_pipeline_ticks_and_snapshot() {
 
     let tick_candles: Vec<&Observation> = grid_obs
         .iter()
-        .filter(|o| o.labels.get("field").is_some())
+        .filter(|o| o.labels.contains_key("field"))
         .collect();
     assert!(
         tick_candles.len() >= 5,

@@ -1783,7 +1783,7 @@ mod value_semantics {
 
         let mut closed = sample_order();
         closed.pnl_pct = Some(0.002_322_914_169_576_389_5);
-        closed.exit_price = Some(83_699.4375);
+        closed.exit_price = Some(83_699.437_5);
         let closed_obs = closed_observation(1_790_662_140, "o1", &closed, "BTCUSDT");
 
         assert_eq!(
@@ -1803,12 +1803,12 @@ mod value_semantics {
         // Parse lại bản ghi đóng phải ra đúng `entry_price` và `exit_price`.
         let mut closed = sample_order();
         closed.pnl_pct = Some(0.002_322_914_169_576_389_5);
-        closed.exit_price = Some(83_699.4375);
+        closed.exit_price = Some(83_699.437_5);
         let obs = closed_observation(1_790_662_140, "o1", &closed, "BTCUSDT");
 
         let back = order_of(&obs).expect("bản ghi đóng phải parse được");
         assert_eq!(back.entry_price, 83_472.15, "entry phải là giá vào, không phải pnl");
-        assert_eq!(back.exit_price, Some(83_699.4375), "exit phải đọc được từ label");
+        assert_eq!(back.exit_price, Some(83_699.437_5), "exit phải đọc được từ label");
         assert_eq!(back.pnl_pct, Some(0.002_322_914_169_576_389_5));
     }
 }

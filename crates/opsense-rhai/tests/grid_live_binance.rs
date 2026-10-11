@@ -211,6 +211,7 @@ async fn fetch_klines() -> (String, Vec<CandleStick>) {
     );
 }
 
+#[allow(clippy::type_complexity)]
 fn slice_fetch(
     data: Vec<CandleStick>,
 ) -> impl FnMut(u64, u64) -> std::pin::Pin<Box<dyn std::future::Future<

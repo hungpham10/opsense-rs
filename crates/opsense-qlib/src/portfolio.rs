@@ -2159,6 +2159,7 @@ mod tests {
     }
 
     /// Notify thu event vào vector (boxed để coerce được sang `NotifyFn`).
+    #[allow(clippy::type_complexity)]
     fn notify_box<'a>(
         sink: &'a mut Vec<OrderEvent>,
     ) -> Box<

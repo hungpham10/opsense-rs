@@ -1216,7 +1216,7 @@ mod tests {
             "params": { "fee_rate": 0.0002, "sl_pct": 0.0025 }
         });
         // 0.0002 × 2 = 0.0004 — KHÔNG phải mặc định tình cờ
-        assert_eq!(fee_roundtrip(&[grid.clone()]), 0.0004);
+        assert_eq!(fee_roundtrip(std::slice::from_ref(&grid)), 0.0004);
 
         // fee_rate khác phải thấy đổi, không được đứng ở mặc định.
         let other = serde_json::json!({

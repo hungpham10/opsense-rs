@@ -81,7 +81,9 @@ pub struct HttpResponse {
 /// HTTP methods supported by module routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
+#[derive(Default)]
 pub enum HttpMethod {
+    #[default]
     Get,
     Post,
     Put,
@@ -117,9 +119,6 @@ impl HttpMethod {
     }
 }
 
-impl Default for HttpMethod {
-    fn default() -> Self { HttpMethod::Get }
-}
 
 /// Helper: create a successful JSON response.
 pub fn json_response<T: serde::Serialize>(status: u16, value: &T) -> Result<HttpResponse, ModuleError> {

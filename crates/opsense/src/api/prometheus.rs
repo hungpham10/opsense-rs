@@ -487,8 +487,7 @@ mod tests {
     #[test]
     fn signal_filter_allowlist_respected() {
         let now = 1_000_000;
-        let mut cfg = StationTarget::default();
-        cfg.signals = vec!["raw".into()]; // chỉ raw
+        let cfg = StationTarget { signals: vec!["raw".into()], ..Default::default() }; // chỉ raw
         let obs = vec![
             obs(1_000_000, "test", Signal::Raw, 1.0, vec![]),
             obs(1_000_000, "test", Signal::Summary, 2.0, vec![]),

@@ -91,9 +91,11 @@ fn candles() -> Vec<CandleStick> {
         .collect()
 }
 
+#[allow(clippy::type_complexity)]
 fn slice_fetch(
     data: Vec<CandleStick>,
-) -> impl FnMut(
+)
+    -> impl FnMut(
     u64,
     u64,
 ) -> std::pin::Pin<

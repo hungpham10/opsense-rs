@@ -125,7 +125,9 @@ pub async fn routes(app_state: AppState) -> Result<Router, Error> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
     let modules_cfg = ModulesConfig::load(&config_dir).unwrap_or_default();
-let _modules_cfg = modules_cfg; // Suppress unused warning when dynamic-modules feature is disabled
+    // `dynamic-modules` tat -> `modules_cfg` khong ai dung.
+    #[cfg(not(feature = "dynamic-modules"))]
+    let _ = &modules_cfg;
 
     // Build module registry
     let mut registry = ApiModuleRegistry::new();
@@ -144,8 +146,10 @@ let _modules_cfg = modules_cfg; // Suppress unused warning when dynamic-modules 
     #[cfg(feature = "dynamic-modules")]
     {
         // Host services for dynamic modules
-        let host_services: Arc<dyn opsense_mod::HostServices> = Arc::new(serve_host::ServeHostServices { state: app_state.clone() });
-        registry.load_dynamic(&config_dir, &modules_cfg, host_services)?;
+        let host_services: Arc<dyn opsense_mod::HostServices> = Arc::new(crate::serve_host::ServeHostServices { state: app_state.clone() });
+        registry
+            .load_dynamic(&config_dir, &modules_cfg, host_services)
+            .map_err(|e| Error::other(e.to_string()))?;
     }
 
     // Build router from registry
