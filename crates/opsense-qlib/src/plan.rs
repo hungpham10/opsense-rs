@@ -179,8 +179,7 @@ impl GridPlan {
     pub fn to_grids(plans: &[GridPlan], prev: &[TradingGrid]) -> Vec<TradingGrid> {
         plans
             .iter()
-            .map(|p| p.to_grid(Some(prev)))
-            .filter_map(|g| g)
+            .filter_map(|p| p.to_grid(Some(prev)))
             .collect()
     }
 }

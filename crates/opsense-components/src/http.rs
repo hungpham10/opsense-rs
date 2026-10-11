@@ -757,7 +757,7 @@ impl_http_origin!(
                         .event
                         .send(Event::Fault((
                             id,
-                            Fault::new(Severity::Transient, "http_origin", format!("{e}"))
+                            Fault::new(Severity::Transient, "http_origin", e.to_string())
                                 .recovered(format!("thử lại ở nhịp sau {interval}s")),
                         )))
                         .await;
@@ -840,7 +840,7 @@ impl_http_source!(
                         .event
                         .send(Event::Fault((
                             id,
-                            Fault::new(Severity::Transient, "http", format!("{e}"))
+                            Fault::new(Severity::Transient, "http", e.to_string())
                                 .recovered("thử lại ở message sau"),
                         )))
                         .await;

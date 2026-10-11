@@ -212,6 +212,30 @@ enum Commands {
         config: Option<PathBuf>,
     },
 
+    /// Encrypt/decrypt helpers cho `sys_token_map`.
+    ///
+    /// Sinh blob bytea định dạng Postgres để paste thẳng vào file SQL seed,
+    /// hoặc decrypt blob có sẵn để verify seed đã paste đúng.
+    ///
+    /// `MASTER_KEY` phải đúng 32 byte — lấy từ env. Blob sinh ra KHÁC nhau
+    /// mỗi lần gọi (nonce ngẫu nhiên), nên đừng so blob với bản cũ: so bằng
+    /// `decrypt` ngược lại xem có ra đúng plaintext.
+    ///
+    /// Ví dụ sinh seed cho một deploy mới (Render, prod, …):
+    ///   MASTER_KEY=<32 byte> opsense token encrypt "render-service-placeholder-token!!"
+    ///   → \x6247bda5…   (paste vào sql/postgres/<env>/50-init-tenant.sql)
+    ///
+    /// Verify seed đã paste đúng:
+    ///   MASTER_KEY=<32 byte> opsense token decrypt "\x6247bda5…"
+    ///   → render-service-placeholder-token!!
+    Token {
+        /// `encrypt` | `decrypt`.
+        action: String,
+        /// Plaintext (khi `encrypt`) hoặc blob `\xHEX` (khi `decrypt`);
+        /// hex trần không có `\x` cũng nhận.
+        payload: String,
+    },
+
     /// Run the opsense kernel runner: a standalone execution worker exposing
     /// the `KernelRunner` gRPC service, spawning one kernel process per
     /// session (echo / python / julia).
@@ -370,7 +394,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     }
                 }
-                Some(Commands::Repl { endpoint, runner }) => {                    if let Err(e) = opsense::repl::run(endpoint, runner).await {
+                Some(Commands::Repl { endpoint, runner }) => {
+                    if let Err(e) = opsense::repl::run(endpoint, runner).await {
                         eprintln!("repl error: {e}");
                         std::process::exit(1);
                     }
@@ -381,6 +406,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     } else {
                         println!("config validation passed");
+                    }
+                }
+                Some(Commands::Token { action, payload }) => {
+                    let master_key = std::env::var("MASTER_KEY").unwrap_or_default();
+                    if let Err(e) = opsense::token::run(&master_key, &action, &payload).await {
+                        eprintln!("token error: {e}");
+                        std::process::exit(1);
                     }
                 }
                 Some(Commands::Runner {

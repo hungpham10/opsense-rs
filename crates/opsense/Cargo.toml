@@ -56,6 +56,10 @@ serde_json = { workspace = true }
 
 # Admin / auth helpers
 chrono = { version = "0.4", features = ["serde"] }
+# `opsense token` — hex encode/decode của blob bytea cho `sys_token_map`.
+# 0.4.3 đã có sẵn trong Cargo.lock (qua dependency khác), nên thêm vào đây
+# không đổi version lock.
+hex = "0.4"
 aws-sdk-s3 = "1.122.0"
 # Raw SQL (OAuth token revocation) against the resolver's AnyPool.
 sqlx = { workspace = true }
@@ -69,6 +73,7 @@ sentry = { workspace = true }
 backtrace = { workspace = true }
 libc = { workspace = true }
 opsense-model = { path = "../opsense-model" }
+opsense-mod = { path = "../opsense-mod" }
 # `parquet` + `sqlite` storage backends: strategy configs in
 # strategies/<name>/config.toml use these, so the serve/runner binaries must
 # link them or stations fail to open (`storage backend 'parquet' … requires
@@ -103,15 +108,25 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 
-# REPL (`opsense repl` subcommand)
-reedline = { workspace = true }
-comfy-table = { workspace = true }
+# REPL (`opsense repl` subcommand) — optional, gated by `repl` feature
+reedline = { workspace = true, optional = true }
+comfy-table = { workspace = true, optional = true }
 # Kernel `:export` path: DataFrame → .parquet / .csv
-arrow-ipc = { workspace = true }
-arrow-csv = { workspace = true }
-parquet = { workspace = true }
+arrow-ipc = { workspace = true, optional = true }
+arrow-csv = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+
+# Dynamic module loading (dlopen) — optional, gated by `dynamic-modules` feature
+libloading = { version = "0.8", optional = true }
+toml = { version = "0.8" }
+form_urlencoded = { version = "1.2" }
 
 [features]
+default = ["repl"]
+# REPL + API repl + MCP repl tools
+repl = ["dep:reedline", "dep:comfy-table", "dep:arrow-ipc", "dep:arrow-csv", "dep:parquet"]
+# Dynamic module loading via dlopen
+dynamic-modules = ["dep:libloading"]
 # Unit tests in `client/grpc.rs` spin up an in-process gRPC runner via the
 # `opsense_runner` crate. The crate is now a regular dependency, so enabling
 # this feature compiles those tests. They additionally need the echo kernel
@@ -128,10 +143,13 @@ internal-runner-tests = []
 opsense-mlib = { path = "../opsense-mlib", features = ["json", "parquet"] }
 object_store = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# `#[tokio::test]` cho unit test trong src (vd `token.rs`). Regular dep đã có
+# `tokio` nhưng dev-dependencies không kế tự từ đó, nên phải khai lại — cùng
+# bộ feature "full" nên `rt`/`macros` có sẵn.
+tokio = { workspace = true }
 # Test parse `[[pipeline.components]]` tu TOML that. `opsense-core` co
 # `config` nhung crate nay thi khong, ma `Config` o day chi deserialize
 # duoc tu TOML thuan.
-toml = "1"
 tempfile = "3"
 futures-util = { workspace = true }
 rexpect = "0.5"

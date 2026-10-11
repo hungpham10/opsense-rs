@@ -64,7 +64,7 @@ enum BackendStorage {
     /// Thuần memory — không persistence.
     Memory,
     #[cfg(feature = "parquet")]
-    Parquet(LakehouseStorage),
+    Parquet(Box<LakehouseStorage>),
     #[cfg(feature = "sqlite")]
     Sqlite(SqliteStorage),
     /// Redis/Valkey — state nằm trên server nên restart process không mất.
@@ -77,7 +77,7 @@ impl BackendStorage {
         match self {
             BackendStorage::Memory => None,
             #[cfg(feature = "parquet")]
-            BackendStorage::Parquet(s) => Some(Arc::new(s)),
+            BackendStorage::Parquet(s) => Some(Arc::new(*s)),
             #[cfg(feature = "sqlite")]
             BackendStorage::Sqlite(s) => Some(Arc::new(s)),
             #[cfg(feature = "redis")]
@@ -89,7 +89,7 @@ impl BackendStorage {
         match self {
             BackendStorage::Memory => None,
             #[cfg(feature = "parquet")]
-            BackendStorage::Parquet(s) => Some(Arc::new(s)),
+            BackendStorage::Parquet(s) => Some(Arc::new(*s)),
             #[cfg(feature = "sqlite")]
             BackendStorage::Sqlite(s) => Some(Arc::new(s)),
             #[cfg(feature = "redis")]
@@ -101,7 +101,7 @@ impl BackendStorage {
         match self {
             BackendStorage::Memory => None,
             #[cfg(feature = "parquet")]
-            BackendStorage::Parquet(s) => Some(Arc::new(RwLock::new(s))),
+            BackendStorage::Parquet(s) => Some(Arc::new(RwLock::new(*s))),
             #[cfg(feature = "sqlite")]
             BackendStorage::Sqlite(s) => Some(Arc::new(RwLock::new(s))),
             #[cfg(feature = "redis")]
@@ -198,7 +198,7 @@ async fn open_backend(id: &str, cfg: &StorageConfig, kind: &str) -> Result<Backe
                     .await
                     .map_err(|e| backend_error(id, backend, e))?,
             };
-            Ok(BackendStorage::Parquet(storage))
+            Ok(BackendStorage::Parquet(Box::new(storage)))
         }
 
         // SQLite local — một file cho mỗi station.
@@ -686,7 +686,7 @@ impl TimeseriesStation {
     pub fn window_fits_block_cap(&self, from_ts: i64, to_ts: i64) -> bool {
         let end_block = self.get_block_id(to_ts);
         let start_block = self.get_block_id(from_ts);
-        end_block - start_block + 1 <= MAX_BLOCKS_PER_QUERY
+        end_block - start_block < MAX_BLOCKS_PER_QUERY
     }
 
     pub fn update_range(

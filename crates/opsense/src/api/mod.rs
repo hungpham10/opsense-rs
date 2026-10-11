@@ -7,8 +7,11 @@
 //! hoặc `Mutation.reload`.
 
 pub mod admin;
+pub mod modules;
 pub mod oauth;
 pub mod prometheus;
+
+#[cfg(feature = "repl")]
 pub mod repl;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -479,7 +482,7 @@ pub struct Node {
 }
 
 /// Lỗi gần nhất của node — `None` khi node khoẻ.
-#[derive(SimpleObject, Clone, Debug)]
+#[derive(SimpleObject, Clone, Debug, serde::Serialize)]
 pub struct NodeFault {
     /// `transient` | `corrupt` | `fatal`.
     pub severity: String,

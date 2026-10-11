@@ -855,16 +855,16 @@ impl Portfolio {
                 );
             }
             Self::fetch_candles_from_loader(
-                &self.loader,
-                &self.cache,
-                &self.calendar,
-                adj_from,
-                safe_to,
-                &self.config.resolution_for_test,
-                &cache_key_trade,
-                self.config.cache_enabled,
-            )
-            .await?;
+            &self.loader,
+            &self.cache,
+            &self.calendar,
+            adj_from,
+            safe_to,
+            &self.config.resolution_for_test,
+            &cache_key_trade,
+            self.config.cache_enabled,
+        )
+        .await?;
         } else {
             #[cfg(debug_assertions)]
             println!(
@@ -886,16 +886,16 @@ impl Portfolio {
                     );
                 }
                 Self::fetch_candles_from_loader(
-                    &self.loader,
-                    &self.cache,
-                    &self.calendar,
-                    adj_from,
-                    safe_to,
-                    &self.config.resolution_for_rebuild,
-                    &cache_key_rebuild,
-                    self.config.cache_enabled,
-                )
-                .await?;
+                &self.loader,
+                &self.cache,
+                &self.calendar,
+                adj_from,
+                safe_to,
+                &self.config.resolution_for_rebuild,
+                &cache_key_rebuild,
+                self.config.cache_enabled,
+            )
+            .await?;
             } else {
                 #[cfg(debug_assertions)]
                 println!(
@@ -1650,15 +1650,11 @@ impl Portfolio {
     /// Fetch candles từ block cache hoặc loader.
     /// Trả về candles trong [from, to).
     ///
-    /// Dùng `calendar` để bỏ qua khoảng thời gian không có giao dịch
-    /// (ví dụ cuối tuần StockCalendar, ngoài giờ VN), tránh query API
-    /// tốn thời gian chỉ để nhận về empty candles.
-    ///
-    /// `cache_enabled = false` bỏ qua LRU hoàn toàn: mỗi range gọi thẳng
     /// `loader.range` (vẫn giữ calendar alignment + retry live-lag). Hợp khi
     /// loader rẻ và stateless — không tốn RAM cache và không phải quản lý
     /// coverage cho dữ liệu không cần giữ.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_candles_from_loader(
         loader: &Arc<dyn DataLoader + Sync + Send>,
         cache: &Arc<RwLock<HashMap<String, BlockLru>>>,
@@ -1672,7 +1668,7 @@ impl Portfolio {
         if from >= to {
             return Err(Error::new(
                 ErrorKind::BrokenPipe,
-                format!("`from` ({from}) should be smaller than `to` ({to})"),
+                format!("`from` ({from}) should be smaller than `to` ({to})", from=from, to=to),
             ));
         }
 

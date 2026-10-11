@@ -1156,7 +1156,8 @@ impl LakehouseStorage {
             pts.sort_by_key(|(id, _, _, _)| *id);
             let max_id = pts.last().map(|(id, _, _, _)| *id).unwrap_or(0);
 
-            let mut by_block: BTreeMap<u64, Vec<(u64, Vec<u8>, u64, Vec<u8>)>> = BTreeMap::new();
+            type BlockRows = Vec<(u64, Vec<u8>, u64, Vec<u8>)>;
+            let mut by_block: BTreeMap<u64, BlockRows> = BTreeMap::new();
             for (id, series, ts, value) in pts {
                 by_block
                     .entry(block_id_of(&series, ts, block_secs))

@@ -162,10 +162,8 @@ pub fn collect_station(
             continue;
         }
         // Loại exclude_kinds
-        if let Some(kind) = o.labels.get("kind") {
-            if exclude_kinds.contains(kind.as_str()) {
-                continue;
-            }
+        if o.labels.get("kind").is_some_and(|kind| exclude_kinds.contains(kind.as_str())) {
+            continue;
         }
 
         let metric_name = sanitize_metric_name(&o.metric_id);
@@ -238,7 +236,7 @@ pub fn cap_series(mut series: Vec<Series>, max: usize) -> (Vec<Series>, u64) {
         return (series, 0);
     }
     // Sort deterministic theo key
-    series.sort_by(|a, b| series_key(a).cmp(&series_key(b)));
+    series.sort_by_key(series_key);
     let dropped = series.len() - max;
     series.truncate(max);
     (series, dropped as u64)

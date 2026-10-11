@@ -484,11 +484,11 @@ impl TrendAnalysis {
         let slope_hour = self.slope_per_hour();
         // `Rising` đã kéo theo slope dương, nhưng giữ chặn để NaN không lọt
         // qua phép chia.
-        if !(slope_hour > 0.0) {
+        if slope_hour <= 0.0 {
             return None;
         }
         let need = target - self.anchor_value;
-        if !(need > 0.0) {
+        if need <= 0.0 {
             return Some(0.0);
         }
         Some(need / slope_hour)

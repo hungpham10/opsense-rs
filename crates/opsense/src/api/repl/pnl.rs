@@ -80,7 +80,7 @@ pub fn dedup_orders<'a>(rows: &'a [&'a Observation]) -> Vec<&'a Observation> {
     rows.iter()
         .enumerate()
         .filter(|(i, o)| {
-            let is_cursor = o.labels.get("order_id").is_none();
+            let is_cursor = !o.labels.contains_key("order_id");
             is_cursor || keep.contains(i)
         })
         .map(|(_, o)| *o)
@@ -343,11 +343,11 @@ pub fn aggregate(
     // — finalize từng bucket rồi mới cộng — sẽ chia 2 lần và cho ra trung bình
     // của trung bình, sai khi các bucket có số lệnh lệch nhau.
     let mut total = PnlBucket::new(0);
-    for (_, bucket) in &buckets {
+    for bucket in buckets.values() {
         total.roll_up_raw(bucket);
     }
 
-    for (_, mut bucket) in buckets {
+    for mut bucket in buckets.into_values() {
         bucket.finalize();
         summary.buckets.push(bucket);
     }

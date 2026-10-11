@@ -384,7 +384,7 @@ impl Settings {
             s.tp_levels = v;
         }
         if let Some(v) = int("edge_density_beta") {
-            s.edge_density_beta = v.max(0) as i64;
+            s.edge_density_beta = v.max(0);
         }
         if let Some(v) = num("trend_bias_max") {
             s.trend_bias_max = v;

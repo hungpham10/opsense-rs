@@ -185,7 +185,7 @@ pub async fn orders(
 /// `--from/--to` nhận unix giây **hoặc** khoảng tương đối; validate tại đây để
 /// lỗi báo trước khi mở kết nối.
 fn time_arg(raw: Option<&str>, now: i64) -> Result<Option<TimeArg>> {
-    raw.map(|s| TimeArg::parse(s))
+    raw.map(TimeArg::parse)
         .transpose()?
         .map(|arg| {
             arg.resolve(now)?;
