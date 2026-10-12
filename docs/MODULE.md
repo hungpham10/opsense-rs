@@ -8,12 +8,12 @@
 
 ## 1. Framework là gì — hai đường chạy module
 
-Opsense gọi là **module** mọi thứ triển khai `OpsenseModule` (`opsense-mod/src/lib.rs:36`). Có hai cách nạp:
+Opsense gọi là **module** mọi thứ triển khai `OpsenseModule` (`opsense-mod/src/lib.rs:42`). Có hai cách nạp:
 
 | Đường | Cách nạp | Ví dụ | File |
 |---|---|---|---|
 | **Builtin** | Link tĩnh vào binary, `ApiModuleRegistry::register_builtin` | `repl` | `serve.rs:136-139` |
-| **Dynamic (.so)** | `dlopen` lúc boot, `load_dynamic` + `modules.toml` | (chưa có module mẫu) | `modules.rs:62-117` |
+| **Dynamic (.so)** | `dlopen` lúc boot, `load_dynamic` + `modules.toml` | `hello` | `modules.rs:62-117` |
 
 Route đã là module (prefix `/api/repl`, `builtin=true`): REPL GraphQL (`repl/adapter.rs:35`).
 Route **chưa phải** module: `/health`, `/api/admin/*`, `/api/oauth/*` — vẫn mount trực tiếp (`serve.rs:159-162`).
@@ -26,11 +26,11 @@ Bật dynamic module: compile với `--features opsense/dynamic-modules` (CI: `.
 
 | Crate | Vai trò | Dependency |
 |---|---|---|
-| `opsense-mod` | **SDK nhẹ**: `OpsenseModule`, `CacheBackend`, `HostServices`, FFI vtable, `TenantServices` | `serde`, `serde_json`, `thiserror`, `tokio`, `axum` |
+| `opsense-mod` | **SDK nhẹ**: `OpsenseModule`, `CacheBackend`, `HostServices`, FFI vtable, `TenantServices` | `serde`, `serde_json`, `thiserror`, `tokio`, `axum`, `futures` |
 | `opsense-mlib` | `RedisBackend` impl `CacheBackend` (feature `redis`), vector runtime, storage | `opsense-mod` (optional) |
 | `opsense` | Binary: wiring, resolve tenant, `dlopen`, router | cả hai trên |
 
-**Luồng depend**: `opsense` → `opsense-mod` & `opsense-mlib`; **không** crate nào khác depend `opsense-mod` (SDK độc lập).
+**Luồng depend**: `opsense` → `opsense-mod` & `opsense-mlib`; crate `opsense-mlib` **có** depend `opsense-mod` (optional, feature `redis`). Không crate nào khác depend `opsense-mod` (SDK độc lập).
 
 ---
 
@@ -63,8 +63,12 @@ Ví dụ: crate `xt-pnl` ⇒ symbol `opsense_module_xt_pnl_init`.
 #[repr(C)]
 pub struct HostV1 {
     pub abi_version: u32,
-    pub call: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_char,
-    pub log:  unsafe extern "C" fn(u32, *const c_char, *const c_char),
+    /// Opaque context pointer — set by the host during `load_dynamic`.
+    /// Each `HostV1` gets its own context so multiple `AppState` instances
+    /// don't share the same global. The host passes this back to `call`/`log`.
+    pub context: *mut std::ffi::c_void,
+    pub call: unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char) -> *mut c_char,
+    pub log:  unsafe extern "C" fn(*mut std::ffi::c_void, u32, *const c_char, *const c_char),
     pub free: unsafe extern "C" fn(*mut c_char),
 }
 ```
@@ -73,23 +77,23 @@ pub struct HostV1 {
 #[repr(C)]
 pub struct ModuleV1 {
     pub abi_version: u32,
-    pub state: ModuleHandle,      // opaque, do module cấp
+    pub state: ModuleHandle,
     pub manifest: unsafe extern "C" fn(ModuleHandle) -> *mut c_char,
-    pub handle:   unsafe extern "C" fn(ModuleHandle, *const TenantServices, *const c_char, *const c_char) -> *mut c_char,
-    pub free:     unsafe extern "C" fn(*mut c_char),
+    pub handle: unsafe extern "C" fn(ModuleHandle, *const TenantServices, *const c_char, *const c_char) -> *mut c_char,
+    pub free: unsafe extern "C" fn(*mut c_char),
 }
 ```
 
 - **Mọi chuỗi là JSON UTF-8, NUL-terminated**.
 - Host cấp bộ nhớ, host free (`free`). Module **không** free chuỗi nhận được.
 - `ModuleHandle` = `#[repr(transparent)]` trên `*mut c_void` → `Send + Sync` an toàn.
-- `ABI_VERSION` = 2 (`lib.rs:31`). Tăng khi `HostV1`/`ModuleV1` đổi layout.
+- `ABI_VERSION` = 3 (`opsense-mod/src/lib.rs:33`). Tăng khi `HostV1`/`ModuleV1` đổi layout.
 
 ---
 
 ## 5. `OpsenseModule` — trait cốt lõi
 
-`opsense-mod/src/lib.rs:36`:
+`opsense-mod/src/lib.rs:42`:
 
 ```rust
 pub trait OpsenseModule: Send + Sync + 'static {
@@ -119,16 +123,32 @@ pub struct TenantServices {
 }
 ```
 
-Host dựng **mỗi request** trong `module_route_handler` (`modules.rs:195-202`):
+Host dựng **mỗi request** trong `module_route_handler` (`crates/opsense/src/api/modules.rs`):
 
 ```rust
-let tenant_id = req.headers().get("x-tenant-id")...parse().unwrap_or(0);
-let cache_backend = state.connector.cache(tenant_id).map(RedisBackend::new);
+static MISSING_TENANT_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+let tenant_id = req
+    .headers()
+    .get("x-tenant-id")
+    .and_then(|v| v.to_str().ok())
+    .and_then(|s| s.parse::<i64>().ok())
+    .unwrap_or_else(|| {
+        if MISSING_TENANT_WARNED.set(()).is_ok() {
+            tracing::warn!("thiếu/parse lỗi X-Tenant-Id → tenant_id=0 (chỉ log lần đầu)");
+        }
+        0
+    });
+
+let cache_backend = state
+    .connector
+    .cache(tenant_id)
+    .map(opsense_mlib::cache::RedisBackend::new);
 let services = TenantServices { tenant_id, cache: cache_backend };
 module.route(http_req, &services).await
 ```
 
-**Module không bao giờ tự chọn tenant** — header do host parse, backend đã bind đúng shard. Thiếu header ⇒ `tenant_id = 0` (im lặng, **không 400** — xem §14(f)).
+**Module không bao giờ tự chọn tenant** — header do host parse, backend đã bind đúng shard. Thiếu header ⇒ `tenant_id = 0` (có warn 1 lần, không im lặng — xem §14(f)).
 
 ---
 
@@ -155,9 +175,8 @@ pub enum CacheError { Miss, Backend(String) }
 pub struct Cache { backend: Arc<dyn CacheBackend> }
 impl Cache {
     pub fn new(backend: Arc<dyn CacheBackend>) -> Self
-    #[cfg(feature = "redis")] pub fn redis(conn: MultiplexedConnection) -> Self
     pub async fn get(&self, key: &String) -> Result<String, CacheError>
-    pub async fn set(&self, key: &String, value: &String, ttl: usize) -> Result<(), CacheError>
+    pub async fn set(&self, key: &String, value: &str, ttl: usize) -> Result<(), CacheError>
     pub async fn del(&self, key: &String) -> Result<(), CacheError>
 }
 ```
@@ -172,7 +191,7 @@ impl Page {
     pub fn new(backend: Arc<dyn CacheBackend>) -> Self
     pub async fn index(&self, key: &String, after: i64, limit: u64) -> Result<u64, CacheError>
     pub async fn get(&self, key: &String, after: i64, limit: u64) -> Result<String, CacheError>
-    pub async fn set(&self, key: &String, value: &String, ttl: usize, after: i64, limit: u64) -> Result<(), CacheError>
+    pub async fn set(&self, key: &String, value: &str, ttl: usize, after: i64, limit: u64) -> Result<(), CacheError>
 }
 ```
 
@@ -180,7 +199,7 @@ Key format:
 - `paging[{key}]:indices` → JSON `[ (after, limit, id), … ]`
 - `paging[{key}]:data:{id}` → payload
 
-Logic binary search (`lower_bound`/`upper_bound` từ `mlib`) **giữ nguyên** từ `opsense-model/src/cache.rs` cũ.
+Logic binary search (`lower_bound`/`upper_bound`) **giữ nguyên** từ `opsense-model/src/cache.rs` cũ, nhưng **đã copy vào `opsense-mod/src/cache.rs:9-48`** vì SDK không depend `mlib`.
 
 ---
 
@@ -204,7 +223,7 @@ Logic binary search (`lower_bound`/`upper_bound` từ `mlib`) **giữ nguyên** 
 | `audit_write` | ghi audit log | ✅ |
 | `station_query` | raw station query | ❌ `"not yet implemented"` |
 
-Module `.so` **không dùng** đường này (dùng `TenantServices`). Điểm này là fallback cho module cũ/không dùng FFI backend.
+Đây là đường **duy nhất** module `.so` → host (status/attributes/audit...). An toàn nhờ `drive()` (`opsense-mod/src/ffi.rs:239`).
 
 ---
 
@@ -226,7 +245,8 @@ pub struct RouteSpec { pub id: String, pub method: HttpMethod, pub path: String 
 pub struct ToolSpec  { pub name: String, pub description: String, pub input_schema: Value }
 ```
 
-**Luật khớp `route_id`** (`modules.rs:166-173`):
+**Luật khớp `route_id`** (`crates/opsense/src/api/modules.rs`):
+
 1. Khớp cả `method` + `path` → trả `route_id`
 2. Chỉ khớp `path` → trả `route_id`
 3. Không khớp gì → trả `path` (để lỗi `RouteNotFound` mang tên route)
@@ -282,7 +302,6 @@ impl OpsenseModule for MyModule {
     fn route(&self, req: HttpRequest, services: &TenantServices) -> BoxFut<'static, Result<HttpResponse, ModuleError>> {
         Box::pin(async move {
             if req.route_id != "hello" { return Err(ModuleError::RouteNotFound(req.route_id)); }
-            // Dùng cache từ services
             if let Some(cache) = services.cache.as_ref() {
                 let c = Cache::new(cache.clone());
                 let _ = c.get(&"test".into()).await;
@@ -311,6 +330,7 @@ name = "opsense-mod-hello"
 crate-type = ["cdylib"]
 [dependencies]
 opsense-mod = { path = "../../../opsense-mod" }
+serde_json = "1.0"
 ```
 
 `src/lib.rs`:
@@ -327,10 +347,10 @@ impl OpsenseModule for HelloModule {
 }
 
 // FFI entry point — KHÔNG đổi tên crate
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn opsense_module_hello_init(host: *const opsense_mod::ffi::HostV1) -> *mut opsense_mod::ffi::ModuleV1 {
-    let module = HelloModule;
-    module.into_vtable() // impl ModuleExports
+    use opsense_mod::ffi::ModuleExports;
+    Box::into_raw(HelloModule.into_vtable())
 }
 ```
 
@@ -356,6 +376,8 @@ path = "hello.so"
 | Symbol naming | `opsense_module_<id>_init` — `id` từ `modules.toml`, `-` → `_` |
 | `builtin = true` | **Bỏ qua** bởi `load_dynamic` (`modules.rs:74`) — phải tự `register_builtin` |
 
+> **Lưu ý:** Crate `hello-mod` là fixture test (`examples/hello-mod/`, `crate-type = ["cdylib"]`). Nó **không** nằm trong workspace `members` để tránh lỗi build musl (`cannot produce cdylib`). Build tay: `cargo build --manifest-path examples/hello-mod/Cargo.toml`.
+
 ---
 
 ## 13. Ràng buộc ABI — thay đổi gì phá vỡ `CacheBackend`
@@ -375,26 +397,30 @@ path = "hello.so"
 
 ---
 
+## 13. Ràng buộc ABI cho FFI vtable
+
+`HostV1`/`ModuleV1` thay đổi layout ⇒ bump `ABI_VERSION` (hiện = 3). Quy tắc giống §13.
+
+---
+
 ## 14. Chỗ còn hở — nói thẳng
 
 | Vấn đề | Nghiêm trọng | File | Mô tả |
 |---|---|---|---|
-| **(a) block_on panic** | 🔴 | `ffi.rs:286,311` `modules.rs:351` | `Handle::try_current().block_on(...)` — `handle()` chạy *trong* async handler của axum ⇒ panic "runtime within a runtime". Module `.so` gọi `route` async là **chết ngay**. Cần `drive()` dùng `block_in_place` / `spawn_blocking`. |
-| **(b) `HOST_SERVICES` global** | 🟠 | `modules.rs:308` | `OnceLock<Arc<dyn HostServices>>`. Nhiều `AppState` (test) → mọi `.so` trỏ state đầu tiên. Chưa sửa. |
 | **(c) Op chưa implement** | 🟠 | `serve_host.rs:13` | `query_station`, `orders`, `clear_station`, `clear_all_stations`, `station_query` trả `"not yet implemented"`. |
-| **(d) `module_id` ≠ `manifest.id`** | 🟡 | `modules.rs:84,111` | Symbol lấy theo `mcfg.id` (config), registry key theo `manifest().id` (code). Lệch ⇒ module đăng ký sai tên. |
-| **(e) `builtin=true` bị bỏ qua** | 🟡 | `modules.rs:74` | `load_dynamic` skip `builtin` — phải tự `register_builtin`. |
-| **(f) Thiếu `X-Tenant-Id` → 0** | 🟡 | `modules.rs:195` | `tenant_id = 0` im lặng. Entity dùng `dbt(0)` cho host lookup — rủi ro ghi nhầm tenant. |
+| **(g) `drive()` fallback deadlock** | 🟠 | `ffi.rs:251` | `new_current_thread()` + `block_on(spawn())` → treo vĩnh viễn (nhánh fallback không chạy ở production). **Đã sửa** (`drive()` dùng `new_multi_thread().worker_threads(1)`); test `drive_works_inside_current_thread_runtime` làm bằng chứng. |
+| **(h) nested `drive()` chưa từng test** | 🟠 | `ffi.rs:246` | Chuỗi `route()` → `host.call()` → `drive()` lồng nhau chưa từng chạy; `hello-mod` route `host-status` là bằng chứng đã test. |
+| **(i) `hello-mod` phá build release musl** | 🟠 | `Cargo.toml:18` | cdylib trong workspace + cargo-dist musl ⇒ `cannot produce cdylib`. Đã tách workspace + `[workspace]` riêng. |
 
-> **Chưa có module `.so` mẫu nào** trong repo. `repl` là builtin. Nên (a) chưa từng lộ ra thực tế.
+> **Chưa có module `.so` mẫu nào** trong repo ngoài `hello-mod` (fixture test). `repl` là builtin. Nên (g) chưa từng lộ ra thực tế.
 
 ---
 
-## Link chéo
+## 15. Link chéo
 
 - [`architecture.md`](./architecture.md) §2 — crate map có `opsense-mod`
 - [`GUIDE.md`](./GUIDE.md) — dùng `opsense status/components/query` tương tác module
-- `opsense-mod/src/ffi.rs` — chi tiết vtable, `ModuleHandle`, `ModuleExports::into_vtable`
+- `opsense-mod/src/ffi.rs` — chi tiết vtable, `ModuleHandle`, `ModuleExports::into_vtable`, `drive()`
 - `opsense/src/api/modules.rs` — `module_route_handler`, `load_dynamic`, `DynamicModuleWrapper`
 - `opsense/src/serve.rs` — wiring registry + router
 - `opsense/src/serve_host.rs` — `HostServices` impl cho đường `call()`
