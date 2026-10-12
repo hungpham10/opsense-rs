@@ -1019,7 +1019,7 @@ mod tests {
         assert!(!s.remove("he").await.unwrap());
         assert_eq!(s.count().await.unwrap(), 2);
 
-        s.clear().await.unwrap();
+        PatternStorage::clear(&s).await.unwrap();
         assert_eq!(s.count().await.unwrap(), 0);
         assert!(!s.contains("she").await.unwrap());
 

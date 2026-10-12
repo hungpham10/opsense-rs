@@ -107,7 +107,7 @@ impl Cache {
         }
     }
 
-    pub async fn set(&self, key: &String, value: &String, ttl: usize) -> Result<(), CacheError> {
+    pub async fn set(&self, key: &String, value: &str, ttl: usize) -> Result<(), CacheError> {
         self.backend.set_ex(&format!("value[{key}]"), value, ttl as u64).await
     }
 
@@ -169,7 +169,7 @@ impl Page {
     pub async fn set(
         &self,
         key: &String,
-        value: &String,
+        value: &str,
         ttl: usize,
         after: i64,
         limit: u64,

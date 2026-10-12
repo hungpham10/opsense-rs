@@ -15,6 +15,7 @@ pub mod redis_backend {
     pub struct RedisBackend(pub MultiplexedConnection);
 
     impl RedisBackend {
+        #[allow(clippy::new_ret_no_self)]
         pub fn new(conn: MultiplexedConnection) -> std::sync::Arc<dyn CacheBackend> {
             std::sync::Arc::new(Self(conn))
         }

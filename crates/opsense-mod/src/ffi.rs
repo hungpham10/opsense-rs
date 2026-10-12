@@ -331,10 +331,7 @@ pub trait ModuleExports: super::OpsenseModule {
         // We need to handle them separately.
         let result_json = if is_route {
             let fut = wrapper.module.route(req, &services);
-            let result = drive(async move {
-                let result = fut.await;
-                result
-            });
+            let result = drive(fut);
             match result {
                 Ok(resp) => serde_json::to_string(&resp).unwrap_or_else(|e| {
                     let err = ModuleError::Internal(format!("response serialize: {e}"));
@@ -350,10 +347,7 @@ pub trait ModuleExports: super::OpsenseModule {
             let args: serde_json::Value =
                 serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
             let fut = wrapper.module.tool(route_id, args, &services);
-            let result = drive(async move {
-                let result = fut.await;
-                result
-            });
+            let result = drive(fut);
             match result {
                 Ok(text) => {
                     // Tool returns plain text, wrap in JSON for FFI
