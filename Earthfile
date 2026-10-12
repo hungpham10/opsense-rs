@@ -59,7 +59,12 @@ build-binaries:
         # --features opsense-core/{parquet,sqlite}: fallback build phải bật các
         # storage backend strategies dùng (parquet + s3 mirror, sqlite) — nếu
         # không binary chỉ chạy được backend "memory".
-        RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build --workspace --release --locked --features opsense-core/parquet,opsense-core/sqlite && \
+        #
+        # `opsense/dynamic-modules` bật `dlopen` module qua `modules.toml`.
+        # Không bật thì `ApiModuleRegistry::load_dynamic` không tồn tại (cả
+        # khối đó là `#[cfg(feature = "dynamic-modules")]`) ⇒ `.so` nằm trong
+        # image cũng bị bỏ qua im lặng. Phải khớp với image.yml.
+        RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build --workspace --release --locked --features opsense-core/parquet,opsense-core/sqlite,opsense/dynamic-modules && \
         cp target/release/opsense* /out/; \
       fi && \
       echo "=== Final artifacts in /out ===" && \

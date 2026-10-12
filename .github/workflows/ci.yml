@@ -53,7 +53,25 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-        run: cargo build --workspace --release --locked
+        run: cargo build --workspace --release --locked --features opsense/dynamic-modules
+
+      # `dynamic-modules` bật `dlopen` module qua `modules.toml`. Không bật thì
+      # `ApiModuleRegistry::load_dynamic` không tồn tại (cả khối đó là
+      # `#[cfg(feature = "dynamic-modules")]`) ⇒ `.so` bị bỏ qua im lặng.
+      #
+      # Bước assert này quan trọng hơn vẻ ngoài: build xong KHÔNG chứng minh
+      # feature đã vào binary — chuỗi log đặc trưng nằm trong khối `#[cfg]`
+      # ấy, nên `strings | grep` mới là bằng chứng thật. Không có nó, việc hỏng
+      # nhánh `#[cfg]` chỉ lộ ra ở release build trong image.yml, tức trên
+      # image đã publish.
+      #
+      # Gộp vào job này (thay vì job compile riêng) vì job này đã build đúng
+      # binary `opsense` — thêm một job chỉ để build lại lần nữa là tốn ~12
+      # phút CI cho cùng một kết luận. `dist-bin` từ đây được các job
+      # integration test dùng lại, nên chúng cũng chạy trên binary đã bật
+      # feature, gần với image thật hơn là bản default.
+      - name: Assert dynamic-modules reached the binary
+        run: strings target/release/opsense | grep -q "loading dynamic module"
 
       # SỬA LỖI CACHE: Copy binary ra thư mục biệt lập TRƯỚC KHI upload artifact
       # Giúp không làm biến đổi mtime/metadata bên trong thư mục target/
