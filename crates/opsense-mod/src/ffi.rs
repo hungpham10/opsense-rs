@@ -232,10 +232,10 @@ pub unsafe fn host_log(host: &HostV1, level: u32, target: &str, msg: &str) {
 ///
 /// FFI `handle()` is sync; module route/tool is async. Must drive the future
 /// but we're inside an async handler from axum ⇒ `Handle::block_on` panics.
-/// 
+///
 /// Strategy:
 /// - Multi-thread runtime: use `block_in_place` + `Handle::block_on`
-/// - Current-thread or no runtime: spawn on dedicated single-thread runtime
+/// - Current-thread or no runtime: spawn on dedicated multi-thread runtime with 1 worker
 pub fn drive<F>(fut: F) -> F::Output
 where
     F: Future + Send + 'static,
@@ -248,7 +248,8 @@ where
         _ => {
             static MODULE_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
             let rt = MODULE_RT.get_or_init(|| {
-                tokio::runtime::Builder::new_current_thread()
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
                     .enable_all()
                     .build()
                     .expect("module runtime")
@@ -408,5 +409,20 @@ mod tests {
     #[test]
     fn abi_bumped_to_3() {
         assert_eq!(ABI_VERSION, 3);
+    }
+
+    /// Verify the fallback branch works with current_thread runtime.
+    /// Before the fix, this test would hang because `new_current_thread()` runtime
+    /// has no worker thread to run spawned tasks.
+    #[test]
+    fn drive_works_inside_current_thread_runtime() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt.block_on(async {
+            drive(async { 42 })
+        });
+        assert_eq!(out, 42);
     }
 }
