@@ -1,0 +1,205 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-10-10T18:30:00+07:00",
+  "source": "Opsense MCP",
+  "scope": {
+    "symbol": "BTCUSDT",
+    "node": "grid",
+    "window": "today (from MCP now-1d; Opsense returned fromTs 1791606240 toTs 1791647400)",
+    "currency": "USDT-equivalent inferred from size×return; verify strategy sizing"
+  },
+  "summary": {
+    "closed_trades": 8,
+    "wins": 2,
+    "losses": 6,
+    "win_rate": 0.25,
+    "realized_pnl_abs": -6.519052297209676,
+    "realized_pnl_pct": -0.0005739652237963947,
+    "notional": 7766.144117374573,
+    "open_count": 1,
+    "open_notional": 1140.802186379292,
+    "last_close_mark": 83056.18,
+    "unrealized_pnl_abs": -0.7282990088318053,
+    "approx_combined_pnl": -7.247351306041481
+  },
+  "orders": [
+    {
+      "id": "o1791636480-4",
+      "status": "closed",
+      "side": "short",
+      "grid": "1",
+      "level": 3,
+      "entry": 82825.41,
+      "size": 1556.9330062275976,
+      "tp": 82741.09666666666,
+      "sl": 82867.56666666667,
+      "exit": 82867.56666666667,
+      "pnl_pct": -0.0009089822877624415,
+      "ts": 1791642360
+    },
+    {
+      "id": "o1791641460-5",
+      "status": "closed",
+      "side": "long",
+      "grid": "1",
+      "level": 2,
+      "entry": 82783.25333333334,
+      "size": 460.10486284257576,
+      "tp": 82867.56666666667,
+      "sl": 82741.11812366331,
+      "exit": 82867.56666666667,
+      "pnl_pct": 0.0006184829653146161,
+      "ts": 1791642360
+    },
+    {
+      "id": "o1791635100-3",
+      "status": "closed",
+      "side": "short",
+      "grid": "1",
+      "level": 4,
+      "entry": 82853.56666666667,
+      "size": 1191.0156117643378,
+      "tp": 82706.09666666666,
+      "sl": 82902.75251508679,
+      "exit": 82912.93,
+      "pnl_pct": -0.0011164849471375885,
+      "ts": 1791642480
+    },
+    {
+      "id": "o1791642060-6",
+      "status": "closed",
+      "side": "short",
+      "grid": "0",
+      "level": 4,
+      "entry": 82804.34666666666,
+      "size": 1031.4498513662593,
+      "tp": 82583.04666666666,
+      "sl": 82878.17910733263,
+      "exit": 82912.93,
+      "pnl_pct": -0.0017113240754188486,
+      "ts": 1791642480
+    },
+    {
+      "id": "o1791632760-2",
+      "status": "closed",
+      "side": "short",
+      "grid": "1",
+      "level": 5,
+      "entry": 82896.36583333334,
+      "size": 766.0853461163732,
+      "tp": 82729.82333333335,
+      "sl": 82951.95445334632,
+      "exit": 82951.95445334632,
+      "pnl_pct": -0.0010705796985689164,
+      "ts": 1791642600
+    },
+    {
+      "id": "o1791611820-1",
+      "status": "closed",
+      "side": "long",
+      "grid": "1",
+      "level": 0,
+      "entry": 82795.32,
+      "size": 508.58229191908714,
+      "tp": 82965.19,
+      "sl": 82710.6455879603,
+      "exit": 82965.19,
+      "pnl_pct": 0.0016516860131707363,
+      "ts": 1791642600
+    },
+    {
+      "id": "o1791643740-7",
+      "status": "closed",
+      "side": "short",
+      "grid": "1",
+      "level": 4,
+      "entry": 82991.78666666665,
+      "size": 1140.802186379292,
+      "tp": 82857.99666666666,
+      "sl": 83043.84408481087,
+      "exit": 83043.84408481087,
+      "pnl_pct": -0.0010272598799843575,
+      "ts": 1791644700
+    },
+    {
+      "id": "o1791644940-9",
+      "status": "closed",
+      "side": "short",
+      "grid": "1",
+      "level": 4,
+      "entry": 82991.78666666665,
+      "size": 1111.1709607590506,
+      "tp": 82857.99666666666,
+      "sl": 83043.84408481087,
+      "exit": 83043.84408481087,
+      "pnl_pct": -0.0010272598799843575,
+      "ts": 1791647100
+    },
+    {
+      "id": "o1791644700-8",
+      "status": "open",
+      "side": "short",
+      "grid": "1",
+      "level": 5,
+      "entry": 83036.38333333332,
+      "size": 1140.802186379292,
+      "tp": 82902.59333333332,
+      "sl": 83088.46872517731,
+      "mark": 83056.18,
+      "unrealized_pnl_abs": -0.7282990088318053,
+      "ts": 1791644700
+    }
+  ],
+  "data_coverage": {
+    "daily_history_rows": 6431,
+    "history_oldest_ts": 1791574920,
+    "history_latest_ts": 1791647460,
+    "tick_candle_rows": 950,
+    "tick_candle_oldest_ts": 1791634860,
+    "tick_candle_latest_ts": 1791647400,
+    "grid_snapshots_saved_in_mcp_capture": 20,
+    "grid_plan_latest_ts": 1791647340,
+    "notes": [
+      "today window expanded by now-1d relative expression; PnL response reports fromTs 1791606240; use Vietnam day boundary when comparing next time",
+      "history channel is Binance 1m /klines with 1000-candle rolling feed; retrieved response spans only ~20h and may not cover full calendar day",
+      "tick-candle channel begins later than history; only inspect tick stream coverage from ts range",
+      "size unit/currency and fee treatment not verified; Opsense daily realized figure used as source of truth",
+      "unrealized computed by Opsense mark_price request, despite response markPrice=null; mark supplied was latest close 83056.18"
+    ]
+  },
+  "opsense_status": {
+    "grid": {
+      "running": true,
+      "faultCount": 0,
+      "lastError": null
+    },
+    "history": {
+      "running": true,
+      "faultCount": 6,
+      "lastError": null
+    },
+    "tick_feed": {
+      "running": true,
+      "faultCount": 1,
+      "lastError": "Transient websocket unexpected EOF, reported recovered/running"
+    },
+    "tick_map": {
+      "running": true,
+      "faultCount": 0,
+      "lastError": null
+    },
+    "tick_candle": {
+      "running": true,
+      "faultCount": 0,
+      "lastError": null
+    }
+  },
+  "next_review_questions": [
+    "Replay closed short orders against 1m OHLC around entry-to-exit: did price first favor TP or hit SL, and how many candles to exit?",
+    "Compare long/short performance and grid 0 versus grid 1; sample is small (8 closures).",
+    "Inspect snapshots/plan changes near entries: the grid generated clustered shorts during rising prices and repeated SL exits.",
+    "Check stop placement and TP/SL distance after fees/slippage; current realized avg loss pct is roughly same magnitude as win pct while win rate is 25%.",
+    "Investigate two order ids sharing levels/prices and whether position overlap/duplicate exposure is intended.",
+    "Validate timezone boundaries, daily window, quantity currency, fees, and complete OHLC coverage before drawing algorithm conclusions."
+  ]
+}

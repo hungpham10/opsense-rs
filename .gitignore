@@ -33,12 +33,25 @@ target/
 # Environment
 .env
 .env.local
-*.env.*
+
+# SOPS: chỉ commit bản MÃ HOÁ (.enc), tuyệt đối không commit plaintext.
+# `*.env` bắt mọi plaintext dưới tên *.env; `!*.enc` mở lại bản mã hoá.
+# ⚠️ Đừng đặt `*.env.*` ở đây — pattern đó khớp LUÔN cả `*.env.enc` (bản cần
+# commit) và là lý do file SOPS từng bị bỏ qua không kịp.
+env/*.env
+!env/*.enc
+*.env.local
+
+# Private key age dùng cho SOPS — không bao giờ vào repo.
+# Chỉ public key nằm trong `.sops.yaml` mới commit.
+age-key.txt
+keys.txt
+*keys.txt
 
 # OS generated files
 .DS_Store
 Thumbs.db
-```
+
 # Python
 __pycache__/
 *.pyc

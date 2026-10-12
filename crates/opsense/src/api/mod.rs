@@ -7,8 +7,11 @@
 //! hoặc `Mutation.reload`.
 
 pub mod admin;
+pub mod modules;
 pub mod oauth;
 pub mod prometheus;
+
+#[cfg(feature = "repl")]
 pub mod repl;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,7 +30,7 @@ use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, Observation, StationKind};
 use opsense_mlib::vector::components::{clock, null};
-use opsense_mlib::vector::runtime::{Component, Event, Fault, Runtime, Severity};
+use opsense_mlib::vector::runtime::{Component, Event, Fault, Runtime, Severity, build as registry_build};
 use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
 
@@ -292,6 +295,7 @@ impl AppState {
     }
 }
 
+
 /// Build the pipeline component graph from `[pipeline]` (or the default
 /// `clock -> null` graph when absent). Deserializes every component through
 /// the typetag registry — this is where configs fail with e.g.
@@ -303,19 +307,45 @@ pub fn pipeline_from_config(cfg: &Config) -> Result<Vec<Arc<dyn Component>>, Err
         Some(p) if !p.components.is_empty() => p
             .components
             .iter()
-            .map(|value| {
-                serde_json::from_value::<Box<dyn Component>>(strip_description(value.clone()))
-                    .map(Arc::from)
-                    .map_err(|e| {
-                        Error::new(
-                            ErrorKind::BrokenPipe,
-                            format!("component `{value}`: {e}"),
-                        )
-                    })
-            })
+            .map(build_component)
             .collect(),
         _ => Ok(AppState::default_pipeline(cfg)),
     }
+}
+
+/// Thử registry runtime (premium/plugin/script) trước, fallback typetag built-in.
+/// Tách ra để test được mà không cần dựng Config đầy đủ.
+fn build_component(value: &serde_json::Value) -> Result<Arc<dyn Component>, Error> {
+    let value = strip_description(value.clone());
+    let type_name = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+
+    // 1. Registry runtime (premium/plugin/script-generated type)
+    if let Some(result) = crate::api::registry_build(type_name, value.clone()) {
+        return result.map(Arc::from).map_err(|e| component_error(&value, e));
+    }
+    // 2. Built-in typetag — y như cũ
+    let value_for_err = value.clone();
+    serde_json::from_value::<Box<dyn Component>>(value)
+        .map(Arc::from)
+        .map_err(|e| component_error(&value_for_err, e.into()))
+    }
+
+/// Lỗi rõ ràng hơn typetag mặc định: nói type lạ + liệt kê type đã biết.
+fn component_error(value: &serde_json::Value, e: std::io::Error) -> std::io::Error {
+    let type_name = value.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    let known: Vec<&str> = opsense_mlib::vector::runtime::types();
+    let hint = if known.is_empty() {
+        "không có type động nào".into()
+    } else {
+        format!("type động đã đăng ký: {}", known.join(", "))
+    };
+    std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        format!("component `{type_name}`: {e}; {hint}"),
+    )
 }
 
 /// Bỏ `description` khỏi JSON của component **trước** khi typetag deserialize.
@@ -479,7 +509,7 @@ pub struct Node {
 }
 
 /// Lỗi gần nhất của node — `None` khi node khoẻ.
-#[derive(SimpleObject, Clone, Debug)]
+#[derive(SimpleObject, Clone, Debug, serde::Serialize)]
 pub struct NodeFault {
     /// `transient` | `corrupt` | `fatal`.
     pub severity: String,

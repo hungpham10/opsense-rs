@@ -503,6 +503,7 @@ impl QueryRoot {
     ///   **không** có `kind`, nên `labelKind: "closed"` luôn rỗng; muốn lệnh đã
     ///   đóng thì phải dùng `status: "closed"`.
     /// - `truncated` nói rõ còn dữ liệu ngoài `limit`.
+    #[allow(clippy::too_many_arguments)]
     async fn query_timeseries(
         &self,
         ctx: &Context<'_>,
@@ -590,6 +591,7 @@ impl QueryRoot {
     ///
     /// Khi có `interval`: trả thêm `pnl` aggregation. `limit` chỉ cắt `observations`,
     /// `pnl` luôn tính trên toàn bộ cửa sổ sau khi dedup.
+    #[allow(clippy::too_many_arguments)]
     async fn orders(
         &self,
         ctx: &Context<'_>,
@@ -647,13 +649,13 @@ impl QueryRoot {
         let filtered: Vec<Observation> = if let Some(want) = &status {
             deduped
                 .into_iter()
-                .cloned()
                 .filter(|o| {
                     if o.labels.get("kind").map(String::as_str) == Some("trading_step") {
                         return true;
                     }
                     o.labels.get("status").map(String::as_str) == Some(want.as_str())
                 })
+                .cloned()
                 .collect()
         } else {
             deduped.into_iter().cloned().collect()
@@ -1214,7 +1216,7 @@ mod tests {
             "params": { "fee_rate": 0.0002, "sl_pct": 0.0025 }
         });
         // 0.0002 × 2 = 0.0004 — KHÔNG phải mặc định tình cờ
-        assert_eq!(fee_roundtrip(&[grid.clone()]), 0.0004);
+        assert_eq!(fee_roundtrip(std::slice::from_ref(&grid)), 0.0004);
 
         // fee_rate khác phải thấy đổi, không được đứng ở mặc định.
         let other = serde_json::json!({

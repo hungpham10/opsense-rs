@@ -73,7 +73,6 @@ async fn rhai_transform_processes_through_script() {
         .unwrap_or_default();
     // The clock ticks but doesn't produce observations, so transform receives empty batch
     // This test mainly verifies the runtime wiring compiles and runs without panic
-    assert!(true);
 }
 
 /// Component deserialize từ **giá trị config** — đúng đường production:

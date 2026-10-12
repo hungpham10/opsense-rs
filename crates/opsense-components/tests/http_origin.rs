@@ -186,7 +186,7 @@ async fn read_until_candles(
     let deadline = std::time::Instant::now() + timeout;
     loop {
         let obs = st.read().await.query_recent(from, to).await.unwrap_or_default();
-        if obs.iter().any(|o| o.labels.get("field").is_some()) {
+        if obs.iter().any(|o| o.labels.contains_key("field")) {
             return obs;
         }
         assert!(
@@ -205,7 +205,7 @@ async fn node_fills_the_station_on_its_own() {
     let from = now - 7200;
     let to = now + 120;
 
-    let (addr, calls, lines) = spawn_mock(Arc::new(|f, t| klines_body(f, t))).await;
+    let (addr, calls, lines) = spawn_mock(Arc::new(klines_body)).await;
     let ctx = new_context().await;
 
     let mut runtime = Runtime::new();
@@ -259,7 +259,7 @@ async fn reading_the_station_never_triggers_a_request() {
     let from = now - 7200;
     let to = now + 120;
 
-    let (addr, calls, lines) = spawn_mock(Arc::new(|f, t| klines_body(f, t))).await;
+    let (addr, calls, lines) = spawn_mock(Arc::new(klines_body)).await;
     let ctx = new_context().await;
 
     let mut runtime = Runtime::new();
@@ -308,7 +308,7 @@ async fn the_scan_loop_repeats_without_duplicating_candles() {
     let from = now - 7200;
     let to = now + 120;
 
-    let (addr, calls, lines) = spawn_mock(Arc::new(|f, t| klines_body(f, t))).await;
+    let (addr, calls, lines) = spawn_mock(Arc::new(klines_body)).await;
     let ctx = new_context().await;
 
     let mut runtime = Runtime::new();

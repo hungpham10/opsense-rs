@@ -24,7 +24,9 @@ use tracing_subscriber::prelude::*;
 
 use opsense_core::Config;
 
-use crate::api::{AppState, admin, health_check, oauth, prometheus_handler, repl};
+use crate::api::{AppState, admin, health_check, oauth, prometheus_handler};
+use crate::api::modules::ApiModuleRegistry;
+use crate::modules_config::ModulesConfig;
 
 fn init_telemetry() -> Option<(SdkTracerProvider, SdkMeterProvider)> {
     // Log ra stdout **luôn**, kể cả khi không bật OTLP. Trước đây cả subscriber
@@ -118,9 +120,44 @@ impl connect_info::Connected<IncomingStream<'_, UnixListener>> for UdsConnectInf
 }
 
 pub async fn routes(app_state: AppState) -> Result<Router, Error> {
-    let router = Router::new()
+    // Load module configuration
+    let config_dir = std::env::var("OPSENSE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let modules_cfg = ModulesConfig::load(&config_dir).unwrap_or_default();
+    // `dynamic-modules` tat -> `modules_cfg` khong ai dung.
+    #[cfg(not(feature = "dynamic-modules"))]
+    let _ = &modules_cfg;
+
+    // Build module registry
+    let mut registry = ApiModuleRegistry::new();
+
+    // Register built-in modules
+    #[cfg(feature = "repl")]
+    {
+        registry.register_builtin(Arc::new(crate::api::repl::adapter::ReplApiModule::new(app_state.clone())));
+    }
+
+    // Register admin and oauth as built-in modules (they're always available)
+    // For now, we keep them as direct routes for compatibility
+    // TODO: Convert admin/oauth to module system
+
+    // Load dynamic modules
+    #[cfg(feature = "dynamic-modules")]
+    {
+        // Host services for dynamic modules
+        let host_services: Arc<dyn opsense_mod::HostServices> = Arc::new(crate::serve_host::ServeHostServices { state: app_state.clone() });
+        registry
+            .load_dynamic(&config_dir, &modules_cfg, host_services)
+            .map_err(|e| Error::other(e.to_string()))?;
+    }
+
+    // Build router from registry
+    let mut router = registry.into_router(app_state.clone());
+
+    // Add core routes that aren't in modules yet
+    router = router
         .route("/health", get(health_check))
-        .nest("/api/repl", repl::routes(app_state.clone()))
         .nest("/api/admin", admin::routes())
         .nest("/api/oauth", oauth::routes());
 

@@ -11,6 +11,9 @@ TARGET ?= x86_64-unknown-linux-gnu
 PLATFORM := $(shell echo $(TARGET) | sed 's/x86_64-/linux\/amd64/; s/aarch64-/linux\/arm64/')
 COMPOSE := docker compose
 EARTHLY := earthly
+# Age private key dùng cho SOPS (`make encrypt`/`decrypt`). Override được:
+#   SOPS_AGE_KEY=/path/to/keys.txt make encrypt F=env/render.env
+SOPS_AGE_KEY ?= $(HOME)/.config/sops/age/keys.txt
 
 # VERSION is the image tag shared by all four Opsense images.
 IMG_SERVE      := $(REGISTRY)/$(IMAGE_PREFIX)-serve:$(VERSION)
@@ -18,7 +21,7 @@ IMG_RUNNER     := $(REGISTRY)/$(IMAGE_PREFIX)-runner:$(VERSION)
 IMG_RUNNER_PY  := $(REGISTRY)/$(IMAGE_PREFIX)-runner-python:$(VERSION)
 IMG_RUNNER_JL  := $(REGISTRY)/$(IMAGE_PREFIX)-runner-julia:$(VERSION)
 
-.PHONY: help build-local release build-cloud build-multiarch up up-cloud down down-v logs ps restart shell encrypt decrypt sql-clean test-integration test-integration-down
+.PHONY: help build-local release build-cloud build-multiarch up up-cloud down down-v logs ps restart shell encrypt decrypt sops-check sql-clean test-integration test-integration-down
 
 help:
 	@echo "Opsense dev shortcuts:"
@@ -34,8 +37,9 @@ help:
 	@echo "  make logs                  - docker compose logs -f --tail=100"
 	@echo "  make restart SVC=x         - restart một service (vd: make restart SVC=opsense-serve)"
 	@echo "  make shell SVC=x           - bash vào service (vd: make shell SVC=opsense-serve)"
-	@echo "  make encrypt F=env/secrets.dev.yaml      - sops -e một secrets file"
-	@echo "  make decrypt F=env/secrets.dev.enc.yaml  - sops -d một secrets file"
+	@echo "  make encrypt F=env/render.env          - sops -e một file env (xem docs/SOPS.md)"
+	@echo "  make decrypt F=env/render.env.enc      - sops -d ra stdout, dạng KEY=VALUE"
+	@echo "  make sops-check F=env/render.env.enc   - verify file SOPS giải mã được TRƯỚC KHI deploy"
 	@echo "  make sql-clean             - xoá *.sql files sinh ra sau init"
 	@echo "  make test-integration      - Build + compose up + run full integration suite (Nginx + UDS + Dex)"
 	@echo "  make test-integration-down - Cleanup compose (down -v)"
@@ -130,13 +134,31 @@ shell:
 	@test -n "$(SVC)" || (echo "Usage: make shell SVC=opsense-serve" && exit 1)
 	$(COMPOSE) exec $(SVC) bash
 
+# `--age` cần PUBLIC key, và public key nằm ở dòng COMMENT thứ hai của file
+# `age-keygen` sinh ra (`# public key: age1…`) — KHÔNG phải dòng đầu. Bản cũ
+# đọc `keys.txt.pub` (file này không tồn tại; key nằm ở `keys.txt`) lấy `head -1`
+# ⇒ luôn ra dòng `# created: …` và SOPS fail "invalid recipient".
+#
+# Dùng `.sops.yaml` ở gốc repo thì không cần `--age` ở đây: SOPS tự khớp
+# `path_regex` → recipient. Cờ `--age` chỉ là fallback khi chạy tay ngoài repo.
 encrypt:
-	@test -n "$(F)" || (echo "Usage: make encrypt F=env/secrets.dev.yaml" && exit 1)
-	sops --age $$(cat ~/.config/sops/age/keys.txt.pub 2>/dev/null | head -1) -e $(F) > $(F:.yaml=.enc.yaml)
+	@test -n "$(F)" || (echo "Usage: make encrypt F=env/render.env" && exit 1)
+	@test -f $(SOPS_AGE_KEY) || (echo "ERROR: không thấy $(SOPS_AGE_KEY) — chạy: age-keygen -o $(SOPS_AGE_KEY)" && exit 1)
+	sops --age $$(sed -n 's/^# public key: //p' $(SOPS_AGE_KEY)) -e $(F) > $(F).enc
 
+# Ngược lại: giải mã ra stdout. `--output-type dotenv` vì `scripts/release.sh`
+# đọc đúng chuẩn đó (`sops -d --output-type dotenv`) rồi `export` từng dòng —
+# file mã hoá KHÔNG ra được dotenv thì container boot sẽ im lặng thiếu env.
 decrypt:
-	@test -n "$(F)" || (echo "Usage: make decrypt F=env/secrets.dev.enc.yaml" && exit 1)
-	sops -d $(F)
+	@test -n "$(F)" || (echo "Usage: make decrypt F=env/render.env.enc" && exit 1)
+	sops -d --output-type dotenv $(F)
+
+# Kiểm tra nhanh file SOPS có giải mã bằng key hiện tại không, và có ra đúng
+# dạng `KEY=VALUE` không — chạy TRƯỚC khi deploy.
+sops-check:
+	@test -n "$(F)" || (echo "Usage: make sops-check F=env/render.env.enc" && exit 1)
+	sops -d --output-type dotenv $(F) | grep -qE '^[A-Z_]+=' || (echo "ERROR: output không phải KEY=VALUE" && exit 1)
+	@echo "OK — file giải mã được và ra đúng dạng KEY=VALUE"
 
 sql-clean:
 	find ./sql -name '*.sql' -newer ./Makefile -print -delete

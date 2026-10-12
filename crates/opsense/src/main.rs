@@ -212,6 +212,30 @@ enum Commands {
         config: Option<PathBuf>,
     },
 
+    /// Encrypt/decrypt helpers cho `sys_token_map`.
+    ///
+    /// Sinh blob bytea định dạng Postgres để paste thẳng vào file SQL seed,
+    /// hoặc decrypt blob có sẵn để verify seed đã paste đúng.
+    ///
+    /// `MASTER_KEY` phải đúng 32 byte — lấy từ env. Blob sinh ra KHÁC nhau
+    /// mỗi lần gọi (nonce ngẫu nhiên), nên đừng so blob với bản cũ: so bằng
+    /// `decrypt` ngược lại xem có ra đúng plaintext.
+    ///
+    /// Ví dụ sinh seed cho một deploy mới (Render, prod, …):
+    ///   MASTER_KEY=<32 byte> opsense token encrypt "render-service-placeholder-token!!"
+    ///   → \x6247bda5…   (paste vào sql/postgres/<env>/50-init-tenant.sql)
+    ///
+    /// Verify seed đã paste đúng:
+    ///   MASTER_KEY=<32 byte> opsense token decrypt "\x6247bda5…"
+    ///   → render-service-placeholder-token!!
+    Token {
+        /// `encrypt` | `decrypt`.
+        action: String,
+        /// Plaintext (khi `encrypt`) hoặc blob `\xHEX` (khi `decrypt`);
+        /// hex trần không có `\x` cũng nhận.
+        payload: String,
+    },
+
     /// Run the opsense kernel runner: a standalone execution worker exposing
     /// the `KernelRunner` gRPC service, spawning one kernel process per
     /// session (echo / python / julia).
@@ -236,28 +260,6 @@ enum Commands {
         #[arg(long)]
         health_check: bool,
     },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Lệnh CLI phải parse được mà không cần server. Nếu đổi tên/cờ mà quên đổi
-    /// script/CI thì chết ở đây chứ không phải lúc chạy.
-    #[test]
-    fn cli_subcommands_parse() {
-        for args in [
-            vec!["opsense", "status"],
-            vec!["opsense", "components"],
-            vec!["opsense", "components", "grid"],
-            vec!["opsense", "get-param", "grid", "/params/sl_pct"],
-            vec!["opsense", "set-param", "grid", "/params/sl_pct", "0.02"],
-            vec!["opsense", "query", "grid", "--signal", "order", "--limit", "10"],
-            vec!["opsense", "orders", "grid", "--status", "open"],
-        ] {
-            Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} không parse: {e}"));
-        }
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -370,7 +372,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     }
                 }
-                Some(Commands::Repl { endpoint, runner }) => {                    if let Err(e) = opsense::repl::run(endpoint, runner).await {
+                Some(Commands::Repl { endpoint, runner }) => {
+                    if let Err(e) = opsense::repl::run(endpoint, runner).await {
                         eprintln!("repl error: {e}");
                         std::process::exit(1);
                     }
@@ -381,6 +384,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     } else {
                         println!("config validation passed");
+                    }
+                }
+                Some(Commands::Token { action, payload }) => {
+                    let master_key = std::env::var("MASTER_KEY").unwrap_or_default();
+                    if let Err(e) = opsense::token::run(&master_key, &action, &payload).await {
+                        eprintln!("token error: {e}");
+                        std::process::exit(1);
                     }
                 }
                 Some(Commands::Runner {
@@ -408,4 +418,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lệnh CLI phải parse được mà không cần server. Nếu đổi tên/cờ mà quên đổi
+    /// script/CI thì chết ở đây chứ không phải lúc chạy.
+    #[test]
+    fn cli_subcommands_parse() {
+        for args in [
+            vec!["opsense", "status"],
+            vec!["opsense", "components"],
+            vec!["opsense", "components", "grid"],
+            vec!["opsense", "get-param", "grid", "/params/sl_pct"],
+            vec!["opsense", "set-param", "grid", "/params/sl_pct", "0.02"],
+            vec!["opsense", "query", "grid", "--signal", "order", "--limit", "10"],
+            vec!["opsense", "orders", "grid", "--status", "open"],
+        ] {
+            Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} không parse: {e}"));
+        }
+    }
 }

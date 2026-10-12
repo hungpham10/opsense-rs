@@ -1,5 +1,6 @@
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::io::Error;
+pub use std::io::Error as IoError;
 use std::sync::Arc;
 
 use async_trait::async_trait;

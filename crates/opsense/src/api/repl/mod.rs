@@ -1,6 +1,7 @@
-mod v1;
+pub mod v1;
 pub mod pnl;
-use v1::{MutationRoot, QueryRoot};
+pub mod adapter;
+pub use v1::{MutationRoot, QueryRoot};
 
 use std::sync::Arc;
 

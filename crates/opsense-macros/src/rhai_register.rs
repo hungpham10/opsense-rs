@@ -25,6 +25,9 @@ pub mod rhai_collect {
     use inventory;
     use rhai::Engine;
 
+    // Chỉ được `submit` bởi code sinh từ `#[rhai_register]` ở crate khác, nên
+    // crate này không bao giờ dựng nó — đừng cảnh báo dead_code.
+    #[allow(dead_code)]
     pub struct RhaiFreeFn {
         pub register: fn(&mut Engine),
     }

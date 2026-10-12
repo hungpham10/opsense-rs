@@ -81,7 +81,7 @@ pub async fn clear_all_stations(
 ) -> Result<String, String> {
     if !confirm {
         return Err(
-            "clear_all_stations xoá MẌT VÀNG dữ liệu của process (lệnh đang mở, \
+            "clear_all_stations xoá MẤT VẼNG dữ liệu của process (lệnh đang mở, \
              cursor T+N, plan, lịch sử station) — node vẫn chạy và sẽ ghi lại từ \
              dữ liệu mới tới. Gọi lại với confirm = true nếu bạn thật sự muốn."
                 .to_string(),
@@ -121,6 +121,7 @@ fn render_clear_result(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn query_timeseries(
     client: &OpsenseClient,
     node: &str,
@@ -133,23 +134,23 @@ pub async fn query_timeseries(
     order: Option<&str>,
 ) -> Result<String, String> {
     client
-        .query_station(node, from_ts, to_ts, limit, signal, label_kind, status, order)
+        .query_station(
+            node,
+            from_ts,
+            to_ts,
+            limit,
+            signal,
+            label_kind,
+            status,
+            order,
+        )
         .await
         .map_err(|e| format!("{e:#}"))
         .and_then(|c| json_dump(&c).map_err(|e| format!("{e}")))
 }
 
-/// Lệnh + cursor T+N của một station — gọi thẳng `Query.orders`.
-///
-/// Gộp theo `order_id` và lọc `status` **server-side**: station append-only nên
-/// bản `open` cũ vẫn còn sau khi lệnh đóng, và lọc ở client *trước* khi gộp sẽ
-/// trả một lệnh đã đóng là đang mở (đã đo: 2 lệnh thay vì 1). Trước đây khối
-/// gộp nằm ở đây — giờ nó nằm đúng một chỗ trên server, và `limit` cắt *sau* khi
-/// gộp nên `status: "closed"` không còn rỗng.
-///
-/// Khi có `interval`: server trả thêm `pnl` aggregation. `limit` chỉ cắt
-/// `observations`, `pnl` luôn tính trên toàn bộ cửa sổ sau khi dedup.
-/// Một call thay 3 call trước đây (closed + open + giá).
+/// Arguments for `orders`.
+#[allow(clippy::too_many_arguments)]
 pub async fn orders(
     client: &OpsenseClient,
     node: &str,
@@ -162,7 +163,16 @@ pub async fn orders(
     mark_price: Option<f64>,   // NEW: giá để tính unrealized PnL
 ) -> Result<String, String> {
     client
-        .orders(node, status, from_ts, to_ts, limit, order, interval, mark_price)
+        .orders(
+            node,
+            status,
+            from_ts,
+            to_ts,
+            limit,
+            order,
+            interval,
+            mark_price,
+        )
         .await
         .map_err(|e| format!("{e:#}"))
         .and_then(|r| json_dump(&r).map_err(|e| format!("{e}")))

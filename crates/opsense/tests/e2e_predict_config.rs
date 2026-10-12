@@ -77,6 +77,7 @@ fn s3_pass() -> String {
 ///   - cpu_steady hằng 42.0, 20 điểm (ts ≡ now+1 mod 3),
 ///   - cpu_live_ramp = 999 (đột biến, lệch xa prediction ~18) → check false,
 ///   - cpu_live_steady = 42 (khớp prediction steady) → check true.
+///
 /// Mọi ts dời về quá khứ (max ≤ now-60). Từng metric ts khác nhau vì
 /// `update_range` dedup theo ts — và live sample phải khác ts prediction để
 /// tsdb không dedup chúng về cùng hàng.

@@ -834,7 +834,7 @@ mod tests {
             .enable_all()
             .build()
             .expect("rt");
-        let c = rt.block_on(async {
+        rt.block_on(async {
             let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
             let st = c.status().await.expect("status phải bóc được root `status`");
             assert_eq!(st.nodes.len(), 1);
@@ -847,7 +847,6 @@ mod tests {
             assert_eq!(comps[0].id, "clock");
             assert_eq!(comps[0].kind, "Source", "`type` phải map vào `kind`");
         });
-        let _ = c;
     }
 
     /// Hồi quy: tên field trong DTO phải là tên field **server thật trả về**.

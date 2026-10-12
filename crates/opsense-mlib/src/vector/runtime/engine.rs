@@ -385,6 +385,8 @@ pub fn channel_full_waits() -> u64 {
     CHANNEL_FULL_WAITS.load(Ordering::Relaxed)
 }
 
+type TopologyCache = Option<(u64, u64, std::sync::Arc<Vec<NodeInfo>>)>;
+
 pub struct Runtime {
     // @NOTE: idea
     //
@@ -435,8 +437,7 @@ pub struct Runtime {
     generation: AtomicU64,
     /// `(generation, snapshot)` — status tools poll this often, rebuilding the
     /// full NodeInfo vec per call made it the hottest read path.
-    topology_cache:
-        std::sync::Mutex<Option<(u64, u64, std::sync::Arc<Vec<NodeInfo>>)>>,
+    topology_cache: std::sync::Mutex<TopologyCache>,
 }
 
 impl Default for Runtime {
@@ -636,8 +637,8 @@ impl Runtime {
                 Some(NodeInfo {
                     id: id.clone(),
                     component_type: bootstrap.component_type().to_string(),
-                    inputs: sources.get(idx).map(&names).unwrap_or_default(),
-                    outputs: sinks.get(idx).map(&names).unwrap_or_default(),
+                    inputs: sources.get(idx).map(names).unwrap_or_default(),
+                    outputs: sinks.get(idx).map(names).unwrap_or_default(),
                     running: tasks.contains_key(idx),
                     last_error: errors.get(id).cloned(),
                     fault_count: self.last_errors.count(id),

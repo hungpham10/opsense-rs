@@ -1,0 +1,21 @@
+[package]
+name = "opsense-mod"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Opsense module SDK — ABI-stable interface for dynamic API/MCP modules"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2.0"
+tokio = { workspace = true }
+axum = { workspace = true }
+
+[features]
+default = []
+serde = []
+
+[lib]
+# Only rlib: this is the shared contract, not a plugin itself
+crate-type = ["rlib"]

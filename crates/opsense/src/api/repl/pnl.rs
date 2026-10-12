@@ -80,7 +80,7 @@ pub fn dedup_orders<'a>(rows: &'a [&'a Observation]) -> Vec<&'a Observation> {
     rows.iter()
         .enumerate()
         .filter(|(i, o)| {
-            let is_cursor = o.labels.get("order_id").is_none();
+            let is_cursor = !o.labels.contains_key("order_id");
             is_cursor || keep.contains(i)
         })
         .map(|(_, o)| *o)
@@ -343,11 +343,11 @@ pub fn aggregate(
     // — finalize từng bucket rồi mới cộng — sẽ chia 2 lần và cho ra trung bình
     // của trung bình, sai khi các bucket có số lệnh lệch nhau.
     let mut total = PnlBucket::new(0);
-    for (_, bucket) in &buckets {
+    for bucket in buckets.values() {
         total.roll_up_raw(bucket);
     }
 
-    for (_, mut bucket) in buckets {
+    for mut bucket in buckets.into_values() {
         bucket.finalize();
         summary.buckets.push(bucket);
     }
@@ -425,11 +425,9 @@ mod tests {
     #[test]
     fn dedup_orders_keeps_latest_per_id() {
         let now = 1_000_000;
-        let rows = vec![
-            order_obs(now - 200, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")]),
+        let rows = [order_obs(now - 200, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")]),
             order_obs(now - 100, 101.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o1")]),
-            order_obs(now, 102.0, "short", 200.0, "open", None, &[("order_id", "o2")]),
-        ];
+            order_obs(now, 102.0, "short", 200.0, "open", None, &[("order_id", "o2")])];
         let rows_ref: Vec<_> = rows.iter().collect();
         let deduped = dedup_orders(&rows_ref);
         assert_eq!(deduped.len(), 2);
@@ -442,10 +440,8 @@ mod tests {
         let now = 1_000_000;
         let cursor = Observation::new(now - 50, "BTCUSDT".into(), TelemetryKind::Metric, Signal::Summary, 1.0)
             .with_label("kind", "trading_step");
-        let rows = vec![
-            cursor.clone(),
-            order_obs(now, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o1")]),
-        ];
+        let rows = [cursor.clone(),
+            order_obs(now, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o1")])];
         let rows_ref: Vec<_> = rows.iter().collect();
         let deduped = dedup_orders(&rows_ref);
         assert_eq!(deduped.len(), 2);
@@ -454,10 +450,8 @@ mod tests {
     #[test]
     fn closed_rows_count_as_trades_not_open_rows() {
         let now = 1_000_000;
-        let rows = vec![
-            order_obs(now - 100, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")]),
-            order_obs(now, 101.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o1")]),
-        ];
+        let rows = [order_obs(now - 100, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")]),
+            order_obs(now, 101.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o1")])];
         let rows_ref: Vec<_> = rows.iter().collect();
         let deduped = dedup_orders(&rows_ref);
         let sum = aggregate(&deduped, 0, None, 0.0004);
@@ -467,7 +461,7 @@ mod tests {
     #[test]
     fn size_times_pnl_pct_is_not_double_charging_fees() {
         let now = 1_000_000;
-        let rows = vec![order_obs(now, 100.0, "long", 100.0, "closed", Some(0.0011759), &[("order_id", "o1")])];
+        let rows = [order_obs(now, 100.0, "long", 100.0, "closed", Some(0.0011759), &[("order_id", "o1")])];
         let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 0, None, 0.0004);
         // net_pnl_abs = 100 * 0.0011759 = 0.11759 — KHÔNG trừ thêm 0.0004
         assert!((sum.net_pnl_abs - 0.11759).abs() < 1e-9);
@@ -476,10 +470,8 @@ mod tests {
     #[test]
     fn trades_and_buckets_fill_empty_gaps() {
         let now = 3_600_000; // align to 1h buckets
-        let rows = vec![
-            order_obs(now, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o1")]),
-            order_obs(now + 4 * 3600, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o2")]),
-        ];
+        let rows = [order_obs(now, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o1")]),
+            order_obs(now + 4 * 3600, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o2")])];
         let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 3600, None, 0.0004); // 1h buckets
         // Buckets 0,1,2,3,4 = 5 buckets, 2 có trade, 3 zero
         assert_eq!(sum.buckets.len(), 5);
@@ -493,7 +485,7 @@ mod tests {
         let now = 1_000_000;
         let cursor = Observation::new(now, "BTCUSDT".into(), TelemetryKind::Metric, Signal::Summary, 1.0)
             .with_label("kind", "trading_step");
-        let rows = vec![cursor, order_obs(now, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o1")])];
+        let rows = [cursor, order_obs(now, 100.0, "long", 100.0, "closed", Some(0.01), &[("order_id", "o1")])];
         let rows_ref: Vec<_> = rows.iter().collect();
         let deduped = dedup_orders(&rows_ref);
         let sum = aggregate(&deduped, 0, None, 0.0004);
@@ -516,10 +508,8 @@ mod tests {
     #[test]
     fn unrealized_is_marked_to_mark_price() {
         let now = 1_000_000;
-        let rows = vec![
-            order_obs(now, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")]),
-            order_obs(now, 100.0, "short", 100.0, "open", None, &[("order_id", "o2")]),
-        ];
+        let rows = [order_obs(now, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")]),
+            order_obs(now, 100.0, "short", 100.0, "open", None, &[("order_id", "o2")])];
         let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 0, Some(101.0), 0.0004);
         // long: (101-100)/100 - 0.0004 = 0.01 - 0.0004 = 0.0096
         // short: (100-101)/100 - 0.0004 = -0.01 - 0.0004 = -0.0104
@@ -531,7 +521,7 @@ mod tests {
     #[test]
     fn unrealized_is_zero_without_mark_price() {
         let now = 1_000_000;
-        let rows = vec![order_obs(now, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")])];
+        let rows = [order_obs(now, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")])];
         let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 0, None, 0.0004);
         assert_eq!(sum.unrealized_abs, 0.0);
         assert_eq!(sum.mark_price, None);
@@ -540,7 +530,7 @@ mod tests {
     #[test]
     fn mark_price_uses_node_fee_rate() {
         let now = 1_000_000;
-        let rows = vec![order_obs(now, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")])];
+        let rows = [order_obs(now, 100.0, "long", 100.0, "open", None, &[("order_id", "o1")])];
         // fee_roundtrip = 0.0006 (0.03% * 2)
         let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 0, Some(101.0), 0.0006);
         // (101-100)/100 - 0.0006 = 0.01 - 0.0006 = 0.0094
@@ -625,11 +615,9 @@ mod tests {
     #[test]
     fn avg_pcts_are_pct_means_not_usd_per_win() {
         let now = 1_000_000;
-        let rows = vec![
-            order_obs(now, 100.0, "long", 100.0, "closed", Some(0.02), &[("order_id", "w1")]),
+        let rows = [order_obs(now, 100.0, "long", 100.0, "closed", Some(0.02), &[("order_id", "w1")]),
             order_obs(now + 1, 100.0, "long", 100.0, "closed", Some(0.04), &[("order_id", "w2")]),
-            order_obs(now + 2, 100.0, "long", 100.0, "closed", Some(-0.01), &[("order_id", "l1")]),
-        ];
+            order_obs(now + 2, 100.0, "long", 100.0, "closed", Some(-0.01), &[("order_id", "l1")])];
         let sum = aggregate(&rows.iter().collect::<Vec<_>>(), 0, None, 0.0004);
         // avg_win = (0.02 + 0.04) / 2 = 0.03 — là tỷ lệ, không phải 0.03 USD
         assert!((sum.avg_win_pct - 0.03).abs() < 1e-12, "avgWinPct phải là 0.03, được {}", sum.avg_win_pct);
