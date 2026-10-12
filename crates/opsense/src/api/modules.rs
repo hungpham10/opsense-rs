@@ -1,6 +1,7 @@
 //! API module registry — loads and manages HTTP API modules.
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::sync::Arc;
 
 use axum::{
@@ -13,7 +14,6 @@ use axum::{
 use opsense_mod::{
     HttpMethod, HttpRequest, HttpResponse, Manifest, OpsenseModule, TenantServices,
 };
-use std::ffi::c_void;
 
 #[cfg(feature = "dynamic-modules")]
 use opsense_mod::ModuleError;
