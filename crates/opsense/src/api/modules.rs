@@ -1,8 +1,10 @@
 //! API module registry — loads and manages HTTP API modules.
 
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::sync::Arc;
+
+#[cfg(not(feature = "dynamic-modules"))]
+use std::ffi::c_void;
 
 use axum::{
     Router,
@@ -390,7 +392,7 @@ unsafe extern "C" fn host_call_ffi(
     let host: &Arc<dyn HostServices> = unsafe { &*(ctx as *const Arc<dyn HostServices>) };
     let host = host.clone();
 
-    let out = opsense_mod::drive(async move { host.call(&op, req_json).await });
+    let out = opsense_mod::drive(async move { host.call(op, req_json).await });
 
     let resp_json = match out {
         Ok(v) => serde_json::to_string(&v).unwrap_or_else(|e| {
