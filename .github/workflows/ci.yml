@@ -116,6 +116,45 @@ jobs:
       - name: Check ${{ matrix.label }}
         run: cargo check -p opsense-core --locked --features "${{ matrix.feats }}"
 
+  # Dynamic module loading (dlopen) — compile gate.
+  #
+  # `dynamic-modules` là feature tùy chọn của crate `opsense` (kéo `libloading`).
+  # Không có job này thì việc ai đó vô tình làm hỏng nhánh `#[cfg]` trong
+  # `api/modules.rs` chỉ lộ ra ở release build trong image.yml — tức là ở
+  # image đã publish, quá muộn. Job hỏi đúng một câu: binary `opsense` còn
+  # biên dịch được khi bật feature này không.
+  dynamic-modules:
+    name: Dynamic Modules (compile gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-dynamic-modules
+
+      # Chỉ build `--release` một lần, không thêm `cargo check`: build đã bao
+      # hàm check, chạy cả hai tốn gấp đôi thời gian cho cùng một kết luận.
+      # `-p opsense` (không `--workspace`) vì `-p opsense-proto` cần protoc cho
+      # build.rs — thừa cho một compile gate.
+      #
+      # Bước `strings` là phần quan trọng: nó chứng minh feature thực sự vào
+      # binary chứ không chỉ "biên dịch được". `ApiModuleRegistry::load_dynamic`
+      # nằm trong khối `#[cfg]` của feature này, nên chuỗi log
+      # "loading dynamic module" chỉ tồn tại khi bật.
+      - name: Build opsense + assert dynamic-modules reached the binary
+        run: |
+          cargo build -p opsense --release --locked --features dynamic-modules
+          strings target/release/opsense | grep -q "loading dynamic module"
+
   # Unit tests — no docker compose needed
   #
   # Matrix `lru`: chạy cả hai hành vi arena của `LruCache`.

@@ -80,7 +80,12 @@ jobs:
         # ngay lúc mở station với `requires opsense-core feature 'redis'`.
         # `sqlite` cố ý **không** bật ở đây — nó kéo `libsqlite3-sys` (compile C)
         # vào cross-build, đổi lấy feature mà image này không dùng.
-        run: cargo zigbuild --release --locked --features opsense-core/parquet,opsense-core/redis,opsense-core/lru-shared-memory --target ${{ matrix.target }}
+        #
+        # `opsense/dynamic-modules` bật `dlopen` module qua `modules.toml`.
+        # Không bật thì `ApiModuleRegistry::load_dynamic` không tồn tại (cả khối
+        # đó là `#[cfg(feature = "dynamic-modules")]`) ⇒ `.so` nằm trong image
+        # cũng bị bỏ qua im lặng. Phải khớp với Earthfile.
+        run: cargo zigbuild --release --locked --features opsense-core/parquet,opsense-core/redis,opsense-core/lru-shared-memory,opsense/dynamic-modules --target ${{ matrix.target }}
 
       # Stage binaries in a neutral dir so the artifact layout is flat
       # (same pattern as .github/workflows/ci.yml, which is proven to work).
