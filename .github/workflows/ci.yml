@@ -53,7 +53,25 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-        run: cargo build --workspace --release --locked
+        run: cargo build --workspace --release --locked --features opsense/dynamic-modules
+
+      # `dynamic-modules` bật `dlopen` module qua `modules.toml`. Không bật thì
+      # `ApiModuleRegistry::load_dynamic` không tồn tại (cả khối đó là
+      # `#[cfg(feature = "dynamic-modules")]`) ⇒ `.so` bị bỏ qua im lặng.
+      #
+      # Bước assert này quan trọng hơn vẻ ngoài: build xong KHÔNG chứng minh
+      # feature đã vào binary — chuỗi log đặc trưng nằm trong khối `#[cfg]`
+      # ấy, nên `strings | grep` mới là bằng chứng thật. Không có nó, việc hỏng
+      # nhánh `#[cfg]` chỉ lộ ra ở release build trong image.yml, tức trên
+      # image đã publish.
+      #
+      # Gộp vào job này (thay vì job compile riêng) vì job này đã build đúng
+      # binary `opsense` — thêm một job chỉ để build lại lần nữa là tốn ~12
+      # phút CI cho cùng một kết luận. `dist-bin` từ đây được các job
+      # integration test dùng lại, nên chúng cũng chạy trên binary đã bật
+      # feature, gần với image thật hơn là bản default.
+      - name: Assert dynamic-modules reached the binary
+        run: strings target/release/opsense | grep -q "loading dynamic module"
 
       # SỬA LỖI CACHE: Copy binary ra thư mục biệt lập TRƯỚC KHI upload artifact
       # Giúp không làm biến đổi mtime/metadata bên trong thư mục target/
@@ -115,45 +133,6 @@ jobs:
       # đụng tới build.rs cần protoc của `opsense-proto`.
       - name: Check ${{ matrix.label }}
         run: cargo check -p opsense-core --locked --features "${{ matrix.feats }}"
-
-  # Dynamic module loading (dlopen) — compile gate.
-  #
-  # `dynamic-modules` là feature tùy chọn của crate `opsense` (kéo `libloading`).
-  # Không có job này thì việc ai đó vô tình làm hỏng nhánh `#[cfg]` trong
-  # `api/modules.rs` chỉ lộ ra ở release build trong image.yml — tức là ở
-  # image đã publish, quá muộn. Job hỏi đúng một câu: binary `opsense` còn
-  # biên dịch được khi bật feature này không.
-  dynamic-modules:
-    name: Dynamic Modules (compile gate)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.94"
-
-      - name: Cache Cargo build
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-dynamic-modules
-
-      # Chỉ build `--release` một lần, không thêm `cargo check`: build đã bao
-      # hàm check, chạy cả hai tốn gấp đôi thời gian cho cùng một kết luận.
-      # `-p opsense` (không `--workspace`) vì `-p opsense-proto` cần protoc cho
-      # build.rs — thừa cho một compile gate.
-      #
-      # Bước `strings` là phần quan trọng: nó chứng minh feature thực sự vào
-      # binary chứ không chỉ "biên dịch được". `ApiModuleRegistry::load_dynamic`
-      # nằm trong khối `#[cfg]` của feature này, nên chuỗi log
-      # "loading dynamic module" chỉ tồn tại khi bật.
-      - name: Build opsense + assert dynamic-modules reached the binary
-        run: |
-          cargo build -p opsense --release --locked --features dynamic-modules
-          strings target/release/opsense | grep -q "loading dynamic module"
 
   # Unit tests — no docker compose needed
   #
