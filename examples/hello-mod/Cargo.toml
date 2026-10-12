@@ -1,6 +1,8 @@
+[workspace]
+
 [package]
 name = "hello-mod"
-version = "1.0.34"
+version = "0.1.0"
 edition = "2024"
 
 [lib]

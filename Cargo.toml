@@ -15,8 +15,8 @@ members = [
 	"crates/opsense-kernel-julia",
 	"crates/opsense-runner",
 	"crates/opsense-mod",
-	"examples/hello-mod",
 ]
+exclude = ["examples/hello-mod"]
 
 [workspace.package]
 version = "1.0.35"
