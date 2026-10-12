@@ -60,8 +60,11 @@ impl Admin {
     }
 
     /// Helper lấy DB pool theo tenant_id (internal use, gọi từ traits).
-    pub(crate) fn dbt(&self, tenant_id: i64) -> &sqlx::AnyPool {
-        self.resolver.database(tenant_id)
+    /// `Err` khi chưa cấu hình `DB_DSN` — trước đây là `panic!`.
+    pub(crate) fn dbt(&self, tenant_id: i64) -> Result<&sqlx::AnyPool, AdminError> {
+        self.resolver.database(tenant_id).ok_or_else(|| {
+            AdminError::Other(format!("missing DB pool for tenant {tenant_id}"))
+        })
     }
 
     /// Helper lấy DB dialect theo tenant_id.
@@ -95,7 +98,7 @@ impl Admin {
                 self.cache_unencrypted_tokens_by_services
                     .put(cache_key, None);
 
-                let pool = self.dbt(tenant_id);
+                let pool = self.dbt(tenant_id)?;
                 let mut conn = pool.acquire().await?;
                 let row = sqlx::query(
                     "SELECT token FROM sys_token_map WHERE tenant_id = $1 AND service = $2",
@@ -137,7 +140,7 @@ impl Admin {
         use opsense_mlib::sops::decrypt;
         use sqlx::Row;
 
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
         let row = sqlx::query("SELECT token FROM sys_token_map WHERE tenant_id = $1 AND id = $2")
             .bind(tenant_id)

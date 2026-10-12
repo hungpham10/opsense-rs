@@ -49,14 +49,16 @@ Ba điểm cốt lõi:
 | `opsense-qlib` | Kernel giao dịch: `Portfolio`, `Session`, `TradingGrid`, `plan` (contract với script), `Graph` (DAG→ONNX) |
 | `opsense-mlib` | Nền tảng: vector runtime, storage backends (parquet/sqlite/redis/…), `AnalysisGrid`, `TransitionAnalysis`, SGD |
 | `opsense-model` | Entities (sea-orm), `Resolver`, `Secret`, admin/OAuth |
+| `opsense-mod` | Module SDK: `OpsenseModule`, `CacheBackend`, `HostServices`, FFI vtable, `TenantServices` |
 | `opsense-proto` | Schema protobuf cho IPC + gRPC |
 | `opsense-runner` | Service `KernelRunner`: gRPC ↔ kernel IPC |
 | `opsense-kernel-echo` / `-python` / `-julia` | Kernel tham chiếu / sidecar phân tích |
 | `opsense-macros` | Proc-macro: `#[source]`, `#[transform]`, `#[sink]`, `#[rhai_class]`, `#[rhai_func]` |
 
 Dependency hướng: `opsense` → {`opsense-core`, `opsense-components`, `opsense-rhai`,
-`opsense-qlib`, `opsense-runner`, `opsense-model`}; `opsense-rhai` → `opsense-qlib`
-(để implement `Strategy`). **Không crate nào của runtime depend crate `rhai`** ngoài
+`opsense-qlib`, `opsense-runner`, `opsense-model`, `opsense-mod`};
+`opsense-rhai` → `opsense-qlib` (để implement `Strategy`).
+**Không crate nào của runtime depend crate `rhai`** ngoài
 `opsense-rhai` — nhờ vậy không có vòng phụ thuộc.
 
 ## 3. Tầng 1 — Telemetry pipeline

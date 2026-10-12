@@ -130,7 +130,7 @@ These modules require I/O, network, storage, or external services. They are the 
 |--------|---------|---------------------------|
 | `opsense-model/src/resolver.rs` | Postgres/MySQL, Redis, S3 connections | Replace with env-based config; trading doesn't need Infisical/S3 |
 | `opsense-model/src/secret.rs` | Infisical secrets manager integration | Remove — use env variables |
-| `opsense-model/src/cache.rs` | Redis-based pagination/caching | Replace with in-memory LRU |
+| `opsense-mlib/src/cache.rs` | Redis-based pagination/caching (moved from opsense-model) | Replace with in-memory LRU |
 | `opsense-model/src/entities/admin/` | Tenant, user, device, session tables | Keep only what's needed for auth; trading doesn't need full RBAC |
 
 ### 2.3 HTTP Server & API Layer (opsense binary)

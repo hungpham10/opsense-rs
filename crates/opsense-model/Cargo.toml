@@ -8,6 +8,9 @@ license.workspace = true
 [lints.rust]
 warnings = "deny"
 
+[features]
+redis = ["opsense-mlib/redis"]
+
 [dependencies]
 opsense-mlib = { path = "../opsense-mlib", features = ["sops"] }
 

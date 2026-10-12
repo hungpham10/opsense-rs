@@ -18,6 +18,7 @@ pub mod ffi;
 pub mod host;
 pub mod manifest;
 pub mod error;
+pub mod cache;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -26,9 +27,10 @@ pub use manifest::*;
 pub use error::ModuleError;
 pub use host::HostServices;
 pub use ffi::*;
+pub use cache::{Cache, CacheBackend, CacheError, Page, TenantServices};
 
 /// Current ABI version. Increment when `HostV1` or `ModuleV1` layout changes.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 3;
 
 /// Object-safe async return type used throughout the module contract.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -43,11 +45,13 @@ pub trait OpsenseModule: Send + Sync + 'static {
 
     /// Handle an HTTP request. The host converts the incoming axum request
     /// into `HttpRequest`, calls this, and converts the response back.
-    fn route(&self, req: HttpRequest) -> BoxFut<'static, Result<HttpResponse, ModuleError>>;
+    /// `services` provides per-tenant cache and other host services.
+    fn route(&self, req: HttpRequest, services: &TenantServices) -> BoxFut<'static, Result<HttpResponse, ModuleError>>;
 
     /// Handle an MCP tool call. The host converts the MCP `CallToolRequest`
     /// into `name` + `args` JSON, calls this, and wraps the result.
-    fn tool(&self, name: String, args: serde_json::Value)
+    /// `services` provides per-tenant cache and other host services.
+    fn tool(&self, name: String, args: serde_json::Value, services: &TenantServices)
         -> BoxFut<'static, Result<String, ModuleError>>;
 }
 

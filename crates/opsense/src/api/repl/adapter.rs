@@ -4,7 +4,7 @@
 use {
     crate::api::AppState,
     crate::api::repl::{schema, v1},
-    opsense_mod::{BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest, ModuleError, OpsenseModule, RouteSpec},
+    opsense_mod::{BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest, ModuleError, OpsenseModule, RouteSpec, TenantServices},
     async_graphql::{Schema, EmptySubscription},
     std::sync::Arc,
 };
@@ -42,7 +42,7 @@ impl OpsenseModule for ReplApiModule {
         }
     }
 
-    fn route(&self, req: HttpRequest) -> BoxFut<'static, Result<HttpResponse, ModuleError>> {
+    fn route(&self, req: HttpRequest, _services: &TenantServices) -> BoxFut<'static, Result<HttpResponse, ModuleError>> {
         let schema = self.schema.clone();
         let state = self.state.clone();
 
@@ -71,7 +71,7 @@ impl OpsenseModule for ReplApiModule {
         })
     }
 
-    fn tool(&self, _name: String, _args: serde_json::Value) -> BoxFut<'static, Result<String, ModuleError>> {
+    fn tool(&self, _name: String, _args: serde_json::Value, _services: &TenantServices) -> BoxFut<'static, Result<String, ModuleError>> {
         Box::pin(async { Err(ModuleError::RouteNotFound("no tools in API module".into())) })
     }
 }

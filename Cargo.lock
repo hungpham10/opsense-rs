@@ -2603,6 +2603,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hello-mod"
+version = "1.0.34"
+dependencies = [
+ "opsense-mod",
+ "serde_json",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3973,7 +3981,7 @@ dependencies = [
 
 [[package]]
 name = "opsense"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "anyhow",
  "arrow-csv",
@@ -4040,7 +4048,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-components"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "async-trait",
  "csv",
@@ -4060,7 +4068,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-core"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -4077,7 +4085,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-echo"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4089,7 +4097,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-julia"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4099,7 +4107,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-python"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4109,7 +4117,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-macros"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "inventory",
  "proc-macro2",
@@ -4120,7 +4128,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-mlib"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "aes-gcm",
  "arrow-array",
@@ -4132,6 +4140,7 @@ dependencies = [
  "log",
  "object_store",
  "opsense-macros",
+ "opsense-mod",
  "parking_lot",
  "parquet",
  "rand 0.8.8",
@@ -4151,9 +4160,10 @@ dependencies = [
 
 [[package]]
 name = "opsense-mod"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "axum",
+ "futures",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4162,7 +4172,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-model"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -4185,7 +4195,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-proto"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4201,7 +4211,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-qlib"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "async-trait",
  "csv",
@@ -4219,7 +4229,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-rhai"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "async-trait",
  "inventory",
@@ -4241,7 +4251,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-runner"
-version = "1.0.34"
+version = "1.0.35"
 dependencies = [
  "anyhow",
  "arrow-array",

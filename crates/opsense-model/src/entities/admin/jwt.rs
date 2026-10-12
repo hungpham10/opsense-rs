@@ -28,7 +28,7 @@ impl Jwt for Admin {
         tenant_id: i64,
         token: &str,
     ) -> Result<Option<String>, AdminError> {
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
         let row = sqlx::query(
             "SELECT id, user_id, token_id, \

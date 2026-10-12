@@ -136,7 +136,7 @@ impl Resolver {
                 .await
             {
                 Ok(pool) => dbs.push(pool),
-                Err(e) => eprintln!("Error during connect to database: {e}"),
+                Err(e) => return Err(Error::other(format!("Error during connect to database: {e}"))),
             }
         }
 
@@ -197,20 +197,29 @@ impl Resolver {
         })
     }
 
-    pub fn cache(&self, tenant_id: i64) -> MultiplexedConnection {
+    /// Shard cache theo tenant. `None` khi chưa cấu hình `REDIS_DSN`.
+    pub fn cache(&self, tenant_id: i64) -> Option<MultiplexedConnection> {
+        if self.caches.is_empty() {
+            return None;
+        }
         self.caches
             .get((tenant_id % (self.caches.len() as i64)) as usize)
-            .expect("Failed to get cache connection")
-            .clone()
+            .cloned()
     }
 
-    pub fn database(&self, tenant_id: i64) -> &DbClient {
+    /// Pool DB theo tenant. `None` khi chưa cấu hình `DB_DSN`.
+    pub fn database(&self, tenant_id: i64) -> Option<&DbClient> {
+        if self.dbs.is_empty() {
+            return None;
+        }
         self.dbs
             .get((tenant_id % (self.dbs.len() as i64)) as usize)
-            .unwrap_or_else(|| panic!("Failed to get database client for tenant_id: {}", tenant_id))
     }
 
     pub fn database_kind(&self, tenant_id: i64) -> DbKind {
+        if self.db_kinds.is_empty() {
+            return DbKind::Unknown;
+        }
         self.db_kinds
             .get((tenant_id % (self.db_kinds.len() as i64)) as usize)
             .copied()
