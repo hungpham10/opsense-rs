@@ -14,7 +14,7 @@
 
 use std::ffi::c_char;
 
-use super::{HttpRequest, ModuleError, ABI_VERSION, OpsenseModule};
+use super::{HttpRequest, ModuleError, ABI_VERSION, OpsenseModule, cache::TenantServices};
 
 /// Opaque module state pointer for FFI (C-ABI compatible).
 /// We use `*mut c_void` for FFI compatibility, but wrap it in a Send/Sync type on the host side.
@@ -29,16 +29,25 @@ pub struct HostV1 {
     /// Must equal `ABI_VERSION`. Plugin should verify on init.
     pub abi_version: u32,
 
+    /// Opaque context pointer — set by the host during `load_dynamic`.
+    /// Each `HostV1` gets its own context so multiple `AppState` instances
+    /// don't share the same global. The host passes this back to `call`/`log`.
+    pub context: *mut std::ffi::c_void,
+
     /// Call a host operation. `op` and `req` are JSON strings.
     /// Returns a JSON response string (caller must free via `free`).
+    /// The first argument is the `context` pointer from this `HostV1`.
     pub call: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
         op: *const c_char,
         req: *const c_char,
     ) -> *mut c_char,
 
     /// Log a message through host's tracing.
     /// `level`: 0=error, 1=warn, 2=info, 3=debug, 4=trace.
+    /// The first argument is the `context` pointer from this `HostV1`.
     pub log: unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
         level: u32,
         target: *const c_char,
         msg: *const c_char,
@@ -68,11 +77,13 @@ pub struct ModuleV1 {
 
     /// Handle an HTTP request or tool call.
     ///
+    /// `services` provides per-tenant cache and other host services.
     /// `route_id` is the route/tool identifier (from manifest).
     /// `req_json` is the request payload as JSON string.
     /// Returns a JSON response string (host must free via `free`).
     pub handle: unsafe extern "C" fn(
         state: ModuleHandle,
+        services: *const TenantServices,
         route_id: *const c_char,
         req_json: *const c_char,
     ) -> *mut c_char,
@@ -187,7 +198,7 @@ pub unsafe fn host_call(
         serde_json::to_string(req).map_err(|e| ModuleError::Json(e.to_string()))?,
     );
 
-    let res_ptr = unsafe { (host.call)(op_c, req_c) };
+    let res_ptr = unsafe { (host.call)(host.context, op_c, req_c) };
     unsafe { (host.free)(op_c) };
     unsafe { (host.free)(req_c) };
 
@@ -212,9 +223,39 @@ pub unsafe fn host_call(
 pub unsafe fn host_log(host: &HostV1, level: u32, target: &str, msg: &str) {
     let t = to_c_string(target.into());
     let m = to_c_string(msg.into());
-    unsafe { (host.log)(level, t, m) };
+    unsafe { (host.log)(host.context, level, t, m) };
     unsafe { (host.free)(t) };
     unsafe { (host.free)(m) };
+}
+
+/// Drive a future from FFI context, avoiding "runtime within a runtime" panic.
+///
+/// FFI `handle()` is sync; module route/tool is async. Must drive the future
+/// but we're inside an async handler from axum ⇒ `Handle::block_on` panics.
+/// 
+/// Strategy:
+/// - Multi-thread runtime: use `block_in_place` + `Handle::block_on`
+/// - Current-thread or no runtime: spawn on dedicated single-thread runtime
+pub fn drive<F>(fut: F) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| h.block_on(fut))
+        }
+        _ => {
+            static MODULE_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+            let rt = MODULE_RT.get_or_init(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("module runtime")
+            });
+            futures::executor::block_on(rt.spawn(fut)).expect("module task panicked")
+        }
+    }
 }
 
 /// Wrapper trait implemented by plugins to bridge from the C ABI to Rust.
@@ -255,14 +296,16 @@ pub trait ModuleExports: super::OpsenseModule {
     /// # Safety
     ///
     /// `state` must come from [`ModuleExports::into_vtable`] on this same
-    /// module type, and `route_id`/`req_json` must be null or valid
+    /// module type, and `services`/`route_id`/`req_json` must be null or valid
     /// NUL-terminated C strings.
     unsafe extern "C" fn ffi_handle(
         state: ModuleHandle,
+        services: *const TenantServices,
         route_id: *const c_char,
         req_json: *const c_char,
     ) -> *mut c_char {
         let wrapper = unsafe { &*(state.0 as *const ModuleWrapper) };
+        let services = unsafe { services.as_ref() };
         let route_id = unsafe { from_c_str(route_id) };
         let req_json = unsafe { from_c_str(req_json) };
 
@@ -275,6 +318,11 @@ pub trait ModuleExports: super::OpsenseModule {
             }
         };
 
+        let services = services.cloned().unwrap_or(TenantServices {
+            tenant_id: 0,
+            cache: None,
+        });
+
         // Dispatch based on route_id — check if it's a route or tool
         let manifest = wrapper.module.manifest();
         let is_route = manifest.routes.iter().any(|r| r.id == route_id);
@@ -282,18 +330,12 @@ pub trait ModuleExports: super::OpsenseModule {
         // Both route and tool return BoxFut, but with different output types.
         // We need to handle them separately.
         let result_json = if is_route {
-            let mut fut = wrapper.module.route(req);
-            let rt = tokio::runtime::Handle::try_current()
-                .ok()
-                .map(|h| h.block_on(&mut fut))
-                .unwrap_or_else(|| {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("tokio runtime");
-                    rt.block_on(&mut fut)
-                });
-            match rt {
+            let fut = wrapper.module.route(req, &services);
+            let result = drive(async move {
+                let result = fut.await;
+                result
+            });
+            match result {
                 Ok(resp) => serde_json::to_string(&resp).unwrap_or_else(|e| {
                     let err = ModuleError::Internal(format!("response serialize: {e}"));
                     serde_json::to_string(&super::HttpResponse::from(err)).unwrap()
@@ -307,18 +349,12 @@ pub trait ModuleExports: super::OpsenseModule {
             // Tool call: args are in req.body as JSON
             let args: serde_json::Value =
                 serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
-            let mut fut = wrapper.module.tool(route_id, args);
-            let rt = tokio::runtime::Handle::try_current()
-                .ok()
-                .map(|h| h.block_on(&mut fut))
-                .unwrap_or_else(|| {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("tokio runtime");
-                    rt.block_on(&mut fut)
-                });
-            match rt {
+            let fut = wrapper.module.tool(route_id, args, &services);
+            let result = drive(async move {
+                let result = fut.await;
+                result
+            });
+            match result {
                 Ok(text) => {
                     // Tool returns plain text, wrap in JSON for FFI
                     let resp = serde_json::json!({ "text": text });
@@ -366,5 +402,17 @@ mod tests {
             }
             free_fn(c);
         }
+    }
+
+    #[test]
+    fn host_v1_layout() {
+        // u32(4) + pad(4) + context(8) + 3*fn_ptr(8) = 40
+        assert_eq!(std::mem::size_of::<HostV1>(), 40);
+        assert_eq!(std::mem::align_of::<HostV1>(), 8);
+    }
+
+    #[test]
+    fn abi_bumped_to_3() {
+        assert_eq!(ABI_VERSION, 3);
     }
 }

@@ -1,0 +1,11 @@
+[package]
+name = "hello-mod"
+version = "1.0.34"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+opsense-mod = { path = "../../crates/opsense-mod" }
+serde_json = "1.0"

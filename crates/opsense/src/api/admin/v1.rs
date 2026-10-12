@@ -9,7 +9,8 @@ use http::{HeaderMap, Response, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use opsense_model::cache::Cache;
+use opsense_mlib::cache::RedisBackend;
+use opsense_mod::cache::Cache;
 use opsense_model::entities::admin::{AuthConfig, Jwt, Tenant, Token, UserTokenInfo};
 
 use crate::api::AppState;
@@ -379,7 +380,15 @@ async fn fetch_file(
     AdminHeaders { tenant_id, host }: AdminHeaders,
 ) -> Result<Response<Body>, (StatusCode, JsonResponse<AdminResponse>)> {
     let tenant_id = tenant_id.into();
-    let cache = Cache::new(app_state.connector.clone(), tenant_id);
+    let conn = app_state
+        .connector
+        .cache(tenant_id)
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, JsonResponse(AdminResponse {
+            error: Some("cache not configured".into()),
+            ..Default::default()
+        })))?;
+    let backend = RedisBackend::new(conn);
+    let cache = Cache::new(backend);
     let host = host.hostname();
     let key = format!("seo_file:{}:{}", host, path);
 

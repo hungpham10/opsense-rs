@@ -62,7 +62,7 @@ impl Admin {
             .checked_add_signed(Duration::seconds(expires_in_secs))
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
 
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let kind = self.kind(tenant_id);
         let mut conn = pool.acquire().await?;
 
@@ -106,7 +106,7 @@ impl Admin {
         user_id: &str,
         user_code: &str,
     ) -> Result<String, AdminError> {
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
 
         // 1. Lookup device code
@@ -188,7 +188,7 @@ impl Admin {
         tenant_id: i64,
         device_code: &str,
     ) -> Result<DeviceTokenInfo, AdminError> {
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
 
         let row = sqlx::query(

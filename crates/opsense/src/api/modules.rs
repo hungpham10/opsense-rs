@@ -11,8 +11,9 @@ use axum::{
 };
 
 use opsense_mod::{
-    HttpMethod, HttpRequest, HttpResponse, Manifest, OpsenseModule,
+    HttpMethod, HttpRequest, HttpResponse, Manifest, OpsenseModule, TenantServices,
 };
+use std::ffi::c_void;
 
 #[cfg(feature = "dynamic-modules")]
 use opsense_mod::ModuleError;
@@ -67,11 +68,11 @@ impl ApiModuleRegistry {
     ) -> Result<(), ModuleError> {
         use libloading::Library;
 
-        // Store host services globally for FFI callbacks
-        HOST_SERVICES.set(host_services.clone()).ok();
-
         for mcfg in cfg.enabled_modules() {
-            if mcfg.builtin { continue; }
+            if mcfg.builtin {
+                tracing::debug!(module = %mcfg.id, "khai builtin=true → bỏ qua; register_builtin ở serve.rs");
+                continue;
+            }
 
             let path = cfg.dynamic_path(module_dir, mcfg)
                 .ok_or_else(|| ModuleError::InitFailed(format!("no path for dynamic module {}", mcfg.id)))?;
@@ -85,8 +86,8 @@ impl ApiModuleRegistry {
             let init_fn: libloading::Symbol<ModuleInitFn> = unsafe { lib.get(sym_name.as_bytes()) }
                 .map_err(|e| ModuleError::InitFailed(format!("symbol {}: {}", sym_name, e)))?;
 
-            // Build HostV1
-            let host_v1 = build_host_v1();
+            // Build HostV1 with context
+            let host_v1 = build_host_v1(&host_services);
 
             // Initialize module
             let module_v1 = unsafe { init_fn(&host_v1) };
@@ -108,8 +109,12 @@ impl ApiModuleRegistry {
             let module = DynamicModuleWrapper {
                 vtable: unsafe { Box::from_raw(module_v1) },
             };
-            let id = module.manifest().id.clone();
-            self.modules.insert(id, Arc::new(module));
+            let key = mcfg.id.clone();
+            if module.manifest().id != key {
+                tracing::warn!(module = %key, manifest_id = %module.manifest().id,
+                    "manifest().id khác mcfg.id — registry key theo modules.toml");
+            }
+            self.modules.insert(key, Arc::new(module));
             self.libs.push(lib);
         }
 
@@ -176,11 +181,36 @@ fn resolve_route_id(manifest: &Manifest, method: HttpMethod, path: &str) -> Stri
 /// Handler for module routes — converts axum request to HttpRequest, dispatches,
 /// converts response back.
 async fn module_route_handler(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     req: Request<axum::body::Body>,
     module: Arc<dyn OpsenseModule>,
 ) -> impl axum::response::IntoResponse {
     let manifest = module.manifest();
+
+    // Extract tenant_id from X-Tenant-Id header
+    static MISSING_TENANT_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+    let tenant_id = req
+        .headers()
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or_else(|| {
+            if MISSING_TENANT_WARNED.set(()).is_ok() {
+                tracing::warn!("thiếu/parse lỗi X-Tenant-Id → tenant_id=0 (chỉ log lần đầu)");
+            }
+            0
+        });
+
+    // Build TenantServices with cache backend bound to this tenant
+    let cache_backend = state
+        .connector
+        .cache(tenant_id)
+        .map(opsense_mlib::cache::RedisBackend::new);
+    let services = TenantServices {
+        tenant_id,
+        cache: cache_backend,
+    };
     let method = HttpMethod::from_axum(req.method());
     let path = req.uri().path().trim_start_matches(&manifest.prefix).to_string();
     let path = if path.is_empty() { "/".to_string() } else { path };
@@ -209,7 +239,7 @@ async fn module_route_handler(
     };
 
     // Module handles its own route matching via manifest.routes
-    match module.route(http_req).await {
+    match module.route(http_req, &services).await {
         Ok(resp) => {
             let mut response = Response::builder().status(resp.status);
             for (k, v) in &resp.headers {
@@ -244,19 +274,18 @@ impl OpsenseModule for DynamicModuleWrapper {
         serde_json::from_str(json).unwrap_or_default()
     }
 
-    fn route(&self, req: HttpRequest) -> opsense_mod::BoxFut<'static, Result<HttpResponse, ModuleError>> {
+    fn route(&self, req: HttpRequest, services: &TenantServices) -> opsense_mod::BoxFut<'static, Result<HttpResponse, ModuleError>> {
         let req_json = serde_json::to_string(&req).unwrap_or_default();
-        // `*const ModuleV1` khong phai `Send`; mang dia chi dang `usize` de future
-        // `BoxFut` (yeu cau `Send`) van hop le. Vtable song suot doi plugin.
         let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
         let handle = self.vtable.state;
+        let services_ptr: usize = services as *const TenantServices as usize;
 
         Box::pin(async move {
             let vtable = vtable as *const ModuleV1;
             let route_id = std::ffi::CString::new(req.route_id.clone()).unwrap_or_default();
             let req_c = std::ffi::CString::new(req_json).unwrap_or_default();
             let resp_ptr = unsafe {
-                ((*vtable).handle)(handle, route_id.as_ptr(), req_c.as_ptr())
+                ((*vtable).handle)(handle, services_ptr as *const TenantServices, route_id.as_ptr(), req_c.as_ptr())
             };
             if resp_ptr.is_null() {
                 return Err(ModuleError::Internal("null response from plugin".into()));
@@ -271,26 +300,27 @@ impl OpsenseModule for DynamicModuleWrapper {
         })
     }
 
-    fn tool(&self, name: String, args: serde_json::Value) -> opsense_mod::BoxFut<'static, Result<String, ModuleError>> {
+    fn tool(&self, name: String, args: serde_json::Value, services: &TenantServices) -> opsense_mod::BoxFut<'static, Result<String, ModuleError>> {
         let req_json = serde_json::to_string(&args).unwrap_or_default();
         let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
         let handle = self.vtable.state;
+        let services_ptr: usize = services as *const TenantServices as usize;
 
         Box::pin(async move {
             let vtable = vtable as *const ModuleV1;
             let name_c = std::ffi::CString::new(name).unwrap_or_default();
             let args_c = std::ffi::CString::new(req_json).unwrap_or_default();
-            let resp_ptr =
-                unsafe { ((*vtable).handle)(handle, name_c.as_ptr(), args_c.as_ptr()) };
+            let resp_ptr = unsafe {
+                ((*vtable).handle)(handle, services_ptr as *const TenantServices, name_c.as_ptr(), args_c.as_ptr())
+            };
             if resp_ptr.is_null() {
                 return Err(ModuleError::Internal("null response from plugin".into()));
             }
             let resp_json = unsafe { std::ffi::CStr::from_ptr(resp_ptr).to_str().unwrap_or("{}") };
-            // Tool responses are wrapped in { "text": "..." } or { "error": "...", "message": "..." }
             let result: Result<String, ModuleError> = match serde_json::from_str::<serde_json::Value>(resp_json) {
                 Ok(v) if v.get("text").is_some() => Ok(v["text"].as_str().unwrap_or("").to_string()),
                 Ok(v) if v.get("error").is_some() => Err(ModuleError::Internal(v["message"].as_str().unwrap_or("tool error").to_string())),
-                Ok(v) => Ok(v.to_string()), // fallback
+                Ok(v) => Ok(v.to_string()),
                 Err(e) => Err(ModuleError::Internal(format!("tool response parse: {e}"))),
             };
             unsafe { ((*vtable).free)(resp_ptr) };
@@ -303,15 +333,20 @@ impl OpsenseModule for DynamicModuleWrapper {
 // phát (`Box::new` trong `into_vtable`). Host chỉ mượn con trỏ; tự `Box::from_raw`
 // sẽ free nhầm vùng nhớ của plugin.
 
-/// Global storage for host services (used by FFI callbacks).
+/// Leak một `Arc<dyn HostServices>` thành `*mut c_void` — sống `'static`,
+/// một lần mỗi `load_dynamic` (một lần boot). Đổi lại mỗi module nhận đúng
+/// instance của `AppState` đang chạy.
 #[cfg(feature = "dynamic-modules")]
-static HOST_SERVICES: std::sync::OnceLock<Arc<dyn HostServices>> = std::sync::OnceLock::new();
+fn host_context(host_services: &Arc<dyn HostServices>) -> *mut std::ffi::c_void {
+    Box::leak(Box::new(host_services.clone())) as *mut _ as *mut std::ffi::c_void
+}
 
-/// Build the HostV1 vtable using global host services.
+/// Build the HostV1 vtable with context from host_services.
 #[cfg(feature = "dynamic-modules")]
-fn build_host_v1() -> opsense_mod::HostV1 {
+fn build_host_v1(host_services: &Arc<dyn HostServices>) -> opsense_mod::HostV1 {
     opsense_mod::HostV1 {
         abi_version: opsense_mod::ABI_VERSION,
+        context: host_context(host_services),
         call: host_call_ffi,
         log: host_log_ffi,
         free: host_free_ffi,
@@ -326,14 +361,15 @@ fn build_host_v1() -> opsense_mod::HostV1 {
 
     // Return a dummy HostV1 with null function pointers - should never be called
     // when the feature is disabled since load_dynamic won't be called.
-    unsafe extern "C" fn dummy_call(_: *const c_char, _: *const c_char) -> *mut c_char {
+    unsafe extern "C" fn dummy_call(_: *mut c_void, _: *const c_char, _: *const c_char) -> *mut c_char {
         std::ptr::null_mut()
     }
-    unsafe extern "C" fn dummy_log(_: u32, _: *const c_char, _: *const c_char) {}
+    unsafe extern "C" fn dummy_log(_: *mut c_void, _: u32, _: *const c_char, _: *const c_char) {}
     unsafe extern "C" fn dummy_free(_: *mut c_char) {}
 
     opsense_mod::HostV1 {
         abi_version: opsense_mod::ABI_VERSION,
+        context: std::ptr::null_mut(),
         call: dummy_call,
         log: dummy_log,
         free: dummy_free,
@@ -341,25 +377,22 @@ fn build_host_v1() -> opsense_mod::HostV1 {
 }
 
 #[cfg(feature = "dynamic-modules")]
-unsafe extern "C" fn host_call_ffi(op: *const c_char, req: *const c_char) -> *mut c_char {
+unsafe extern "C" fn host_call_ffi(
+    ctx: *mut std::ffi::c_void,
+    op: *const c_char,
+    req: *const c_char,
+) -> *mut c_char {
     let op = unsafe { std::ffi::CStr::from_ptr(op).to_str().unwrap_or("") };
     let req = unsafe { std::ffi::CStr::from_ptr(req).to_str().unwrap_or("{}") };
     let req_json: serde_json::Value = serde_json::from_str(req).unwrap_or_default();
 
-    let host = HOST_SERVICES.get().expect("host services not initialized");
+    // Context do `build_host_v1` cấp, sống `'static`.
+    let host: &Arc<dyn HostServices> = unsafe { &*(ctx as *const Arc<dyn HostServices>) };
+    let host = host.clone();
 
-    let rt = tokio::runtime::Handle::try_current()
-        .ok()
-        .map(|h| h.block_on(host.call(op, req_json.clone())))
-        .unwrap_or_else(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio runtime");
-            rt.block_on(host.call(op, req_json))
-        });
+    let out = opsense_mod::drive(async move { host.call(&op, req_json).await });
 
-    let resp_json = match rt {
+    let resp_json = match out {
         Ok(v) => serde_json::to_string(&v).unwrap_or_else(|e| {
             serde_json::json!({ "error": "internal", "message": format!("serialize: {e}") }).to_string()
         }),
@@ -370,7 +403,12 @@ unsafe extern "C" fn host_call_ffi(op: *const c_char, req: *const c_char) -> *mu
 }
 
 #[cfg(feature = "dynamic-modules")]
-unsafe extern "C" fn host_log_ffi(level: u32, target: *const c_char, msg: *const c_char) {
+unsafe extern "C" fn host_log_ffi(
+    _ctx: *mut std::ffi::c_void,
+    level: u32,
+    target: *const c_char,
+    msg: *const c_char,
+) {
     let msg = unsafe { std::ffi::CStr::from_ptr(msg).to_str().unwrap_or("") };
     let target = unsafe { std::ffi::CStr::from_ptr(target).to_str().unwrap_or("module") };
     match level {

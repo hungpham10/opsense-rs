@@ -105,7 +105,7 @@ impl Token for Admin {
         let encrypted = encrypt(&key, &token_plain.to_string())
             .map_err(|e| AdminError::Other(format!("Encrypt failed: {e}")))?;
 
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
 
         // Cú pháp upsert tùy dialect.
@@ -155,7 +155,7 @@ impl Token for Admin {
         self.put_unencrypted_token(tenant_id, &service, &token_plain)
             .await?;
 
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
         let row = sqlx::query("SELECT id FROM sys_token_map WHERE tenant_id = $1 AND service = $2")
             .bind(tenant_id)
@@ -208,7 +208,7 @@ impl Token for Admin {
     }
 
     async fn reveal_user_token(&self, tenant_id: i64, user_id: &str) -> Result<String, AdminError> {
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
         let row =
             sqlx::query("SELECT token_id FROM sys_user WHERE tenant_id = $1 AND user_id = $2")
@@ -226,7 +226,7 @@ impl Token for Admin {
     }
 
     async fn revoke_user_token(&self, tenant_id: i64, user_id: &str) -> Result<(), AdminError> {
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
         let result = sqlx::query(
             "UPDATE sys_user SET revoked_at = CURRENT_TIMESTAMP \
@@ -248,7 +248,7 @@ impl Token for Admin {
     async fn list_user_tokens(&self, tenant_id: i64) -> Result<Vec<UserTokenInfo>, AdminError> {
         use crate::entities::admin::helpers::parse_dt;
 
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
         let rows = sqlx::query(
             "SELECT user_id, token_id, \

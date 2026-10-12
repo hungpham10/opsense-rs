@@ -72,7 +72,7 @@ impl Admin {
             .map_err(|e| AdminError::Other(format!("Encrypt private_key failed: {e}")))?;
 
         // 3. Lazy cleanup: xóa expired sessions của user trước
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
         let _ = sqlx::query(
             "DELETE FROM sys_long_sessions \
@@ -118,7 +118,7 @@ impl Admin {
         user_id: &str,
         session_id: &str,
     ) -> Result<(), AdminError> {
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
 
         let affected = sqlx::query(
@@ -147,7 +147,7 @@ impl Admin {
         tenant_id: i64,
         user_id: &str,
     ) -> Result<Vec<LongSessionSummary>, AdminError> {
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
 
         // Lazy cleanup expired trước
@@ -205,7 +205,7 @@ impl Admin {
     ) -> Result<Option<String>, AdminError> {
         use opsense_mlib::sops::decrypt;
 
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
 
         let row = sqlx::query(
@@ -281,7 +281,7 @@ impl Admin {
             .checked_add_signed(Duration::seconds(expires_in_secs))
             .ok_or_else(|| AdminError::Other("Timestamp overflow".into()))?;
 
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
 
         sqlx::query(&format!(
@@ -314,7 +314,7 @@ impl Admin {
     ) -> Result<Option<(String, String)>, AdminError> {
         let token_hash = sha256_hex(access_token.as_bytes());
 
-        let pool = self.dbt(tenant_id);
+        let pool = self.dbt(tenant_id)?;
         let mut conn = pool.acquire().await?;
 
         let row = sqlx::query(

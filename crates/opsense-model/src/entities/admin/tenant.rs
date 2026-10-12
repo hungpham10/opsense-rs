@@ -52,7 +52,7 @@ impl Tenant for Admin {
     async fn get_tenant_id(&self, host: &str) -> Result<i64, AdminError> {
         use sqlx::Row;
 
-        let pool = self.dbt(0);
+        let pool = self.dbt(0)?;
         let mut conn = pool.acquire().await?;
         let row = sqlx::query("SELECT id FROM sys_tenant WHERE host = $1")
             .bind(host)
@@ -75,7 +75,7 @@ impl Tenant for Admin {
         use sqlx::Row;
 
         let tenant_id = self.get_tenant_id(host).await?;
-        let pool = self.dbt(0);
+        let pool = self.dbt(0)?;
         let mut conn = pool.acquire().await?;
 
         let row = sqlx::query(

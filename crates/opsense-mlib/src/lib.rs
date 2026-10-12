@@ -21,6 +21,8 @@ pub mod tls;
 pub mod trend;
 pub mod transition;
 
+pub mod cache;
+
 // Plan §1: public so external crates (opsense-store, opsense-components) can
 // name `TimeseriesStorage`/`PatternStorage`/`CategoryStorage`.
 pub mod storage;

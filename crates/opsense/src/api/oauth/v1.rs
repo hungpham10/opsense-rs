@@ -353,7 +353,10 @@ async fn token_revoke(
     };
     let tenant_id: i64 = state.variable("DEFAULT_TENANT_ID").await.unwrap_or(1);
 
-    let pool = state.connector.database(tenant_id);
+    let pool = match state.connector.database(tenant_id) {
+        Some(p) => p,
+        None => return oauth_error(StatusCode::INTERNAL_SERVER_ERROR, "server_error", "db not configured"),
+    };
     let mut conn = match pool.acquire().await {
         Ok(c) => c,
         Err(e) => {

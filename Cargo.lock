@@ -2603,6 +2603,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hello-mod"
+version = "1.0.34"
+dependencies = [
+ "opsense-mod",
+ "serde_json",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4132,6 +4140,7 @@ dependencies = [
  "log",
  "object_store",
  "opsense-macros",
+ "opsense-mod",
  "parking_lot",
  "parquet",
  "rand 0.8.8",
@@ -4154,6 +4163,7 @@ name = "opsense-mod"
 version = "1.0.34"
 dependencies = [
  "axum",
+ "futures",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

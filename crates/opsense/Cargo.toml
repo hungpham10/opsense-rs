@@ -85,7 +85,7 @@ opsense-core = { path = "../opsense-core", features = ["parquet", "sqlite"] }
 opsense-qlib = { path = "../opsense-qlib", features = ["json"] }
 # `json` enables the `vector` data-pipeline subsystem (sources/transforms/
 # sinks) that AppState builds the runtime from.
-opsense-mlib = { path = "../opsense-mlib", features = ["json"] }
+opsense-mlib = { path = "../opsense-mlib", features = ["json", "redis"] }
 
 # gRPC kernel runner client (`client::grpc::RunnerClient` + the `repl`
 # subcommand's `--runner` mode, and the `runner` subcommand's standalone
@@ -140,7 +140,7 @@ internal-runner-tests = []
 [dev-dependencies]
 # mlib is already a regular dependency (features=["json"]); the parquet
 # feature is only needed by the storage/s3-lake integration test harness.
-opsense-mlib = { path = "../opsense-mlib", features = ["json", "parquet"] }
+opsense-mlib = { path = "../opsense-mlib", features = ["json", "parquet", "redis"] }
 object_store = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # `#[tokio::test]` cho unit test trong src (vd `token.rs`). Regular dep đã có
