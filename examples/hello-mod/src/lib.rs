@@ -1,5 +1,6 @@
 use opsense_ffi::{BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest,
-                 ModuleError, OpsenseModule, RouteSpec, TenantServices};
+                 ModuleError, OpsenseModule, RouteSpec, StreamHandle, TenantServices,
+                 Transport};
 
 thread_local! {
     static HOST: std::cell::RefCell<Option<*const opsense_ffi::ffi::HostV1>> = const { std::cell::RefCell::new(None) };
@@ -15,8 +16,30 @@ impl OpsenseModule for HelloModule {
             builtin: false,
             prefix: "/api/hello".into(),
             routes: vec![
-                RouteSpec { id: "ping".into(), method: HttpMethod::Get, path: "/ping".into() },
-                RouteSpec { id: "host-status".into(), method: HttpMethod::Get, path: "/host-status".into() },
+                RouteSpec {
+                    id: "ping".into(),
+                    method: HttpMethod::Get,
+                    path: "/ping".into(),
+                    transport: Transport::Rest,
+                    source_node: None,
+                },
+                RouteSpec {
+                    id: "host-status".into(),
+                    method: HttpMethod::Get,
+                    path: "/host-status".into(),
+                    transport: Transport::Rest,
+                    source_node: None,
+                },
+                // Fixture SSE: `source_node` trỏ tới node `type = "output"`
+                // trong pipeline. `stream_push` bên dưới lọc chỉ message có
+                // `tick = true` — đây là chỗ "xào trộn dữ liệu" sẽ nằm.
+                RouteSpec {
+                    id: "ticks".into(),
+                    method: HttpMethod::Get,
+                    path: "/ticks".into(),
+                    transport: Transport::Sse,
+                    source_node: Some("market-out".into()),
+                },
             ],
             tools: vec![],
         }
@@ -44,6 +67,40 @@ impl OpsenseModule for HelloModule {
     {
         Box::pin(async move { Err(ModuleError::RouteNotFound(name)) })
     }
+
+    // ── SSE (ABI 4) ────────────────────────────────────────────────────────
+
+    fn stream(&self, _req: HttpRequest, _svc: &TenantServices)
+        -> BoxFut<'static, Result<StreamHandle, ModuleError>>
+    {
+        Box::pin(async { Ok(StreamHandle { stream_id: "hello-ticks".into() }) })
+    }
+
+    /// Lọc message: chỉ phát cái có `tick = true`, đổi shape thành
+    /// `{"tick": <payload>}`. Trả chuỗi rỗng = bỏ qua.
+    fn stream_push(&self, _stream_id: String, payload: String)
+        -> BoxFut<'static, Result<String, ModuleError>>
+    {
+        Box::pin(async move {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                return Ok(String::new());
+            };
+            if v.get("tick").and_then(serde_json::Value::as_bool) != Some(true) {
+                return Ok(String::new());
+            }
+            // `to_string` trên `Value` không fail.
+            Ok(serde_json::json!({ "tick": v }).to_string())
+        })
+    }
+
+    fn stream_close(&self, _stream_id: String) {
+        tracing_shim("stream closed");
+    }
+}
+
+/// `hello-mod` không phụ thuộc `tracing`; dùng stderr để không cần dep.
+fn tracing_shim(msg: &str) {
+    eprintln!("[hello-mod] {msg}");
 }
 
 #[unsafe(no_mangle)]
