@@ -51,8 +51,10 @@ use opsense_rhai::RhaiTransform;
 use tokio::sync::RwLock;
 use tracing_subscriber::EnvFilter;
 
-const CONFIG_PATH: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../strategies/prometheus/config.toml");
+const CONFIG_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../strategies/prometheus/config.toml"
+);
 
 const S3_PREFIX: &str = "test-case-prom";
 const STATION_TSDB: &str = "tsdb";
@@ -88,9 +90,7 @@ fn prom_body(now: i64) -> String {
 
 /// Mock HTTP server (deterministic, đúng pattern e2e_disk_grid) — ghi lại
 /// request đã nhận để chứng minh http source thực sự poll.
-async fn spawn_mock(
-    body: String,
-) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+async fn spawn_mock(body: String) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -111,7 +111,9 @@ async fn spawn_mock(
                     }
                     buf.extend_from_slice(&chunk[..n]);
                 }
-                reqs.lock().unwrap().push(String::from_utf8_lossy(&buf).into_owned());
+                reqs.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf).into_owned());
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -264,7 +266,7 @@ fn dump_tree(root: &Path) -> String {
 /// ── Tầng 1: config file tự nó phải parse + tất cả setting thực sự được áp ──
 #[test]
 fn config_file_contract() {
-    let cfg = Config::load(Path::new(CONFIG_PATH))
+    let (cfg, _dir) = Config::load(Path::new(CONFIG_PATH))
         .expect("strategies/prometheus/config.toml phải parse + validate");
 
     // Engine / storage mà file khai báo.
@@ -314,7 +316,10 @@ fn config_file_contract() {
         .expect("component 1 = http_source");
     assert_eq!(http.id, STATION_PROM);
     assert_eq!(http.inputs, vec!["clock".to_string()]);
-    assert!(http.station, "prom-explore phải có station=true để registry + verify");
+    assert!(
+        http.station,
+        "prom-explore phải có station=true để registry + verify"
+    );
     assert!(
         http.url.contains("prometheus.demo.prometheus.io"),
         "url demo Prometheus mà config khai: {}",
@@ -351,9 +356,13 @@ async fn full_pipeline_to_parquet_and_s3() {
     let endpoint = s3_endpoint();
     if !wait_rustfs(&endpoint).await {
         if common::integration_mode() {
-            panic!("RustFS không reachable tại {endpoint} — CI yêu cầu `docker compose up -d rustfs rustfs-bucket`");
+            panic!(
+                "RustFS không reachable tại {endpoint} — CI yêu cầu `docker compose up -d rustfs rustfs-bucket`"
+            );
         }
-        eprintln!("skipping: RustFS không reachable tại {endpoint} — `docker compose up -d rustfs rustfs-bucket`");
+        eprintln!(
+            "skipping: RustFS không reachable tại {endpoint} — `docker compose up -d rustfs rustfs-bucket`"
+        );
         return;
     }
 
@@ -370,7 +379,7 @@ async fn full_pipeline_to_parquet_and_s3() {
     }
 
     // 1) Load config thật, chỉ override 2 đường dẫn host-only.
-    let mut cfg = Config::load(Path::new(CONFIG_PATH))
+    let (mut cfg, _dir) = Config::load(Path::new(CONFIG_PATH))
         .expect("strategies/prometheus/config.toml phải parse + validate");
     let td = tempfile::tempdir().expect("tempdir");
     cfg.storage.data_dir = td.path().to_string_lossy().into_owned();
@@ -395,12 +404,17 @@ async fn full_pipeline_to_parquet_and_s3() {
     //    host-only để deterministic: `url` của prom-explore về mock (không
     //    bấm demo) và `script_path` (trong config là tương đối repo root; test
     //    chạy từ crates/opsense nên anchor tuyệt đối trước khi deserialize).
-    let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
+    let dir = Path::new(CONFIG_PATH)
+        .parent()
+        .expect("config parent")
+        .to_path_buf();
     let script = dir.join("script.rhai");
     let mock_url = format!("http://{addr}/api/v1/query_range?query=up");
     if let Some(p) = &mut cfg.pipeline {
         for comp in &mut p.components {
-            let Some(obj) = comp.as_object_mut() else { continue };
+            let Some(obj) = comp.as_object_mut() else {
+                continue;
+            };
             match obj.get("id").and_then(|v| v.as_str()) {
                 Some("stats-summary") => {
                     obj.insert(
@@ -512,7 +526,8 @@ async fn full_pipeline_to_parquet_and_s3() {
         "phải có ts/blk=*/batch-*.parquet trên S3 ({s3_ts_prefix}): {keys:?}"
     );
     assert!(
-        keys.iter().any(|k| k.contains("blk=") && k.ends_with(".parquet")),
+        keys.iter()
+            .any(|k| k.contains("blk=") && k.ends_with(".parquet")),
         "phải có delta parquet theo block trên S3: {keys:?}"
     );
     assert!(

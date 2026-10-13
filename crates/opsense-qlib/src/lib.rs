@@ -68,13 +68,16 @@ use serde::{Deserialize, Serialize};
 /// (`evaluate` → `rebuild_strategy` → `Strategy::rebuild`) không đụng nhau.
 /// Đổi lại closure phải tự sở hữu dữ liệu nó capture (clone `Arc`, `String`)
 /// thay vì mượn từ scope bên ngoài.
-pub type FetchFn<'a> = &'a mut (dyn FnMut(
+pub type FetchFn<'a> = &'a mut (
+            dyn FnMut(
     u64,
     u64,
-) -> Pin<Box<dyn Future<Output = Result<Vec<CandleStick>, Error>> + Send + 'static>>
-                + Send
+) -> Pin<
+    Box<dyn Future<Output = Result<Vec<CandleStick>, Error>> + Send + 'static>,
+> + Send
                 + Sync
-        + 'a);
+                + 'a
+        );
 
 /// Mọi biến cố lệnh trong vòng forward — bắn qua `NotifyFn`, consumer tự lọc
 /// loại mình quan tâm (vd TelegramSink chỉ xử lý `Closed`).
@@ -107,10 +110,13 @@ pub enum OrderEvent {
 /// [`FetchFn`]) nên cùng một `NotifyFn` reborrow được cho lifetime ngắn hơn —
 /// kernel gọi nó ở nhiều chỗ, kể cả bên trong vòng lặp và trong hàm lồng nhau.
 pub type NotifyFn<'a> = &'a mut (
-            dyn FnMut(OrderEvent) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>
+            dyn FnMut(
+    OrderEvent,
+) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>
                 + Send
                 + Sync
-        + 'a);
+                + 'a
+        );
 
 pub type ParamFn<'a> = &'a (dyn Fn(usize) -> f64 + Send + Sync);
 

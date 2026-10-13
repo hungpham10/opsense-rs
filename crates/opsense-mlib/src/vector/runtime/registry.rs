@@ -34,9 +34,11 @@ impl ComponentRegistry {
     /// - `Some(Ok(comp))`  : type đã đăng ký, config hợp lệ
     /// - `Some(Err(e))`    : type đã đăng ký, config hỏng (chỉ node này fail)
     /// - `None`            : type chưa đăng ký → caller fallback typetag
-    pub fn build(&self, type_name: &str, cfg: serde_json::Value)
-        -> Option<Result<Box<dyn Component>, Error>>
-    {
+    pub fn build(
+        &self,
+        type_name: &str,
+        cfg: serde_json::Value,
+    ) -> Option<Result<Box<dyn Component>, Error>> {
         self.factories.get(type_name).map(|f| f(type_name, cfg))
     }
 
@@ -58,9 +60,7 @@ pub fn register(type_name: &'static str, factory: super::ComponentFactory) {
 }
 
 /// Thử dựng component từ registry toàn cục.
-pub fn build(type_name: &str, cfg: serde_json::Value)
-    -> Option<Result<Box<dyn Component>, Error>>
-{
+pub fn build(type_name: &str, cfg: serde_json::Value) -> Option<Result<Box<dyn Component>, Error>> {
     global().lock().unwrap().build(type_name, cfg)
 }
 
@@ -75,10 +75,7 @@ mod tests {
 
     /// Factory không cần dựng component thật — chỉ cần một `Component` type là
     /// đủ cho chữ ký, nên ta trả `Err` và test tập trung vào logic registry.
-    fn failing_factory(
-        _name: &str,
-        _cfg: serde_json::Value,
-    ) -> Result<Box<dyn Component>, Error> {
+    fn failing_factory(_name: &str, _cfg: serde_json::Value) -> Result<Box<dyn Component>, Error> {
         Err(Error::other("boom"))
     }
 
@@ -93,7 +90,11 @@ mod tests {
         let mut reg = ComponentRegistry::default();
         reg.register("fail_type", failing_factory);
         // Đã đăng ký → `Some`, nhưng factory lỗi → `Err` (chỉ node này chết).
-        assert!(reg.build("fail_type", serde_json::json!({})).unwrap().is_err());
+        assert!(
+            reg.build("fail_type", serde_json::json!({}))
+                .unwrap()
+                .is_err()
+        );
         // Lỗi không lan sang type khác chưa đăng ký.
         assert!(reg.build("type_khac", serde_json::json!({})).is_none());
     }

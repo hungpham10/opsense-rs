@@ -62,9 +62,9 @@ impl Admin {
     /// Helper lấy DB pool theo tenant_id (internal use, gọi từ traits).
     /// `Err` khi chưa cấu hình `DB_DSN` — trước đây là `panic!`.
     pub(crate) fn dbt(&self, tenant_id: i64) -> Result<&sqlx::AnyPool, AdminError> {
-        self.resolver.database(tenant_id).ok_or_else(|| {
-            AdminError::Other(format!("missing DB pool for tenant {tenant_id}"))
-        })
+        self.resolver
+            .database(tenant_id)
+            .ok_or_else(|| AdminError::Other(format!("missing DB pool for tenant {tenant_id}")))
     }
 
     /// Helper lấy DB dialect theo tenant_id.
@@ -155,7 +155,8 @@ impl Admin {
         let encrypted_bytes: Vec<u8> = row.try_get(0)?;
 
         let key = helpers::get_master_key().await?;
-        decrypt(&key, &encrypted_bytes).map_err(|e| AdminError::Other(format!("Decrypt failed: {e}")))
+        decrypt(&key, &encrypted_bytes)
+            .map_err(|e| AdminError::Other(format!("Decrypt failed: {e}")))
     }
 }
 

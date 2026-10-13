@@ -17,7 +17,7 @@ use std::io::Error;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use opsense_core::{Observation, Station, TimeseriesStation};
 use opsense_macros::transform;
@@ -169,7 +169,8 @@ impl_csv_source!(
         }
         let me_handle = if self.station {
             Some(
-                ctx.station::<Arc<RwLock<TimeseriesStation>>>(&self.id).await?,
+                ctx.station::<Arc<RwLock<TimeseriesStation>>>(&self.id)
+                    .await?,
             )
         } else {
             None

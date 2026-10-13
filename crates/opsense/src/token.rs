@@ -83,7 +83,12 @@ mod tests {
     /// trong `run` là thứ chặn panic đó, nên phải có test giữ nó ở lại.
     #[tokio::test]
     async fn wrong_key_length_errors_instead_of_panicking() {
-        for bad in ["", "short", "0123456789abcdef0123456789abcde", "0123456789abcdef0123456789abcdef0"] {
+        for bad in [
+            "",
+            "short",
+            "0123456789abcdef0123456789abcde",
+            "0123456789abcdef0123456789abcdef0",
+        ] {
             let err = run(bad, "encrypt", "x").await.expect_err("phải lỗi");
             assert!(
                 err.to_string().contains("32 bytes"),
@@ -113,13 +118,13 @@ mod tests {
     /// Blob rác phải báo lỗi decode, không panic.
     #[tokio::test]
     async fn garbage_input_errors_not_panics() {
-        let err = run(KEY, "decrypt", "not-hex-at-all!!").await.expect_err("phải lỗi");
+        let err = run(KEY, "decrypt", "not-hex-at-all!!")
+            .await
+            .expect_err("phải lỗi");
         assert!(err.to_string().contains("Decode hex failed"), "{err}");
 
         // Hex hợp lệ nhưng quá ngắn cho nonce 12 byte.
-        let err = run(KEY, "decrypt", "\\xabcd")
-            .await
-            .expect_err("phải lỗi");
+        let err = run(KEY, "decrypt", "\\xabcd").await.expect_err("phải lỗi");
         assert!(!err.to_string().is_empty(), "phải có message: {err}");
     }
 }

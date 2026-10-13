@@ -334,11 +334,7 @@ async fn abt_token_survives_rotation() {
     assert!(!id_token.is_empty());
 
     // Chạy device flow, trả về access_token mới phát.
-    async fn one_round(
-        client: &reqwest::Client,
-        id_token: &str,
-        round: usize,
-    ) -> String {
+    async fn one_round(client: &reqwest::Client, id_token: &str, round: usize) -> String {
         let code = client
             .post(format!("{}/api/oauth/v1/device/code", serve_url()))
             .json(&serde_json::json!({}))

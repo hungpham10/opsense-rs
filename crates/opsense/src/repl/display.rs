@@ -123,34 +123,73 @@ pub fn format_pnl_summary(pnl: &crate::client::graphql::PnlSummary) -> Table {
     table.add_row(vec!["total.trades", &pnl.trades.to_string()]);
     table.add_row(vec!["total.wins", &pnl.wins.to_string()]);
     table.add_row(vec!["total.losses", &pnl.losses.to_string()]);
-    table.add_row(vec!["total.win_rate", &format!("{:.2}%", pnl.win_rate * 100.0)]);
-    table.add_row(vec!["total.net_pnl_abs", &format!("{:.2}", pnl.net_pnl_abs)]);
-    table.add_row(vec!["total.net_pnl_pct", &format!("{:.4}%", pnl.net_pnl_pct * 100.0)]);
-    table.add_row(vec!["total.gross_profit", &format!("{:.2}", pnl.gross_profit_abs)]);
-    table.add_row(vec!["total.gross_loss", &format!("{:.2}", pnl.gross_loss_abs)]);
+    table.add_row(vec![
+        "total.win_rate",
+        &format!("{:.2}%", pnl.win_rate * 100.0),
+    ]);
+    table.add_row(vec![
+        "total.net_pnl_abs",
+        &format!("{:.2}", pnl.net_pnl_abs),
+    ]);
+    table.add_row(vec![
+        "total.net_pnl_pct",
+        &format!("{:.4}%", pnl.net_pnl_pct * 100.0),
+    ]);
+    table.add_row(vec![
+        "total.gross_profit",
+        &format!("{:.2}", pnl.gross_profit_abs),
+    ]);
+    table.add_row(vec![
+        "total.gross_loss",
+        &format!("{:.2}", pnl.gross_loss_abs),
+    ]);
     table.add_row(vec!["total.notional", &format!("{:.2}", pnl.notional)]);
-    table.add_row(vec!["total.avg_win_pct", &format!("{:.4}%", pnl.avg_win_pct * 100.0)]);
-    table.add_row(vec!["total.avg_loss_pct", &format!("{:.4}%", pnl.avg_loss_pct * 100.0)]);
+    table.add_row(vec![
+        "total.avg_win_pct",
+        &format!("{:.4}%", pnl.avg_win_pct * 100.0),
+    ]);
+    table.add_row(vec![
+        "total.avg_loss_pct",
+        &format!("{:.4}%", pnl.avg_loss_pct * 100.0),
+    ]);
     table.add_row(vec!["total.long_trades", &pnl.long_trades.to_string()]);
     table.add_row(vec!["total.short_trades", &pnl.short_trades.to_string()]);
     table.add_row(vec!["total.open_count", &pnl.open_count.to_string()]);
-    table.add_row(vec!["total.open_notional", &format!("{:.2}", pnl.open_notional)]);
+    table.add_row(vec![
+        "total.open_notional",
+        &format!("{:.2}", pnl.open_notional),
+    ]);
 
     // Unrealized
     if let Some(mark) = pnl.mark_price {
-        table.add_row(vec!["total.unrealized_abs", &format!("{:.2}", pnl.unrealized_abs)]);
+        table.add_row(vec![
+            "total.unrealized_abs",
+            &format!("{:.2}", pnl.unrealized_abs),
+        ]);
         table.add_row(vec!["total.mark_price", &format!("{:.2}", mark)]);
     }
 
     // Zero-size rows
     if pnl.zero_size_rows > 0 {
-        table.add_row(vec!["total.zero_size_rows", &pnl.zero_size_rows.to_string()]);
+        table.add_row(vec![
+            "total.zero_size_rows",
+            &pnl.zero_size_rows.to_string(),
+        ]);
     }
 
     // Per-bucket breakdown (only if interval > 0)
     if !pnl.buckets.is_empty() {
         table.add_row(vec!["", ""]);
-        table.add_row(vec!["bucket_ts", "trades", "wins", "losses", "win%", "net_abs", "net_pct", "notional"]);
+        table.add_row(vec![
+            "bucket_ts",
+            "trades",
+            "wins",
+            "losses",
+            "win%",
+            "net_abs",
+            "net_pct",
+            "notional",
+        ]);
         for b in &pnl.buckets {
             table.add_row(vec![
                 &b.bucket_ts.to_string(),

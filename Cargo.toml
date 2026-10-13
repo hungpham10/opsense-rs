@@ -14,12 +14,12 @@ members = [
 	"crates/opsense-kernel-python",
 	"crates/opsense-kernel-julia",
 	"crates/opsense-runner",
-	"crates/opsense-mod",
+	"crates/opsense-ffi",
 ]
 exclude = ["examples/hello-mod"]
 
 [workspace.package]
-version = "1.0.36"
+version = "1.0.37"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"

@@ -1,6 +1,6 @@
 use super::ops;
-use crate::graph::{Graph, In, Node, Op};
 use crate::Strategy;
+use crate::graph::{Graph, In, Node, Op};
 
 fn default_ops() -> Vec<Box<dyn Op>> {
     vec![
@@ -84,7 +84,10 @@ fn init_gives_trading_params_not_zeros() {
         params[crate::graph::P_CAPITAL] > 0.0,
         "base_capital phải > 0: {params:?}"
     );
-    assert!(params[crate::graph::P_GRID_LEVELS] >= 2.0, "grid_levels ≥ 2");
+    assert!(
+        params[crate::graph::P_GRID_LEVELS] >= 2.0,
+        "grid_levels ≥ 2"
+    );
     assert!(params[crate::graph::P_SL_PCT] > 0.0, "sl_pct phải > 0");
     assert!(params[crate::graph::P_LOOKBACK] > 0.0, "lookback phải > 0");
     // Phần trọng số vẫn phải đúng vị trí (params tối ưu được).
@@ -115,7 +118,8 @@ fn onnx_artifact_roundtrips_through_files() {
     }
 
     // Thư mục riêng cho test (không thêm tempfile làm dep).
-    let dir: PathBuf = std::env::temp_dir().join(format!("opsense-qlib-graph-{}", std::process::id()));
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("opsense-qlib-graph-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let genome_path = dir.join("model.genome.json");
     let onnx_path = dir.join("model.onnx");
@@ -127,15 +131,25 @@ fn onnx_artifact_roundtrips_through_files() {
     let expected = original.predict(&inputs).expect("predict gốc");
 
     original.write_onnx(&onnx_path).expect("ghi .onnx");
-    std::fs::write(&genome_path, serde_json::to_string(&original).expect("genome json")).expect("ghi genome");
-    assert!(onnx_path.exists(), "file .onnx phải tồn tại (Python đọc được)");
+    std::fs::write(
+        &genome_path,
+        serde_json::to_string(&original).expect("genome json"),
+    )
+    .expect("ghi genome");
+    assert!(
+        onnx_path.exists(),
+        "file .onnx phải tồn tại (Python đọc được)"
+    );
 
     // Nạp lại: ONNX bytes phải được dùng, không emit lại.
     let loaded = Graph::load_artifact(&genome_path, &onnx_path).expect("load artifact");
     let got = loaded.predict(&inputs).expect("predict từ artifact");
     assert_eq!(got.len(), expected.len());
     for (a, b) in got.iter().flatten().zip(expected.iter().flatten()) {
-        assert!((a - b).abs() < 1e-6, "artifact phải cho kết quả y hệt: {a} vs {b}");
+        assert!(
+            (a - b).abs() < 1e-6,
+            "artifact phải cho kết quả y hệt: {a} vs {b}"
+        );
     }
 
     // Bytes nạp sẵn phải thuộc về genome: file rỗng / thiếu phải lộ lỗi, không

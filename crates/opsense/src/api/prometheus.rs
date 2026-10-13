@@ -3,9 +3,9 @@
 //! Thuần sync, không async, không chạm global registry — dùng chung cho
 //! GraphQL resolver, handler `/metrics`, MCP tool, REPL, CLI.
 
-use opsense_model::events::{Observation, Signal};
 use opsense_core::config::StationTarget;
 use opsense_mlib::vector::runtime::NodeInfo;
+use opsense_model::events::{Observation, Signal};
 use std::collections::BTreeMap;
 
 pub use axum_prometheus::Handle as PrometheusHandle;
@@ -108,11 +108,7 @@ pub fn collect_nodes(topology: &[NodeInfo], _now: i64) -> Vec<Series> {
 }
 
 /// Gom metric từ station observations (Tầng 2: station data).
-pub fn collect_station(
-    obs: &[Observation],
-    cfg: &StationTarget,
-    now: i64,
-) -> Vec<Series> {
+pub fn collect_station(obs: &[Observation], cfg: &StationTarget, now: i64) -> Vec<Series> {
     // Window per station (nếu station khai báo) — fallback 120s toàn cục.
     let window_secs = cfg.window_secs.unwrap_or(120).max(1);
     let cutoff = now.saturating_sub(window_secs as i64);
@@ -125,14 +121,12 @@ pub fn collect_station(
     };
 
     // Exclude kinds set
-    let exclude_kinds: std::collections::HashSet<&str> = cfg
-        .exclude_kinds
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
+    let exclude_kinds: std::collections::HashSet<&str> =
+        cfg.exclude_kinds.iter().map(|s| s.as_str()).collect();
 
     // Dedup theo series_key: giữ obs có timestamp mới nhất.
-    let mut by_key: std::collections::BTreeMap<String, &Observation> = std::collections::BTreeMap::new();
+    let mut by_key: std::collections::BTreeMap<String, &Observation> =
+        std::collections::BTreeMap::new();
 
     for o in obs {
         // Gate timestamp
@@ -162,7 +156,10 @@ pub fn collect_station(
             continue;
         }
         // Loại exclude_kinds
-        if o.labels.get("kind").is_some_and(|kind| exclude_kinds.contains(kind.as_str())) {
+        if o.labels
+            .get("kind")
+            .is_some_and(|kind| exclude_kinds.contains(kind.as_str()))
+        {
             continue;
         }
 
@@ -243,10 +240,7 @@ pub fn cap_series(mut series: Vec<Series>, max: usize) -> (Vec<Series>, u64) {
 }
 
 /// Render series thành Prometheus text format.
-pub fn render_prometheus(
-    series: &[Series],
-    dropped: u64,
-) -> String {
+pub fn render_prometheus(series: &[Series], dropped: u64) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(series.len() * 80);
 
@@ -260,7 +254,9 @@ pub fn render_prometheus(
         writeln!(out, "# HELP {name} Opsense component metric").unwrap();
         writeln!(out, "# TYPE {name} gauge").unwrap();
         for s in series {
-            let label_str = s.labels.iter()
+            let label_str = s
+                .labels
+                .iter()
                 .map(|(k, v)| format!("{k}=\"{v}\""))
                 .collect::<Vec<_>>()
                 .join(",");
@@ -270,7 +266,11 @@ pub fn render_prometheus(
 
     // dropped counter
     if dropped > 0 {
-        writeln!(out, "# HELP opsense_prometheus_dropped_series Total series dropped due to max_series limit").unwrap();
+        writeln!(
+            out,
+            "# HELP opsense_prometheus_dropped_series Total series dropped due to max_series limit"
+        )
+        .unwrap();
         writeln!(out, "# TYPE opsense_prometheus_dropped_series counter").unwrap();
         writeln!(out, "opsense_prometheus_dropped_series {}", dropped).unwrap();
     }
@@ -279,15 +279,33 @@ pub fn render_prometheus(
 }
 
 /// Gom metric từ OAuth (Tầng 4).
-pub fn collect_oauth(
-    snap: &crate::api::oauth::metrics::OAuthMetricsSnapshot,
-) -> Vec<Series> {
+pub fn collect_oauth(snap: &crate::api::oauth::metrics::OAuthMetricsSnapshot) -> Vec<Series> {
     vec![
-        Series { name: "opsense_oauth_device_code_issued_total".into(), value: snap.device_code_issued as f64, labels: vec![] },
-        Series { name: "opsense_oauth_device_code_approved_total".into(), value: snap.device_code_approved as f64, labels: vec![] },
-        Series { name: "opsense_oauth_device_code_denied_total".into(), value: snap.device_code_denied as f64, labels: vec![] },
-        Series { name: "opsense_oauth_access_token_issued_total".into(), value: snap.access_token_issued as f64, labels: vec![] },
-        Series { name: "opsense_oauth_long_session_issued_total".into(), value: snap.long_session_issued as f64, labels: vec![] },
+        Series {
+            name: "opsense_oauth_device_code_issued_total".into(),
+            value: snap.device_code_issued as f64,
+            labels: vec![],
+        },
+        Series {
+            name: "opsense_oauth_device_code_approved_total".into(),
+            value: snap.device_code_approved as f64,
+            labels: vec![],
+        },
+        Series {
+            name: "opsense_oauth_device_code_denied_total".into(),
+            value: snap.device_code_denied as f64,
+            labels: vec![],
+        },
+        Series {
+            name: "opsense_oauth_access_token_issued_total".into(),
+            value: snap.access_token_issued as f64,
+            labels: vec![],
+        },
+        Series {
+            name: "opsense_oauth_long_session_issued_total".into(),
+            value: snap.long_session_issued as f64,
+            labels: vec![],
+        },
     ]
 }
 
@@ -301,10 +319,16 @@ pub fn render_http(handler: &axum_prometheus::Handle) -> String {
 mod tests {
     use super::*;
     use opsense_core::config::StationTarget;
-    use opsense_model::events::{Observation, Signal, TelemetryKind};
     use opsense_mlib::vector::runtime::NodeInfo;
+    use opsense_model::events::{Observation, Signal, TelemetryKind};
 
-    fn obs(ts: i64, metric: &str, signal: Signal, value: f64, labels: Vec<(&str, &str)>) -> Observation {
+    fn obs(
+        ts: i64,
+        metric: &str,
+        signal: Signal,
+        value: f64,
+        labels: Vec<(&str, &str)>,
+    ) -> Observation {
         let mut o = Observation::new(ts, metric.into(), TelemetryKind::Metric, signal, value);
         for (k, v) in labels {
             o.labels.insert(k.into(), v.into());
@@ -322,8 +346,16 @@ mod tests {
 
     #[test]
     fn series_key_deterministic() {
-        let s1 = Series { name: "a".into(), value: 1.0, labels: vec![("b".into(), "2".into()), ("a".into(), "1".into())] };
-        let s2 = Series { name: "a".into(), value: 1.0, labels: vec![("a".into(), "1".into()), ("b".into(), "2".into())] };
+        let s1 = Series {
+            name: "a".into(),
+            value: 1.0,
+            labels: vec![("b".into(), "2".into()), ("a".into(), "1".into())],
+        };
+        let s2 = Series {
+            name: "a".into(),
+            value: 1.0,
+            labels: vec![("a".into(), "1".into()), ("b".into(), "2".into())],
+        };
         assert_eq!(series_key(&s1), series_key(&s2));
     }
 
@@ -359,8 +391,24 @@ mod tests {
             },
         ];
         let series = collect_nodes(&topology, 0);
-        let running_grid = series.iter().find(|s| s.name == "opsense_node_running" && s.labels.iter().any(|(k,v)| k=="component" && v=="grid")).unwrap();
-        let running_tick = series.iter().find(|s| s.name == "opsense_node_running" && s.labels.iter().any(|(k,v)| k=="component" && v=="tick-candle")).unwrap();
+        let running_grid = series
+            .iter()
+            .find(|s| {
+                s.name == "opsense_node_running"
+                    && s.labels
+                        .iter()
+                        .any(|(k, v)| k == "component" && v == "grid")
+            })
+            .unwrap();
+        let running_tick = series
+            .iter()
+            .find(|s| {
+                s.name == "opsense_node_running"
+                    && s.labels
+                        .iter()
+                        .any(|(k, v)| k == "component" && v == "tick-candle")
+            })
+            .unwrap();
         assert_eq!(running_grid.value, 1.0);
         assert_eq!(running_tick.value, 0.0);
     }
@@ -370,7 +418,13 @@ mod tests {
         let now = 1_000_000;
         let cfg = StationTarget::default();
         let obs = vec![
-            obs(now, "test_metric", Signal::Order, 42.0, vec![("status", "closed")]),
+            obs(
+                now,
+                "test_metric",
+                Signal::Order,
+                42.0,
+                vec![("status", "closed")],
+            ),
             obs(now, "test_metric", Signal::Raw, 1.0, vec![]),
         ];
         let series = collect_station(&obs, &cfg, now);
@@ -410,7 +464,13 @@ mod tests {
         };
 
         // Nguồn duy nhất còn lại của hình học lưới trên Prometheus.
-        let grid_state = obs(now, "grid_cells", Signal::Summary, 64.0, vec![("kind", "grid_state")]);
+        let grid_state = obs(
+            now,
+            "grid_cells",
+            Signal::Summary,
+            64.0,
+            vec![("kind", "grid_state")],
+        );
         // Obs mà `snapshot()` gắn grid vào label — bị cắt có chủ đích.
         let snapshot = obs(
             now,
@@ -422,7 +482,10 @@ mod tests {
 
         let series = collect_station(&[grid_state, snapshot], &cfg, now);
 
-        let grid: Vec<&Series> = series.iter().filter(|s| s.name == "opsense_grid_cells").collect();
+        let grid: Vec<&Series> = series
+            .iter()
+            .filter(|s| s.name == "opsense_grid_cells")
+            .collect();
         assert_eq!(grid.len(), 1, "grid_cells không được exclude: {series:?}");
         assert_eq!(grid[0].value, 64.0);
         assert!(
@@ -430,7 +493,9 @@ mod tests {
             "snapshot phải vẫn bị exclude (không sống bằng cách mở rộng allowlist): {series:?}"
         );
         assert!(
-            series.iter().all(|s| !s.labels.iter().any(|(k, _)| k == "grid_step")),
+            series
+                .iter()
+                .all(|s| !s.labels.iter().any(|(k, _)| k == "grid_step")),
             "không metric số nào được nhét vào label: {series:?}"
         );
     }
@@ -441,7 +506,7 @@ mod tests {
         let cfg = StationTarget::default();
         let obs = vec![
             obs(now - 200, "test", Signal::Raw, 1.0, vec![]), // > 120s
-            obs(now - 50, "test", Signal::Raw, 2.0, vec![]),   // < 120s
+            obs(now - 50, "test", Signal::Raw, 2.0, vec![]),  // < 120s
         ];
         let series = collect_station(&obs, &cfg, now);
         assert_eq!(series.len(), 1);
@@ -450,9 +515,21 @@ mod tests {
 
     #[test]
     fn cap_series_is_deterministic() {
-        let s1 = Series { name: "a".into(), value: 1.0, labels: vec![("x".into(), "1".into())] };
-        let s2 = Series { name: "b".into(), value: 2.0, labels: vec![("x".into(), "2".into())] };
-        let s3 = Series { name: "c".into(), value: 3.0, labels: vec![("x".into(), "3".into())] };
+        let s1 = Series {
+            name: "a".into(),
+            value: 1.0,
+            labels: vec![("x".into(), "1".into())],
+        };
+        let s2 = Series {
+            name: "b".into(),
+            value: 2.0,
+            labels: vec![("x".into(), "2".into())],
+        };
+        let s3 = Series {
+            name: "c".into(),
+            value: 3.0,
+            labels: vec![("x".into(), "3".into())],
+        };
         let (capped, dropped) = cap_series(vec![s3.clone(), s1.clone(), s2.clone()], 2);
         assert_eq!(dropped, 1);
         assert_eq!(capped[0].name, "a"); // sort theo key
@@ -461,8 +538,16 @@ mod tests {
 
     #[test]
     fn cap_series_reports_dropped() {
-        let s1 = Series { name: "a".into(), value: 1.0, labels: vec![] };
-        let s2 = Series { name: "b".into(), value: 2.0, labels: vec![] };
+        let s1 = Series {
+            name: "a".into(),
+            value: 1.0,
+            labels: vec![],
+        };
+        let s2 = Series {
+            name: "b".into(),
+            value: 2.0,
+            labels: vec![],
+        };
         let (_, dropped) = cap_series(vec![s1, s2], 1);
         assert_eq!(dropped, 1);
     }
@@ -475,7 +560,12 @@ mod tests {
         let series = collect_station(&obs, &cfg, now);
         assert_eq!(series.len(), 1);
         assert_eq!(series[0].name, "opsense_cpu_usage");
-        assert!(series[0].labels.iter().any(|(k,v)| k=="metric_id" && v=="cpu.usage"));
+        assert!(
+            series[0]
+                .labels
+                .iter()
+                .any(|(k, v)| k == "metric_id" && v == "cpu.usage")
+        );
     }
 
     #[test]
@@ -487,7 +577,10 @@ mod tests {
     #[test]
     fn signal_filter_allowlist_respected() {
         let now = 1_000_000;
-        let cfg = StationTarget { signals: vec!["raw".into()], ..Default::default() }; // chỉ raw
+        let cfg = StationTarget {
+            signals: vec!["raw".into()],
+            ..Default::default()
+        }; // chỉ raw
         let obs = vec![
             obs(1_000_000, "test", Signal::Raw, 1.0, vec![]),
             obs(1_000_000, "test", Signal::Summary, 2.0, vec![]),

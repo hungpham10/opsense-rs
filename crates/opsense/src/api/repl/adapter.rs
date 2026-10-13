@@ -4,8 +4,11 @@
 use {
     crate::api::AppState,
     crate::api::repl::{schema, v1},
-    opsense_mod::{BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest, ModuleError, OpsenseModule, RouteSpec, TenantServices},
-    async_graphql::{Schema, EmptySubscription},
+    async_graphql::{EmptySubscription, Schema},
+    opsense_ffi::{
+        BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest, ModuleError, OpsenseModule,
+        RouteSpec, TenantServices,
+    },
     std::sync::Arc,
 };
 
@@ -31,18 +34,20 @@ impl OpsenseModule for ReplApiModule {
             version: env!("CARGO_PKG_VERSION").into(),
             builtin: true,
             prefix: "/api/repl".into(),
-            routes: vec![
-                RouteSpec {
-                    id: "graphql".into(),
-                    method: HttpMethod::Post,
-                    path: "/graphql".into(),
-                },
-            ],
+            routes: vec![RouteSpec {
+                id: "graphql".into(),
+                method: HttpMethod::Post,
+                path: "/graphql".into(),
+            }],
             tools: vec![], // Tools are registered in MCP, not API
         }
     }
 
-    fn route(&self, req: HttpRequest, _services: &TenantServices) -> BoxFut<'static, Result<HttpResponse, ModuleError>> {
+    fn route(
+        &self,
+        req: HttpRequest,
+        _services: &TenantServices,
+    ) -> BoxFut<'static, Result<HttpResponse, ModuleError>> {
         let schema = self.schema.clone();
         let state = self.state.clone();
 
@@ -62,7 +67,8 @@ impl OpsenseModule for ReplApiModule {
             let resp = schema.execute(gql_req).await;
 
             // Serialize response
-            let resp_json = serde_json::to_vec(&resp).map_err(|e| ModuleError::Internal(format!("serialize: {e}")))?;
+            let resp_json = serde_json::to_vec(&resp)
+                .map_err(|e| ModuleError::Internal(format!("serialize: {e}")))?;
             Ok(HttpResponse {
                 status: 200,
                 headers: vec![("content-type".into(), "application/json".into())],
@@ -71,7 +77,12 @@ impl OpsenseModule for ReplApiModule {
         })
     }
 
-    fn tool(&self, _name: String, _args: serde_json::Value, _services: &TenantServices) -> BoxFut<'static, Result<String, ModuleError>> {
+    fn tool(
+        &self,
+        _name: String,
+        _args: serde_json::Value,
+        _services: &TenantServices,
+    ) -> BoxFut<'static, Result<String, ModuleError>> {
         Box::pin(async { Err(ModuleError::RouteNotFound("no tools in API module".into())) })
     }
 }

@@ -14,7 +14,10 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{ItemFn, LitStr, parse::{Parse, ParseStream}};
+use syn::{
+    ItemFn, LitStr,
+    parse::{Parse, ParseStream},
+};
 
 /// Tham số đọc từ attr `#[rhai_func(...)]`.
 #[derive(Default)]
@@ -87,10 +90,7 @@ mod tests {
                 42
             }
         "#;
-        let out = rhai_func_impl(
-            TokenStream::new(),
-            item.parse::<TokenStream>().unwrap(),
-        );
+        let out = rhai_func_impl(TokenStream::new(), item.parse::<TokenStream>().unwrap());
         let s = out.to_string();
         assert!(s.contains("fn now_secs"));
         assert!(s.contains("__rhai_register_now_secs"));

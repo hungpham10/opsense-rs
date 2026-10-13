@@ -33,7 +33,10 @@ async fn connect() -> Option<OpsenseClient> {
         return None;
     }
     let id_token = common::dex::dex_login_get_id_token(&client).await;
-    if common::wait_for_pipeline(&client, 30, &id_token).await.is_err() {
+    if common::wait_for_pipeline(&client, 30, &id_token)
+        .await
+        .is_err()
+    {
         if common::integration_mode() {
             panic!("pipeline not ready — CI requires `docker compose up`");
         }
@@ -88,7 +91,10 @@ async fn config_edit_is_audited_in_station() {
                 && o.labels.get("to").map(String::as_str) == Some(value.as_str())
         })
         .expect("phải có audit cho patch vừa rồi");
-    assert_eq!(mine.labels.get("to").map(String::as_str), Some(value.as_str()));
+    assert_eq!(
+        mine.labels.get("to").map(String::as_str),
+        Some(value.as_str())
+    );
 }
 
 #[tokio::test]
@@ -124,7 +130,16 @@ async fn query_station_rejects_unbounded_window() {
 
     // `limit` vô hạn cũng vậy.
     let err = c
-        .query_station(&station, None, None, Some(1_000_000), None, None, None, None)
+        .query_station(
+            &station,
+            None,
+            None,
+            Some(1_000_000),
+            None,
+            None,
+            None,
+            None,
+        )
         .await
         .expect_err("limit vượt trần phải bị từ chối")
         .to_string();
@@ -177,15 +192,33 @@ async fn query_station_filters_server_side() {
 
     // Filter theo `signal` sai kiểu → lỗi (không âm thầm trả rỗng).
     assert!(
-        c.query_station(&station, None, None, Some(10), Some("khong_ton_tai"), None, None, None)
-            .await
-            .is_err(),
+        c.query_station(
+            &station,
+            None,
+            None,
+            Some(10),
+            Some("khong_ton_tai"),
+            None,
+            None,
+            None
+        )
+        .await
+        .is_err(),
         "signal lạ phải báo lỗi chứ không trả rỗng im lặng"
     );
 
     // Filter hợp lệ → chỉ còn đúng signal đó (hoặc rỗng nếu station không có).
     let out = c
-        .query_station(&station, None, None, Some(10), Some("order"), None, None, None)
+        .query_station(
+            &station,
+            None,
+            None,
+            Some(10),
+            Some("order"),
+            None,
+            None,
+            None,
+        )
         .await
         .expect("query signal=order");
     assert!(
@@ -271,7 +304,10 @@ async fn patch_component_changes_only_one_field() {
         if k == "sl_pct" {
             continue;
         }
-        assert_eq!(after.config["params"][k], *v, "param `{k}` bị đổi ngoài ý muốn");
+        assert_eq!(
+            after.config["params"][k], *v,
+            "param `{k}` bị đổi ngoài ý muốn"
+        );
     }
 
     // Trả lại giá trị cũ (nếu config gốc không có `sl_pct` thì xoá: patch `null`

@@ -25,8 +25,8 @@
 
 use opsense_mlib::grid::AnalysisGrid;
 use opsense_mlib::script::RhaiBindings;
-use opsense_mlib::trend::TrendAnalysis;
 use opsense_mlib::transition::TransitionAnalysis;
+use opsense_mlib::trend::TrendAnalysis;
 
 use crate::capacity::CapacityForecast;
 
@@ -49,7 +49,10 @@ fn register_label_casts(eng: &mut rhai::Engine) {
 }
 
 /// Install every script-facing native function.
-pub fn register_all(eng: &mut rhai::Engine, attributes: std::collections::BTreeMap<String, String>) {
+pub fn register_all(
+    eng: &mut rhai::Engine,
+    attributes: std::collections::BTreeMap<String, String>,
+) {
     // Custom types + constructors + accessors: khai báo ở `opsense-mlib`.
     // Thứ tự quan trọng — `register_type` phải chạy trước khi script tạo
     // instance (macro đặt `register_type` trước accessor trong cùng block).

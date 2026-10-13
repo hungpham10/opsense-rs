@@ -30,10 +30,11 @@ use tokio::sync::RwLock;
 
 use opsense_core::{Config, Context, Observation, StationKind};
 use opsense_mlib::vector::components::{clock, null};
-use opsense_mlib::vector::runtime::{Component, Event, Fault, Runtime, Severity, build as registry_build};
+use opsense_mlib::vector::runtime::{
+    Component, Event, Fault, Runtime, Severity, build as registry_build,
+};
 use opsense_model::resolver::Resolver;
 use opsense_model::secret::Secret;
-
 
 use crate::api::oauth::OAuthMetrics;
 
@@ -126,7 +127,9 @@ impl AppState {
             // Mô tả node phải có mặt **trước** lần `status()` đầu tiên, và
             // `runtime.reload` có thể chạy script đọc context ngay trong
             // `prepare` — nên đặt trước cả `set_context`.
-            context.set_node_descriptions(node_descriptions(config)).await;
+            context
+                .set_node_descriptions(node_descriptions(config))
+                .await;
 
             runtime.set_context(context.clone());
             runtime
@@ -222,11 +225,7 @@ impl AppState {
     /// phát minh cách "thử lại và hy vọng".
     ///
     /// Trả `false` khi hết thời gian mà station vẫn chưa có.
-    pub async fn wait_for_station(
-        &self,
-        id: &str,
-        timeout: std::time::Duration,
-    ) -> bool {
+    pub async fn wait_for_station(&self, id: &str, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if self.context.has_station(id).await {
@@ -276,7 +275,9 @@ impl AppState {
     }
 
     /// Xoá sạch mọi station đã đăng ký. Trả `(xoá được, lỗi từng cái)`.
-    pub async fn clear_all_stations(&self) -> Result<(Vec<(String, StationKind)>, Vec<String>), Error> {
+    pub async fn clear_all_stations(
+        &self,
+    ) -> Result<(Vec<(String, StationKind)>, Vec<String>), Error> {
         self.context.clear_all_stations().await
     }
 
@@ -295,7 +296,6 @@ impl AppState {
     }
 }
 
-
 /// Build the pipeline component graph from `[pipeline]` (or the default
 /// `clock -> null` graph when absent). Deserializes every component through
 /// the typetag registry — this is where configs fail with e.g.
@@ -304,11 +304,7 @@ impl AppState {
 /// `opsense validate` catches the same failures before serve starts.
 pub fn pipeline_from_config(cfg: &Config) -> Result<Vec<Arc<dyn Component>>, Error> {
     match &cfg.pipeline {
-        Some(p) if !p.components.is_empty() => p
-            .components
-            .iter()
-            .map(build_component)
-            .collect(),
+        Some(p) if !p.components.is_empty() => p.components.iter().map(build_component).collect(),
         _ => Ok(AppState::default_pipeline(cfg)),
     }
 }
@@ -324,18 +320,23 @@ fn build_component(value: &serde_json::Value) -> Result<Arc<dyn Component>, Erro
 
     // 1. Registry runtime (premium/plugin/script-generated type)
     if let Some(result) = crate::api::registry_build(type_name, value.clone()) {
-        return result.map(Arc::from).map_err(|e| component_error(&value, e));
+        return result
+            .map(Arc::from)
+            .map_err(|e| component_error(&value, e));
     }
     // 2. Built-in typetag — y như cũ
     let value_for_err = value.clone();
     serde_json::from_value::<Box<dyn Component>>(value)
         .map(Arc::from)
         .map_err(|e| component_error(&value_for_err, e.into()))
-    }
+}
 
 /// Lỗi rõ ràng hơn typetag mặc định: nói type lạ + liệt kê type đã biết.
 fn component_error(value: &serde_json::Value, e: std::io::Error) -> std::io::Error {
-    let type_name = value.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+    let type_name = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     let known: Vec<&str> = opsense_mlib::vector::runtime::types();
     let hint = if known.is_empty() {
         "không có type động nào".into()
@@ -406,7 +407,10 @@ pub async fn health_check(State(_): State<AppState>) -> Json<serde_json::Value> 
 pub async fn prometheus_handler(State(state): State<AppState>) -> impl IntoResponse {
     if !state.prometheus_config.enabled {
         return (
-            [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
             "".to_string(),
         );
     }
@@ -425,7 +429,10 @@ pub async fn prometheus_handler(State(state): State<AppState>) -> impl IntoRespo
             continue;
         }
         // Window per station (nếu khai báo) — fallback global.
-        let window_secs = st.window_secs.unwrap_or(prom_cfg.default_window_secs).max(1);
+        let window_secs = st
+            .window_secs
+            .unwrap_or(prom_cfg.default_window_secs)
+            .max(1);
         if let Ok(station) = state
             .context
             .station::<Arc<RwLock<opsense_core::TimeseriesStation>>>(&st.station)
@@ -438,27 +445,32 @@ pub async fn prometheus_handler(State(state): State<AppState>) -> impl IntoRespo
                     .await
                     .unwrap_or_default()
             };
-            series.extend(crate::api::prometheus::collect_station(&obs, st, now as i64));
+            series.extend(crate::api::prometheus::collect_station(
+                &obs, st, now as i64,
+            ));
         }
     }
 
     // Tầng 4: OAuth metrics
-    series.extend(crate::api::prometheus::collect_oauth(&state.oauth_metrics.snapshot()));
+    series.extend(crate::api::prometheus::collect_oauth(
+        &state.oauth_metrics.snapshot(),
+    ));
 
     // Render HTTP metrics từ axum-prometheus layer
     let mut output = state.prometheus.0.render();
 
     // Render custom series
-    let (series, dropped) = crate::api::prometheus::cap_series(
-        series,
-        state.prometheus_config.max_series as usize,
-    );
+    let (series, dropped) =
+        crate::api::prometheus::cap_series(series, state.prometheus_config.max_series as usize);
     let custom = crate::api::prometheus::render_prometheus(&series, dropped);
     output.push_str(&custom);
 
     // Staleness: so sánh key cũ/mới, set NaN cho key biến mất
     let mut stale = state.stale_keys.lock().unwrap();
-    let current_keys: BTreeSet<String> = series.iter().map(crate::api::prometheus::series_key).collect();
+    let current_keys: BTreeSet<String> = series
+        .iter()
+        .map(crate::api::prometheus::series_key)
+        .collect();
     for old in stale.iter() {
         if !current_keys.contains(old) {
             output.push_str(&format!(
@@ -470,7 +482,10 @@ pub async fn prometheus_handler(State(state): State<AppState>) -> impl IntoRespo
     *stale = current_keys;
 
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         output,
     )
 }
@@ -617,13 +632,16 @@ impl AppState {
         {
             Ok(s) => s,
             Err(_) => {
-                let made = match opsense_core::TimeseriesStation::from_storage(ID, self.context.storage()).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "không tạo được station audit");
-                        return;
-                    }
-                };
+                let made =
+                    match opsense_core::TimeseriesStation::from_storage(ID, self.context.storage())
+                        .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "không tạo được station audit");
+                            return;
+                        }
+                    };
                 let wrapped = Arc::new(RwLock::new(made));
                 if let Err(e) = self
                     .context
@@ -657,7 +675,9 @@ impl AppState {
 
 #[cfg(test)]
 mod description_tests {
-    use super::{node_descriptions, node_descriptions_from, pipeline_from_config, strip_description};
+    use super::{
+        node_descriptions, node_descriptions_from, pipeline_from_config, strip_description,
+    };
     use opsense_core::Config;
     use serde_json::json;
 
@@ -742,12 +762,16 @@ inputs = ["clock"]
     /// (`clock → null`) và cũng không có mô tả nào.
     #[test]
     fn no_pipeline_yields_no_descriptions() {
-        let cfg = parse("[engine]
+        let cfg = parse(
+            "[engine]
 poll_interval_seconds = 10
-");
+",
+        );
         assert!(node_descriptions(&cfg).is_empty());
         assert_eq!(
-            pipeline_from_config(&cfg).expect("default build được").len(),
+            pipeline_from_config(&cfg)
+                .expect("default build được")
+                .len(),
             2
         );
     }

@@ -133,7 +133,6 @@ impl axum::response::IntoResponse for AdminForbidden {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

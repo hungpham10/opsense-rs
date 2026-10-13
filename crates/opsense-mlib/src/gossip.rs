@@ -34,7 +34,10 @@ pub struct Version {
 impl Version {
     #[must_use]
     pub fn new(lamport: u64, author: impl Into<String>) -> Self {
-        Self { lamport, author: author.into() }
+        Self {
+            lamport,
+            author: author.into(),
+        }
     }
 
     /// `true` nếu `self` mới hơn `other`; bằng nhau thì so `author`.
@@ -94,11 +97,13 @@ impl InfoState {
         for (id, (info, version)) in &remote.entries {
             match self.entries.get(id) {
                 None => {
-                    self.entries.insert(id.clone(), (info.clone(), version.clone()));
+                    self.entries
+                        .insert(id.clone(), (info.clone(), version.clone()));
                     changed = true;
                 }
                 Some((_, local)) if version.is_newer_than(local) => {
-                    self.entries.insert(id.clone(), (info.clone(), version.clone()));
+                    self.entries
+                        .insert(id.clone(), (info.clone(), version.clone()));
                     changed = true;
                 }
                 Some(_) => {}
@@ -114,7 +119,10 @@ impl InfoState {
     /// chưa" mà không vướng đồng hồ.
     #[must_use]
     pub fn snapshot(&self) -> BTreeMap<String, Info> {
-        self.entries.iter().map(|(id, (i, _))| (id.clone(), i.clone())).collect()
+        self.entries
+            .iter()
+            .map(|(id, (i, _))| (id.clone(), i.clone()))
+            .collect()
     }
 }
 
@@ -175,7 +183,12 @@ impl Gossip {
     /// **vô dụng** ở đây: node sống sót không lấy được xác nhận từ node đã chết,
     /// nên nó sẽ kẹt vô hạn đúng lúc cần biết node nào chết nhất.
     #[must_use]
-    pub fn new(node_id: impl Into<String>, own_url: impl Into<String>, quorum: u32, now_ms: u64) -> Self {
+    pub fn new(
+        node_id: impl Into<String>,
+        own_url: impl Into<String>,
+        quorum: u32,
+        now_ms: u64,
+    ) -> Self {
         Self {
             node_id: node_id.into(),
             own_url: own_url.into(),
@@ -291,7 +304,12 @@ impl Gossip {
             None => {
                 self.peers.insert(
                     node_id.to_string(),
-                    Peer { url: url.to_string(), state: NodeState::Alive, last_seen_ms: now_ms, confirmations: 0 },
+                    Peer {
+                        url: url.to_string(),
+                        state: NodeState::Alive,
+                        last_seen_ms: now_ms,
+                        confirmations: 0,
+                    },
                 );
                 true
             }
@@ -335,7 +353,11 @@ impl Gossip {
     /// đếm, không tự kết luận chết. Xác nhận từ node đã chết bị bỏ qua: node
     /// chết không có ý kiến đáng tin.
     pub fn report_missing(&mut self, reporter: &str, target: &str) {
-        if self.peers.get(reporter).is_some_and(|p| p.state == NodeState::Dead) {
+        if self
+            .peers
+            .get(reporter)
+            .is_some_and(|p| p.state == NodeState::Dead)
+        {
             return;
         }
         if let Some(peer) = self.peers.get_mut(target)
@@ -467,9 +489,21 @@ mod tests {
     #[test]
     fn older_state_never_rolls_back_a_newer_one() {
         let mut a = InfoState::new();
-        a.set_local("me", Info { version: "new".into(), ..Info::default() });
+        a.set_local(
+            "me",
+            Info {
+                version: "new".into(),
+                ..Info::default()
+            },
+        );
         let mut b = InfoState::new();
-        b.set_local("me", Info { version: "old".into(), ..Info::default() });
+        b.set_local(
+            "me",
+            Info {
+                version: "old".into(),
+                ..Info::default()
+            },
+        );
         assert!(!a.apply(&b));
         assert_eq!(a.info("me").map(|i| i.version.as_str()), Some("new"));
     }
@@ -487,7 +521,11 @@ mod tests {
         g.add_peer("http://node-b", "node-b", 0);
         g.tick_suspects(1_000, 2_000);
         g.mark_alive("http://node-b", "node-b", 2_000);
-        let n = g.nodes().into_iter().find(|n| n.node_id == "node-b").unwrap();
+        let n = g
+            .nodes()
+            .into_iter()
+            .find(|n| n.node_id == "node-b")
+            .unwrap();
         assert!(n.alive && !n.suspect);
     }
 
@@ -496,9 +534,15 @@ mod tests {
         let mut g = Gossip::new("node-a", "http://node-a", 1, 0);
         g.add_peer("http://node-b", "node-b", 0);
         g.tick_suspects(0, 1_000);
-        assert!(g.nodes().iter().all(|n| n.alive || n.suspect), "chưa được kết luận chết");
+        assert!(
+            g.nodes().iter().all(|n| n.alive || n.suspect),
+            "chưa được kết luận chết"
+        );
         g.report_missing("node-c", "node-b");
-        assert!(g.dead_peers().is_empty(), "lời xác nhận không được bỏ qua thời gian");
+        assert!(
+            g.dead_peers().is_empty(),
+            "lời xác nhận không được bỏ qua thời gian"
+        );
         g.tick_reap(30_000, 31_000);
         assert_eq!(g.dead_peers(), vec!["node-b"]);
     }
@@ -510,7 +554,10 @@ mod tests {
         g.tick_suspects(0, 1_000);
         assert_eq!(g.probe_targets().len(), 1, "suspect vẫn phải ping");
         g.tick_reap(0, 1_000);
-        assert!(g.probe_targets().is_empty(), "dead thì bỏ khỏi danh sách ping");
+        assert!(
+            g.probe_targets().is_empty(),
+            "dead thì bỏ khỏi danh sách ping"
+        );
     }
 
     #[test]
@@ -518,9 +565,18 @@ mod tests {
         let mut a = Gossip::new("node-a", "http://node-a", 1, 0);
         let mut b = Gossip::new("node-b", "http://node-b", 1, 0);
         let mut c = Gossip::new("node-c", "http://node-c", 1, 0);
-        a.publish(Info { version: "1.0.12".into(), ..Info::default() });
-        b.publish(Info { version: "1.0.12".into(), ..Info::default() });
-        c.publish(Info { version: "1.0.11".into(), ..Info::default() });
+        a.publish(Info {
+            version: "1.0.12".into(),
+            ..Info::default()
+        });
+        b.publish(Info {
+            version: "1.0.12".into(),
+            ..Info::default()
+        });
+        c.publish(Info {
+            version: "1.0.11".into(),
+            ..Info::default()
+        });
 
         let mut first = a.clone();
         first.apply(b.state());
@@ -534,7 +590,11 @@ mod tests {
     #[test]
     fn state_survives_json_round_trip_for_the_internal_endpoint() {
         let mut g = Gossip::new("node-a", "http://node-a", 1, 0);
-        g.publish(Info { version: "1.0.12".into(), started_at: 42, note: String::new() });
+        g.publish(Info {
+            version: "1.0.12".into(),
+            started_at: 42,
+            note: String::new(),
+        });
         let json = serde_json::to_string(g.state()).unwrap();
         let back: InfoState = serde_json::from_str(&json).unwrap();
         assert_eq!(g.state().snapshot(), back.snapshot());

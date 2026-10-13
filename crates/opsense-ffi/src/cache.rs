@@ -108,7 +108,9 @@ impl Cache {
     }
 
     pub async fn set(&self, key: &String, value: &str, ttl: usize) -> Result<(), CacheError> {
-        self.backend.set_ex(&format!("value[{key}]"), value, ttl as u64).await
+        self.backend
+            .set_ex(&format!("value[{key}]"), value, ttl as u64)
+            .await
     }
 
     pub async fn del(&self, key: &String) -> Result<(), CacheError> {
@@ -134,9 +136,8 @@ impl Page {
             .await?
             .ok_or(CacheError::Miss)?;
 
-        let indices: Vec<(i64, u64, u64)> = serde_json::from_str(&indices_str)
-            .ok()
-            .unwrap_or_default();
+        let indices: Vec<(i64, u64, u64)> =
+            serde_json::from_str(&indices_str).ok().unwrap_or_default();
 
         if !indices.is_empty() {
             let comparator =

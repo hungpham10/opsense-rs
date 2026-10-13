@@ -48,29 +48,137 @@ async fn test_prometheus_script_computes_stats() {
     assert_eq!(out.len(), 3, "should have 3 output metrics");
 
     // Verify cpu_usage: values 10, 20, 30 -> mean=20, min=10, max=30, variance=100
-    let cpu_out = out.iter().find(|o| o["metric_id"] == "cpu_usage").expect("cpu_usage output");
+    let cpu_out = out
+        .iter()
+        .find(|o| o["metric_id"] == "cpu_usage")
+        .expect("cpu_usage output");
     assert_eq!(cpu_out["signal"], "summary");
     assert_eq!(cpu_out["labels"]["test_case"], "prometheus");
-    assert!((cpu_out["value"].as_f64().unwrap() - 20.0).abs() < 0.001, "cpu mean");
-    assert!((cpu_out["labels"]["mean"].as_str().unwrap().parse::<f64>().unwrap() - 20.0).abs() < 0.001);
-    assert!((cpu_out["labels"]["min"].as_str().unwrap().parse::<f64>().unwrap() - 10.0).abs() < 0.001);
-    assert!((cpu_out["labels"]["max"].as_str().unwrap().parse::<f64>().unwrap() - 30.0).abs() < 0.001);
-    assert!((cpu_out["labels"]["variance"].as_str().unwrap().parse::<f64>().unwrap() - 100.0).abs() < 0.001);
+    assert!(
+        (cpu_out["value"].as_f64().unwrap() - 20.0).abs() < 0.001,
+        "cpu mean"
+    );
+    assert!(
+        (cpu_out["labels"]["mean"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 20.0)
+            .abs()
+            < 0.001
+    );
+    assert!(
+        (cpu_out["labels"]["min"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 10.0)
+            .abs()
+            < 0.001
+    );
+    assert!(
+        (cpu_out["labels"]["max"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 30.0)
+            .abs()
+            < 0.001
+    );
+    assert!(
+        (cpu_out["labels"]["variance"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 100.0)
+            .abs()
+            < 0.001
+    );
     assert_eq!(cpu_out["labels"]["count"], "3");
 
     // Verify memory_usage: values 100, 200, 150 -> mean=150, min=100, max=200, variance=2500
-    let mem_out = out.iter().find(|o| o["metric_id"] == "memory_usage").expect("memory_usage output");
-    assert!((mem_out["value"].as_f64().unwrap() - 150.0).abs() < 0.001, "memory mean");
-    assert!((mem_out["labels"]["min"].as_str().unwrap().parse::<f64>().unwrap() - 100.0).abs() < 0.001);
-    assert!((mem_out["labels"]["max"].as_str().unwrap().parse::<f64>().unwrap() - 200.0).abs() < 0.001);
-    assert!((mem_out["labels"]["variance"].as_str().unwrap().parse::<f64>().unwrap() - 2500.0).abs() < 0.001);
+    let mem_out = out
+        .iter()
+        .find(|o| o["metric_id"] == "memory_usage")
+        .expect("memory_usage output");
+    assert!(
+        (mem_out["value"].as_f64().unwrap() - 150.0).abs() < 0.001,
+        "memory mean"
+    );
+    assert!(
+        (mem_out["labels"]["min"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 100.0)
+            .abs()
+            < 0.001
+    );
+    assert!(
+        (mem_out["labels"]["max"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 200.0)
+            .abs()
+            < 0.001
+    );
+    assert!(
+        (mem_out["labels"]["variance"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 2500.0)
+            .abs()
+            < 0.001
+    );
 
     // Verify disk_io: values 50, 60 -> mean=55, min=50, max=60, variance=50
-    let disk_out = out.iter().find(|o| o["metric_id"] == "disk_io").expect("disk_io output");
-    assert!((disk_out["value"].as_f64().unwrap() - 55.0).abs() < 0.001, "disk mean");
-    assert!((disk_out["labels"]["min"].as_str().unwrap().parse::<f64>().unwrap() - 50.0).abs() < 0.001);
-    assert!((disk_out["labels"]["max"].as_str().unwrap().parse::<f64>().unwrap() - 60.0).abs() < 0.001);
-    assert!((disk_out["labels"]["variance"].as_str().unwrap().parse::<f64>().unwrap() - 50.0).abs() < 0.001);
+    let disk_out = out
+        .iter()
+        .find(|o| o["metric_id"] == "disk_io")
+        .expect("disk_io output");
+    assert!(
+        (disk_out["value"].as_f64().unwrap() - 55.0).abs() < 0.001,
+        "disk mean"
+    );
+    assert!(
+        (disk_out["labels"]["min"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 50.0)
+            .abs()
+            < 0.001
+    );
+    assert!(
+        (disk_out["labels"]["max"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 60.0)
+            .abs()
+            < 0.001
+    );
+    assert!(
+        (disk_out["labels"]["variance"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            - 50.0)
+            .abs()
+            < 0.001
+    );
 
     // ── AnalysisGrid + TransitionAnalysis (native, qua `analysis_labels`) ──
     fn label_f64(summary: &serde_json::Value, key: &str) -> f64 {
@@ -84,7 +192,10 @@ async fn test_prometheus_script_computes_stats() {
     // cpu_usage: ts-sorted 10→20→30 (tăng đều) → grid + transitions có dữ
     // liệu: 3 bucket (interval = chu kỳ lấy mẫu 60s), probabilities hợp
     // chuẩn (tổng = 1) và không nghiêng về down.
-    let cpu = out.iter().find(|o| o["metric_id"] == "cpu_usage").expect("cpu_usage output");
+    let cpu = out
+        .iter()
+        .find(|o| o["metric_id"] == "cpu_usage")
+        .expect("cpu_usage output");
     let cpu_up = label_f64(cpu, "up_prob");
     let cpu_down = label_f64(cpu, "down_prob");
     let cpu_stay = label_f64(cpu, "stay_prob");
@@ -103,10 +214,16 @@ async fn test_prometheus_script_computes_stats() {
         .unwrap_or_else(|| panic!("cpu thiếu trans_buckets"))
         .parse()
         .expect("trans_buckets là số");
-    assert!(cpu_buckets >= 3, "cpu có 3 bucket ts (interval=60): got {cpu_buckets}");
+    assert!(
+        cpu_buckets >= 3,
+        "cpu có 3 bucket ts (interval=60): got {cpu_buckets}"
+    );
 
     // memory_usage 100→200→150 (lên rồi xuống): tổng xác suất vẫn khép kín.
-    let mem = out.iter().find(|o| o["metric_id"] == "memory_usage").expect("memory_usage output");
+    let mem = out
+        .iter()
+        .find(|o| o["metric_id"] == "memory_usage")
+        .expect("memory_usage output");
     let mem_up = label_f64(mem, "up_prob");
     let mem_down = label_f64(mem, "down_prob");
     let mem_stay = label_f64(mem, "stay_prob");

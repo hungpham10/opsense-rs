@@ -6,21 +6,18 @@
 //! GraphQL round-trip), `init` (scaffold config), `repl` (interactive REPL),
 //! `runner` (kernel-runner gRPC server), `mcp` (MCP stdio server over the
 //! client), `tls` (process-wide rustls crypto provider) and `token`/`session`
-//! (auth helpers), `modules_config` (module registry config), `api::modules`
-//! (API module registry), `serve_host` (host services for dynamic modules).
+//! (auth helpers), `api::modules` (API module registry).
 
 pub mod api;
 pub mod cli;
 pub mod client;
 pub mod init;
 pub mod mcp;
-pub mod modules_config;
 pub mod repl;
 pub mod runner;
 pub mod segv_backtrace;
 pub mod sentry_setup;
 pub mod serve;
-pub mod serve_host;
 pub mod tls;
 pub mod token;
 

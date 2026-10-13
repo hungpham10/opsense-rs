@@ -1,9 +1,9 @@
 [package]
-name = "opsense-mod"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "Opsense module SDK — ABI-stable interface for dynamic API/MCP modules"
+name = "opsense-ffi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Opsense FFI SDK — ABI-stable interface for dynamic API/MCP modules"
 
 [dependencies]
 serde = { workspace = true }

@@ -59,10 +59,14 @@ async fn ensure_stations(client: &reqwest::Client, bearer: &str) -> bool {
             true
         }
         Err(e) if common::integration_mode() => {
-            panic!("no stations registered: {e} — CI requires pipeline with timeseries_station_sink")
+            panic!(
+                "no stations registered: {e} — CI requires pipeline with timeseries_station_sink"
+            )
         }
         Err(e) => {
-            eprintln!("skipping: no stations registered ({e}) — run `docker compose up` with proper config");
+            eprintln!(
+                "skipping: no stations registered ({e}) — run `docker compose up` with proper config"
+            );
             false
         }
     }
@@ -101,12 +105,17 @@ async fn storage_graphql_status_has_stations() {
         .send()
         .await
         .expect("graphql request");
-    assert!(resp.status().is_success(), "graphql status: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "graphql status: {}",
+        resp.status()
+    );
     let body: Value = resp.json().await.expect("graphql json");
 
     // At least one station should exist (from pipeline config).
     let empty_vec: Vec<Value> = vec![];
-    let stations: &Vec<Value> = body.get("data")
+    let stations: &Vec<Value> = body
+        .get("data")
         .and_then(|d| d.get("status"))
         .and_then(|s| s.get("stations"))
         .and_then(|s| s.as_array())
@@ -143,7 +152,9 @@ async fn storage_query_timeseries_returns_data() {
     let stations = match common::wait_for_stations(&client, 60, &id_token).await {
         Ok(s) => s,
         Err(e) if common::integration_mode() => {
-            panic!("no stations registered: {e} — CI requires pipeline with timeseries_station_sink")
+            panic!(
+                "no stations registered: {e} — CI requires pipeline with timeseries_station_sink"
+            )
         }
         Err(e) => {
             eprintln!("skipping: no stations registered ({e})");
@@ -168,7 +179,10 @@ async fn storage_query_timeseries_returns_data() {
     let mut empty: Vec<&str> = Vec::new();
     for id in &stations {
         let result = query_timeseries(&client, &id_token, id, from_ts, to_ts).await;
-        let observations = result["observations"].as_array().cloned().unwrap_or_default();
+        let observations = result["observations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         if observations.is_empty() {
             empty.push(id);
         } else {
@@ -261,7 +275,11 @@ async fn storage_health_endpoint() {
         .send()
         .await
         .expect("health request");
-    assert!(resp.status().is_success(), "health status: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "health status: {}",
+        resp.status()
+    );
     let body: Value = resp.json().await.expect("health json");
     assert_eq!(body["ok"], Value::Bool(true), "health body: {:?}", body);
 }
@@ -298,11 +316,16 @@ async fn storage_data_integrity_metric_ids() {
     assert!(resp.status().is_success());
     let body: Value = resp.json().await.expect("status json");
 
-    let station_ids: Vec<String> = body.get("data")
+    let station_ids: Vec<String> = body
+        .get("data")
         .and_then(|d| d.get("status"))
         .and_then(|s| s.get("stations"))
         .and_then(|s| s.as_array())
-        .map(|arr| arr.iter().filter_map(|s| s.get("id").and_then(|id| id.as_str()).map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.get("id").and_then(|id| id.as_str()).map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     eprintln!("stations: {:?}", station_ids);
 
@@ -332,7 +355,11 @@ async fn storage_data_integrity_metric_ids() {
             .send()
             .await
             .expect("queryTimeseries request");
-        assert!(resp.status().is_success(), "queryTimeseries for {station_id} status: {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "queryTimeseries for {station_id} status: {}",
+            resp.status()
+        );
         let body: Value = resp.json().await.expect("queryTimeseries json");
         assert!(
             body.get("errors").is_none(),
@@ -342,11 +369,15 @@ async fn storage_data_integrity_metric_ids() {
         let result = body
             .get("data")
             .and_then(|d| d.get("queryTimeseries"))
-            .unwrap_or_else(|| panic!("station {station_id}: response không có queryTimeseries: {body}"));
+            .unwrap_or_else(|| {
+                panic!("station {station_id}: response không có queryTimeseries: {body}")
+            });
         let points = result
             .get("observations")
             .and_then(|o| o.as_array())
-            .unwrap_or_else(|| panic!("station {station_id}: QueryResult thiếu `observations`: {result}"));
+            .unwrap_or_else(|| {
+                panic!("station {station_id}: QueryResult thiếu `observations`: {result}")
+            });
         eprintln!("station {}: {} points", station_id, points.len());
     }
 }

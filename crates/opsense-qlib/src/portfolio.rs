@@ -523,9 +523,7 @@ impl Portfolio {
         // con trỏ về đầu và xử lý lại nến cũ.
         if session.next_ts == 0 {
             let step_ts = to_timestamp_secs(resolution);
-            let first_valid = self
-                .calendar
-                .next(from.saturating_sub(step_ts), resolution);
+            let first_valid = self.calendar.next(from.saturating_sub(step_ts), resolution);
             session.next_ts = if first_valid > from && first_valid < to {
                 first_valid
             } else {
@@ -822,7 +820,6 @@ impl Portfolio {
         })
     }
 
-
     /// Pre-fetch trade + analysis data into cache before simulation loop runs.
     /// Avoids cache MISS/EXTEND during rebuild since data is already warmed.
     ///
@@ -855,16 +852,16 @@ impl Portfolio {
                 );
             }
             Self::fetch_candles_from_loader(
-            &self.loader,
-            &self.cache,
-            &self.calendar,
-            adj_from,
-            safe_to,
-            &self.config.resolution_for_test,
-            &cache_key_trade,
-            self.config.cache_enabled,
-        )
-        .await?;
+                &self.loader,
+                &self.cache,
+                &self.calendar,
+                adj_from,
+                safe_to,
+                &self.config.resolution_for_test,
+                &cache_key_trade,
+                self.config.cache_enabled,
+            )
+            .await?;
         } else {
             #[cfg(debug_assertions)]
             println!(
@@ -877,7 +874,8 @@ impl Portfolio {
         let cache_key_rebuild = format!("{}:analysis", self.config.resolution_for_rebuild);
         let analysis_from = from.saturating_sub(lookback);
         if analysis_from < safe_to {
-            if let Some(adj_from) = adjust_from(analysis_from, &self.config.resolution_for_rebuild) {
+            if let Some(adj_from) = adjust_from(analysis_from, &self.config.resolution_for_rebuild)
+            {
                 #[cfg(debug_assertions)]
                 if adj_from != analysis_from {
                     println!(
@@ -886,16 +884,16 @@ impl Portfolio {
                     );
                 }
                 Self::fetch_candles_from_loader(
-                &self.loader,
-                &self.cache,
-                &self.calendar,
-                adj_from,
-                safe_to,
-                &self.config.resolution_for_rebuild,
-                &cache_key_rebuild,
-                self.config.cache_enabled,
-            )
-            .await?;
+                    &self.loader,
+                    &self.cache,
+                    &self.calendar,
+                    adj_from,
+                    safe_to,
+                    &self.config.resolution_for_rebuild,
+                    &cache_key_rebuild,
+                    self.config.cache_enabled,
+                )
+                .await?;
             } else {
                 #[cfg(debug_assertions)]
                 println!(
@@ -1115,10 +1113,8 @@ impl Portfolio {
                 );
 
                 if size <= 0.0 {
-                    let reason = format!(
-                        "win_p={:.4} → calculate_order_size=0 (skip placing)",
-                        win_p
-                    );
+                    let reason =
+                        format!("win_p={:.4} → calculate_order_size=0 (skip placing)", win_p);
                     tracing::debug!(
                         ts,
                         grid = ig,
@@ -1517,10 +1513,8 @@ impl Portfolio {
         for bid in start_bid..=end_bid {
             let block_start = (bid * BLOCK_SECS) as u64;
             let block_end = ((bid + 1) * BLOCK_SECS) as u64;
-            let fresh = &candles[
-                candles.partition_point(|c| (c.t as u64) < block_start)
-                    ..candles.partition_point(|c| (c.t as u64) < block_end)
-            ];
+            let fresh = &candles[candles.partition_point(|c| (c.t as u64) < block_start)
+                ..candles.partition_point(|c| (c.t as u64) < block_end)];
 
             let mut block = lru.get(&bid).map_or_else(
                 || BlockCache {
@@ -1668,7 +1662,11 @@ impl Portfolio {
         if from >= to {
             return Err(Error::new(
                 ErrorKind::BrokenPipe,
-                format!("`from` ({from}) should be smaller than `to` ({to})", from=from, to=to),
+                format!(
+                    "`from` ({from}) should be smaller than `to` ({to})",
+                    from = from,
+                    to = to
+                ),
             ));
         }
 
@@ -1721,7 +1719,10 @@ impl Portfolio {
         let (block_from, block_to) = if cache_enabled {
             let start_bid = Self::block_id(fetch_from);
             let end_bid = Self::block_id(fetch_to.saturating_sub(1));
-            ((start_bid * BLOCK_SECS) as u64, ((end_bid + 1) * BLOCK_SECS) as u64)
+            (
+                (start_bid * BLOCK_SECS) as u64,
+                ((end_bid + 1) * BLOCK_SECS) as u64,
+            )
         } else {
             (fetch_from, fetch_to)
         };
@@ -1811,7 +1812,8 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        let result = Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0);
+        let result =
+            Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0);
         assert!(result.is_some());
         let (exit, pnl) = result.unwrap();
         assert!(exit <= o.sl_price);
@@ -1836,7 +1838,8 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        let result = Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0);
+        let result =
+            Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0);
         assert!(result.is_some());
         let (exit, pnl) = result.unwrap();
         assert!(exit >= o.tp_price);
@@ -1861,7 +1864,10 @@ mod tests {
             c: 102.0,
             v: 1000.0,
         };
-        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0).is_none());
+        assert!(
+            Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1884,9 +1890,15 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 4).is_none());
+        assert!(
+            Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 4)
+                .is_none()
+        );
         // Đủ T+N (current_seq == unlock_seq) → đóng bình thường.
-        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 5).is_some());
+        assert!(
+            Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 5)
+                .is_some()
+        );
     }
 
     #[test]
@@ -1908,7 +1920,10 @@ mod tests {
             c: 95.0,
             v: 1000.0,
         };
-        assert!(Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0).is_some());
+        assert!(
+            Portfolio::check_order_exit(&o, &c, &crate::fee::SimpleFixedFee::new(0.0005), 0)
+                .is_some()
+        );
     }
 
     #[test]
@@ -1972,7 +1987,13 @@ mod tests {
     #[async_trait::async_trait]
     impl Strategy for FlatStrategy {
         fn init(&self) -> Vec<f64> {
-            vec![0.25, 100_000.0, self.levels as f64, self.sl_pct, 2.0 * 24.0 * 3600.0]
+            vec![
+                0.25,
+                100_000.0,
+                self.levels as f64,
+                self.sl_pct,
+                2.0 * 24.0 * 3600.0,
+            ]
         }
 
         async fn next(&self, current: u64) -> u64 {
@@ -2021,8 +2042,14 @@ mod tests {
             .with_sl_pct(0.008);
         let entry = grid.level_price(2);
         assert!((entry - 100.8).abs() < 1e-9, "mốc giữa phải là 100.8");
-        let candle =
-            CandleStick::new(1_700_000_000, entry, entry + 0.01, entry - 0.01, entry, 10.0);
+        let candle = CandleStick::new(
+            1_700_000_000,
+            entry,
+            entry + 0.01,
+            entry - 0.01,
+            entry,
+            10.0,
+        );
         let fee = SimpleFixedFee::new(0.0002);
         let placed = |evs: &[OrderEvent]| {
             evs.iter()
@@ -2062,7 +2089,10 @@ mod tests {
             0,
             2.0,
         );
-        assert!(orders.is_empty(), "không bậc nào đủ RR thì không đặt lệnh nào");
+        assert!(
+            orders.is_empty(),
+            "không bậc nào đủ RR thì không đặt lệnh nào"
+        );
         assert_eq!(
             placed(&events),
             0,
@@ -2145,9 +2175,7 @@ mod tests {
     /// không cần biết dữ liệu nằm ở đâu — đúng abstraction của `FetchFn`.
     fn slice_fetch(
         data: Vec<CandleStick>,
-    ) -> Box<
-        dyn FnMut(u64, u64) -> LoaderFuture + Send + Sync,
-    > {
+    ) -> Box<dyn FnMut(u64, u64) -> LoaderFuture + Send + Sync> {
         Box::new(move |from: u64, to: u64| {
             let out: Vec<CandleStick> = data
                 .iter()
@@ -2384,8 +2412,7 @@ mod tests {
                 to: u64,
                 _resolution: &str,
             ) -> Result<Vec<CandleStick>, Error> {
-                self.calls
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 *self.last.lock().unwrap() = Some((from, to));
                 Ok(self
                     .data
@@ -2439,7 +2466,10 @@ mod tests {
             calls.load(std::sync::atomic::Ordering::SeqCst) > 0,
             "loader phải được hỏi"
         );
-        let (from, to) = last.lock().unwrap().expect("loader phải được hỏi ít nhất 1 lần");
+        let (from, to) = last
+            .lock()
+            .unwrap()
+            .expect("loader phải được hỏi ít nhất 1 lần");
         assert!(
             to - from < 7 * 24 * 3600,
             "cache tắt: không mở rộng full weekly block, hỏi đúng range ({from}, {to})"

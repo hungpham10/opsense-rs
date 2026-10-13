@@ -15,7 +15,7 @@ json = []
 rhai = ["dep:rhai"]
 parquet = ["dep:arrow-array", "dep:arrow-schema", "dep:parquet", "dep:object_store"]
 sqlite = ["dep:sqlx"]
-redis = ["dep:redis", "dep:opsense-mod"]
+redis = ["dep:redis", "dep:opsense-ffi"]
 # Cluster cho nhiều node, hai feature tách ràng. Cả hai đều tắt mặc định để
 # crate nhẹ không bị kéo thêm; vận chuyển nằm ở `opsense::cluster`.
 #   gossip = quan sát (ai sống) — không quyết định gì
@@ -77,7 +77,7 @@ opsense-macros = { path = "../opsense-macros" }
 rustls = { workspace = true }
 
 # Module SDK — for CacheBackend trait
-opsense-mod = { path = "../opsense-mod", optional = true }
+opsense-ffi = { path = "../opsense-ffi", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

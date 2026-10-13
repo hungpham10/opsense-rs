@@ -47,7 +47,9 @@ pub struct RemoveAttributeParams {
 pub struct QueryTimeseriesParams {
     #[schemars(description = "Station/node id")]
     pub node: String,
-    #[schemars(description = "From ts (inclusive): unix seconds OR relative window. Omit → bounded default window")]
+    #[schemars(
+        description = "From ts (inclusive): unix seconds OR relative window. Omit → bounded default window"
+    )]
     pub from_ts: Option<TimeArg>,
     #[schemars(description = "To ts (inclusive): unix seconds OR relative window. Omit → now")]
     pub to_ts: Option<TimeArg>,

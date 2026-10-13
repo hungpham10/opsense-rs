@@ -42,7 +42,9 @@ pub fn dyn_f64(v: &Dynamic) -> f64 {
 /// Convert a `Dynamic` array to `Vec<f64>`, skipping non-float elements.
 pub fn dyn_f64_array(v: &Dynamic) -> Vec<f64> {
     if let Ok(arr) = v.as_array_ref() {
-        arr.iter().filter_map(|x| x.clone().try_cast::<f64>()).collect()
+        arr.iter()
+            .filter_map(|x| x.clone().try_cast::<f64>())
+            .collect()
     } else {
         Vec::new()
     }

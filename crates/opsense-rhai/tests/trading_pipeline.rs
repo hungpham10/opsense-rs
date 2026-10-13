@@ -120,10 +120,7 @@ async fn wait_grid_orders(ctx: &Arc<Context>, timeout_secs: u64) -> Vec<Observat
             // Chẩn đoán: nến đã vào station `tick-candle` chưa? Không có nó thì
             // `grid` không có gì để vào lệnh — nhưng nhìn log kernel thì thấy
             // "chưa đủ dữ liệu", rất dễ chẩn đoán nhầm thành lỗi chiến lược.
-            let n_candle = match ctx
-                .station::<Arc<RwLock<TimeseriesStation>>>(CANDLE)
-                .await
-            {
+            let n_candle = match ctx.station::<Arc<RwLock<TimeseriesStation>>>(CANDLE).await {
                 Ok(s) => s
                     .read()
                     .await
@@ -194,12 +191,13 @@ async fn grid_trading_emits_order_events_through_runtime() {
     rt.set_context(ctx.clone());
     rt.reload(components).expect("valid graph");
     let _receiver = rt.broadcast("sink".into()).expect("output broadcast");
-    let _handle = rt.start(|event| async move {
-        if let opsense_components::vector::runtime::Event::Major((_, error)) = event {
-            panic!("runtime error: {error}");
-        }
-    })
-    .expect("runtime starts");
+    let _handle = rt
+        .start(|event| async move {
+            if let opsense_components::vector::runtime::Event::Major((_, error)) = event {
+                panic!("runtime error: {error}");
+            }
+        })
+        .expect("runtime starts");
 
     // Nạp nến qua Input → node `tick_2_candle` gom rồi ghi vào station `CANDLE`.
     let open_bucket = opsense_components::signal::now_secs() / 60 * 60;

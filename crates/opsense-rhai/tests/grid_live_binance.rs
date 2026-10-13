@@ -141,9 +141,7 @@ fn parse_okx(body: &Value) -> Vec<CandleStick> {
         "OKX trả lỗi: {}",
         body["msg"]
     );
-    let rows = body["data"]
-        .as_array()
-        .expect("OKX: data = mảng dòng");
+    let rows = body["data"].as_array().expect("OKX: data = mảng dòng");
     let mut out: Vec<CandleStick> = rows
         .iter()
         .filter_map(|row| {
@@ -214,9 +212,12 @@ async fn fetch_klines() -> (String, Vec<CandleStick>) {
 #[allow(clippy::type_complexity)]
 fn slice_fetch(
     data: Vec<CandleStick>,
-) -> impl FnMut(u64, u64) -> std::pin::Pin<Box<dyn std::future::Future<
-    Output = Result<Vec<CandleStick>, std::io::Error>,
-> + Send>> {
+) -> impl FnMut(
+    u64,
+    u64,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<CandleStick>, std::io::Error>> + Send>,
+> {
     move |from, to| {
         let out: Vec<CandleStick> = data
             .iter()
@@ -317,9 +318,7 @@ async fn rebuild_on_live_binance_data_yields_usable_plan() {
         sink.lock().expect("lock events").push(e);
         Box::pin(async { Ok(()) })
             as std::pin::Pin<
-                Box<
-                    dyn std::future::Future<Output = std::io::Result<()>> + Send + 'static,
-                >,
+                Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'static>,
             >
     };
     let mut session = Session::new();

@@ -14,9 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use object_store::{aws::AmazonS3Builder, ObjectStore};
-use opsense_mlib::storage::parquet::{LakehouseStorage, S3Config};
+use object_store::{ObjectStore, aws::AmazonS3Builder};
 use opsense_mlib::storage::TimeseriesStorage;
+use opsense_mlib::storage::parquet::{LakehouseStorage, S3Config};
 
 const LAKE_KEY: &str = "integration-test-station";
 
@@ -37,7 +37,8 @@ async fn wait_rustfs() -> bool {
     opsense_mlib::tls::install_default_crypto_provider();
     let client = reqwest::Client::new();
     for _ in 0..30 {
-        if client.get(format!("{}/health", s3_endpoint()))
+        if client
+            .get(format!("{}/health", s3_endpoint()))
             .send()
             .await
             .is_ok()
@@ -64,11 +65,18 @@ fn s3_store() -> Arc<dyn ObjectStore> {
     };
     // Dùng cùng logic với parquet.rs (path-style cho RustFS).
     let mut b = AmazonS3Builder::new().with_bucket_name(&cfg.bucket);
-    if let Some(k) = &cfg.access_key_id { b = b.with_access_key_id(k); }
-    if let Some(s) = &cfg.secret_access_key { b = b.with_secret_access_key(s); }
-    if let Some(r) = &cfg.region { b = b.with_region(r); }
+    if let Some(k) = &cfg.access_key_id {
+        b = b.with_access_key_id(k);
+    }
+    if let Some(s) = &cfg.secret_access_key {
+        b = b.with_secret_access_key(s);
+    }
+    if let Some(r) = &cfg.region {
+        b = b.with_region(r);
+    }
     if let Some(ep) = &cfg.endpoint {
-        b = b.with_endpoint(ep)
+        b = b
+            .with_endpoint(ep)
             .with_allow_http(true)
             .with_virtual_hosted_style_request(false);
     }
@@ -81,7 +89,9 @@ async fn list_keys(store: &Arc<dyn ObjectStore>, prefix: &str) -> Vec<String> {
     let mut stream = store.list(Some(&object_store::path::Path::from(prefix)));
     while let Some(result) = stream.next().await {
         match result {
-            Ok(obj) => { out.push(obj.location.to_string()); }
+            Ok(obj) => {
+                out.push(obj.location.to_string());
+            }
             Err(_) => break,
         }
     }
@@ -123,9 +133,18 @@ async fn s3_lake_write_flush_snapshot_retain() {
     lake.flush_timeseries().unwrap();
 
     let ts_keys = list_keys(&store, &format!("{}/ts/", LAKE_KEY)).await;
-    assert!(ts_keys.iter().any(|k| k.contains("blk=1")), "phải có blk=1 trên S3: {ts_keys:?}");
-    assert!(ts_keys.iter().any(|k| k.contains("blk=2")), "phải có blk=2 trên S3: {ts_keys:?}");
-    assert!(ts_keys.iter().any(|k| k.ends_with("manifest.json")), "phải có manifest.json");
+    assert!(
+        ts_keys.iter().any(|k| k.contains("blk=1")),
+        "phải có blk=1 trên S3: {ts_keys:?}"
+    );
+    assert!(
+        ts_keys.iter().any(|k| k.contains("blk=2")),
+        "phải có blk=2 trên S3: {ts_keys:?}"
+    );
+    assert!(
+        ts_keys.iter().any(|k| k.ends_with("manifest.json")),
+        "phải có manifest.json"
+    );
 
     // 3. Đọc lại qua range (từ local + S3 merged).
     let r = lake.range(b"blk:1", 0, 100).await.unwrap();
@@ -137,14 +156,20 @@ async fn s3_lake_write_flush_snapshot_retain() {
     lake.snapshot().unwrap();
     let state_keys = list_keys(&store, &format!("{}/state/", LAKE_KEY)).await;
     assert!(!state_keys.is_empty(), "phải có state/ trên S3");
-    assert!(state_keys.iter().any(|k| k.ends_with("manifest.json")), "state/manifest.json");
+    assert!(
+        state_keys.iter().any(|k| k.ends_with("manifest.json")),
+        "state/manifest.json"
+    );
 
     // 5. Retention: blk:1→partition blk=1, blk:2→partition blk=2
     //    (series có prefix blk: → dùng id trong series).
     //    keep_after_ts=7200 → keep_block=2 → giữ blk=2, xoá blk=1.
     lake.retain_block_partitions(7200).unwrap();
     let ts_keys_after = list_keys(&store, &format!("{}/ts/", LAKE_KEY)).await;
-    assert!(ts_keys_after.iter().any(|k| k.contains("blk=2")), "blk=2 phải còn sau retain(7200)");
+    assert!(
+        ts_keys_after.iter().any(|k| k.contains("blk=2")),
+        "blk=2 phải còn sau retain(7200)"
+    );
     assert!(
         !ts_keys_after.iter().any(|k| k.contains("blk=1")),
         "blk=1 phải bị xoá sau retain(7200): {ts_keys_after:?}"

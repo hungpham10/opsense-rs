@@ -243,13 +243,11 @@ where
         // Với arena chung, **mọi** shard khởi đầu rỗng — node nằm trong
         // free-list cho tới khi được `put` cấp. Ranh giới khối cứng biến mất.
         #[cfg(feature = "lru-shared-memory")]
-        let shards = std::array::from_fn(|_| {
-            AlignedShard {
-                mutex: Mutex::new(HeadTail {
-                    first: NULL,
-                    last: NULL,
-                }),
-            }
+        let shards = std::array::from_fn(|_| AlignedShard {
+            mutex: Mutex::new(HeadTail {
+                first: NULL,
+                last: NULL,
+            }),
         });
 
         Self {
@@ -621,7 +619,11 @@ where
                 }
                 let mut ht = self.shards[shard_index].mutex.lock().unwrap();
                 ht.first = if per_shard > 0 { offset } else { NULL };
-                ht.last = if per_shard > 0 { offset + per_shard - 1 } else { NULL };
+                ht.last = if per_shard > 0 {
+                    offset + per_shard - 1
+                } else {
+                    NULL
+                };
             }
         }
 
@@ -974,7 +976,11 @@ mod tests {
         }
 
         // Với `capacity_per_shard = 1`, chỉ key cuối cùng còn sống.
-        let sống: Vec<i64> = keys.iter().copied().filter(|k| cache.get(k).is_some()).collect();
+        let sống: Vec<i64> = keys
+            .iter()
+            .copied()
+            .filter(|k| cache.get(k).is_some())
+            .collect();
         assert_eq!(
             sống.len(),
             keys.len(),
@@ -1010,14 +1016,21 @@ mod tests {
         // bị đẩy ngay ở bước nạp đầu, không phải do clear. Nên chỉ assert
         // full-capacity khi arena là khối chung (`capacity` là tổng thật).
         #[cfg(feature = "lru-shared-memory")]
-        assert_eq!(cache.get(&0), Some(0), "put/get phải chạy được trước khi clear");
+        assert_eq!(
+            cache.get(&0),
+            Some(0),
+            "put/get phải chạy được trước khi clear"
+        );
 
         #[cfg(feature = "lru-shared-memory")]
         assert_eq!(cache.clear(), CAP as usize, "clear trả về số entry đã xoá");
         #[cfg(not(feature = "lru-shared-memory"))]
         {
             let n = cache.clear();
-            assert!(n <= CAP as usize, "clear trả về số entry đã xoá, thực tế {n}");
+            assert!(
+                n <= CAP as usize,
+                "clear trả về số entry đã xoá, thực tế {n}"
+            );
         }
 
         for i in 0..CAP {
@@ -1031,7 +1044,11 @@ mod tests {
         }
         #[cfg(feature = "lru-shared-memory")]
         for i in 0..CAP {
-            assert_eq!(cache.get(&i), Some(i * 3), "sau clear phải còn đủ {CAP} key");
+            assert_eq!(
+                cache.get(&i),
+                Some(i * 3),
+                "sau clear phải còn đủ {CAP} key"
+            );
         }
         // Bản chia cứng: capacity_per_shard = ceil(CAP/S) trần mỗi shard với
         // `DefaultHasher` ngẫu nhiên ⇒ trùng shard là evict dù cache còn trống.
@@ -1128,7 +1145,13 @@ mod tests {
 
         println!(
             "REPRO: {} block vào LruCache(cap={}, S={}) → còn {}, mất {}\n               shard nhận >1 block: {}\n  block mất: {:?}\n               (đo trên stack: còn 14, mất 15 — 9 block đầu 13788..13796 + 6 rải rác)",
-            n, CAP, S, alive, missing.len(), crowded.len(), missing,
+            n,
+            CAP,
+            S,
+            alive,
+            missing.len(),
+            crowded.len(),
+            missing,
         );
 
         assert_eq!(
@@ -1797,10 +1820,26 @@ mod cap_probe {
         let d_alive = (0..N).filter(|i| d.get(&(first + i)).is_some()).count();
 
         println!("\n  29 block, đổi capacity/S:");
-        println!("  A cap=32   S=32  slot/shard={:2}  → còn {:2}/29", cap_per_shard::<32>(32), a_alive);
-        println!("  B cap=1024 S=32  slot/shard={:2}  → còn {:2}/29", cap_per_shard::<32>(1024), b_alive);
-        println!("  C cap=32   S=1   slot/shard={:2}  → còn {:2}/29", cap_per_shard::<1>(32), c_alive);
-        println!("  D cap=10   S=1   slot/shard={:2}  → còn {:2}/29  (thiếu slot thật)", cap_per_shard::<1>(10), d_alive);
+        println!(
+            "  A cap=32   S=32  slot/shard={:2}  → còn {:2}/29",
+            cap_per_shard::<32>(32),
+            a_alive
+        );
+        println!(
+            "  B cap=1024 S=32  slot/shard={:2}  → còn {:2}/29",
+            cap_per_shard::<32>(1024),
+            b_alive
+        );
+        println!(
+            "  C cap=32   S=1   slot/shard={:2}  → còn {:2}/29",
+            cap_per_shard::<1>(32),
+            c_alive
+        );
+        println!(
+            "  D cap=10   S=1   slot/shard={:2}  → còn {:2}/29  (thiếu slot thật)",
+            cap_per_shard::<1>(10),
+            d_alive
+        );
     }
 
     fn cap_per_shard<const S: usize>(cap: usize) -> usize {
@@ -1887,7 +1926,10 @@ mod lru_order_probe {
         // Đúng LRU. Nếu đây là FIFO, `1` (nhập đầu tiên) mới là kẻ bị đá.
         assert_eq!(alive, vec![1, 2, 4, 5], "phải đá 3, giữ 1,2,4,5");
         assert!(!alive.contains(&3), "3 là cũ nhất nên phải bị đá");
-        assert!(alive.contains(&1), "1 được chạm nên phải sống — FIFO sẽ đá 1");
+        assert!(
+            alive.contains(&1),
+            "1 được chạm nên phải sống — FIFO sẽ đá 1"
+        );
     }
 
     /// `get` có thật sự kéo entry lên đầu không? Nếu `get` không ghi, cache
@@ -1947,14 +1989,20 @@ mod spread_probe {
 
         println!("\n  S={S}, n={N}  ⇒ trung bình {mean:.2} key/shard");
         println!("  shard có key : {occupied}/{S}   (rỗng: {})", S - occupied);
-        println!("  min={min}  max={max}   ⇒ lệch {:.0}% so với trung bình",
-            (max as f64 - mean) / mean * 100.0);
-        println!("  xác suất ÍT NHẤT 1 va chạm (birthday): {:.1}%", p_collide * 100.0);
-        println!("  ⇒ mất {} block vì sức chứa 1/shard", N as usize - occupied.min(N as usize));
+        println!(
+            "  min={min}  max={max}   ⇒ lệch {:.0}% so với trung bình",
+            (max as f64 - mean) / mean * 100.0
+        );
+        println!(
+            "  xác suất ÍT NHẤT 1 va chạm (birthday): {:.1}%",
+            p_collide * 100.0
+        );
+        println!(
+            "  ⇒ mất {} block vì sức chứa 1/shard",
+            N as usize - occupied.min(N as usize)
+        );
     }
 }
-
-
 
 #[cfg(all(test, feature = "lru-shared-memory"))]
 mod shared_probe {
@@ -1986,9 +2034,14 @@ mod shared_probe {
         for k in (0..1000i64).filter(|k| e.get_shard_idx(k) == 0).take(50) {
             e.put(k, k as u32);
         }
-        println!("  cap=64 S=32 50 key cùng shard 0 → còn {}/50",
-            (0..1000i64).filter(|k| e.get_shard_idx(k) == 0).take(50)
-                .filter(|k| e.get(k).is_some()).count());
+        println!(
+            "  cap=64 S=32 50 key cùng shard 0 → còn {}/50",
+            (0..1000i64)
+                .filter(|k| e.get_shard_idx(k) == 0)
+                .take(50)
+                .filter(|k| e.get(k).is_some())
+                .count()
+        );
 
         assert_eq!(alive, 29, "phải giữ hết 29 block");
         assert_eq!(alive2, 2000, "capacity đủ thì phải giữ hết 2000");

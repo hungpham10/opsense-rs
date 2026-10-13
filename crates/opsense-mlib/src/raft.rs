@@ -44,7 +44,11 @@ impl Cluster {
     /// Cụm một thành viên — chỉ dùng khi *người dùng* gom một node vào cụm tên;
     /// node đứng một mình thì không có cụm (xem [`Raft::solo`]).
     #[must_use]
-    pub fn solo(id: impl Into<String>, node_id: impl Into<String>, pipeline: impl Into<String>) -> Self {
+    pub fn solo(
+        id: impl Into<String>,
+        node_id: impl Into<String>,
+        pipeline: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             members: BTreeSet::from([node_id.into()]),
@@ -71,7 +75,11 @@ pub enum Command {
     RemoveMember { cluster_id: String, node_id: String },
     /// Gom các node vào một cụm (tạo nếu chưa có) — thao tác của
     /// `POST /api/cluster/v1/clusters`.
-    Group { cluster_id: String, members: BTreeSet<String>, pipeline: String },
+    Group {
+        cluster_id: String,
+        members: BTreeSet<String>,
+        pipeline: String,
+    },
     /// Giải thể cụm.
     Dissolve { cluster_id: String },
 }
@@ -112,13 +120,21 @@ impl Raft {
     /// Node đứng một mình: chạy pipeline của mình, không thuộc cụm nào.
     #[must_use]
     pub fn solo(node_id: impl Into<String>) -> Self {
-        Self { node_id: node_id.into(), state: BTreeMap::new(), consensus: None }
+        Self {
+            node_id: node_id.into(),
+            state: BTreeMap::new(),
+            consensus: None,
+        }
     }
 
     /// Node đã cắm engine quyết định (sẽ là `openraft`).
     #[must_use]
     pub fn with_consensus(node_id: impl Into<String>, consensus: Box<dyn Consensus>) -> Self {
-        Self { node_id: node_id.into(), state: BTreeMap::new(), consensus: Some(consensus) }
+        Self {
+            node_id: node_id.into(),
+            state: BTreeMap::new(),
+            consensus: Some(consensus),
+        }
     }
 
     /// Gán các node vào một cụm — thao tác dùng `POST /api/cluster/v1/clusters`.
@@ -136,7 +152,9 @@ impl Raft {
     }
 
     pub fn dissolve(&mut self, cluster_id: &str) -> Result<Outcome, String> {
-        self.propose(Command::Dissolve { cluster_id: cluster_id.to_string() })
+        self.propose(Command::Dissolve {
+            cluster_id: cluster_id.to_string(),
+        })
     }
 
     /// Đề xuất một lệnh. Lệnh không hợp lệ bị từ chối **trước khi** vào log, nên
@@ -174,17 +192,24 @@ impl Raft {
     /// của mình. Thuộc cụm ⇒ master hay không là quyết định của tầng quyết định.
     #[must_use]
     pub fn role(&self) -> Role {
-        self.my_cluster().map_or(Role::Master, |c| self.role_of(&c.id))
+        self.my_cluster()
+            .map_or(Role::Master, |c| self.role_of(&c.id))
     }
 
     /// Vai trò với một cụm cụ thể. Node không thuộc cụm đó thì không có vai trò
     /// gì với nó ⇒ coi như đứng ngoài.
     #[must_use]
     pub fn role_of(&self, cluster_id: &str) -> Role {
-        if !self.cluster(cluster_id).is_some_and(|c| c.has(&self.node_id)) {
+        if !self
+            .cluster(cluster_id)
+            .is_some_and(|c| c.has(&self.node_id))
+        {
             return Role::Master;
         }
-        let leader = self.consensus.as_ref().and_then(|c| c.leader_of(cluster_id));
+        let leader = self
+            .consensus
+            .as_ref()
+            .and_then(|c| c.leader_of(cluster_id));
         if leader.as_deref() == Some(self.node_id.as_str()) {
             Role::Master
         } else {
@@ -196,7 +221,10 @@ impl Raft {
     /// `false` — pipeline đứng yên cho tới khi cắm, đây là trạng thái trung thực.
     #[must_use]
     pub fn has_leader(&self, cluster_id: &str) -> bool {
-        self.consensus.as_ref().and_then(|c| c.leader_of(cluster_id)).is_some()
+        self.consensus
+            .as_ref()
+            .and_then(|c| c.leader_of(cluster_id))
+            .is_some()
     }
 
     /// `epoch` dùng làm fencing token khi ghi state.
@@ -244,9 +272,19 @@ fn apply(state: &mut BTreeMap<String, Cluster>, cmd: Command) -> Outcome {
                 }
             }
         }
-        Command::AddMember { cluster_id, node_id } => add_member(state, &cluster_id, &node_id),
-        Command::RemoveMember { cluster_id, node_id } => remove_member(state, &cluster_id, &node_id),
-        Command::Group { cluster_id, members, pipeline } => {
+        Command::AddMember {
+            cluster_id,
+            node_id,
+        } => add_member(state, &cluster_id, &node_id),
+        Command::RemoveMember {
+            cluster_id,
+            node_id,
+        } => remove_member(state, &cluster_id, &node_id),
+        Command::Group {
+            cluster_id,
+            members,
+            pipeline,
+        } => {
             if members.is_empty() {
                 return Outcome::Rejected("cụm phải có ít nhất một thành viên".into());
             }

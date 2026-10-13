@@ -80,8 +80,7 @@ fn data(name: &str) -> Vec<CandleStick> {
     let p: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/data")
         .join(name);
-    let txt = std::fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("đọc {}: {e}", p.display()));
+    let txt = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("đọc {}: {e}", p.display()));
     let mut out = Vec::new();
     for (i, line) in txt.lines().enumerate() {
         if i == 0 {
@@ -132,12 +131,7 @@ struct NoLoader;
 
 #[async_trait::async_trait]
 impl DataLoader for NoLoader {
-    async fn range(
-        &self,
-        _f: u64,
-        _t: u64,
-        _r: &str,
-    ) -> Result<Vec<CandleStick>, std::io::Error> {
+    async fn range(&self, _f: u64, _t: u64, _r: &str) -> Result<Vec<CandleStick>, std::io::Error> {
         Ok(Vec::new())
     }
 }
@@ -145,8 +139,7 @@ impl DataLoader for NoLoader {
 #[allow(clippy::type_complexity)]
 fn slice_fetch(
     data: Vec<CandleStick>,
-)
-    -> impl FnMut(
+) -> impl FnMut(
     u64,
     u64,
 ) -> std::pin::Pin<
@@ -308,7 +301,10 @@ async fn run(data: &[CandleStick], sl_pct: f64, levels: i64, lookback: f64) -> R
             // Mốc dựng `cell_lo + step·j/levels` ⇒ khoảng cách thật là step/levels.
             let step_usd = (lv[lv.len() - 1] - lv[0]) / (lv.len() - 1).max(1) as f64;
             let frac = step_usd / mid;
-            (frac, TradingGrid::breakeven_win_p(frac, g.stoploss_pct(), FEE))
+            (
+                frac,
+                TradingGrid::breakeven_win_p(frac, g.stoploss_pct(), FEE),
+            )
         }
     };
 
@@ -342,8 +338,8 @@ async fn sweep_sl_pct_and_levels_on_real_candles() {
     // Quét `lookback_secs` — câu hỏi: nhìn lại 48 giờ hay 30 ngày?
     // Giữ `sl_pct`/`grid_levels` ở **mức production** để đo đúng một biến.
     const LOOKBACKS: &[f64] = &[
-        48.0 * 3600.0,   // production hiện tại (config.toml:199)
-        72.0 * 3600.0,   // như nói "72h"
+        48.0 * 3600.0, // production hiện tại (config.toml:199)
+        72.0 * 3600.0, // như nói "72h"
         7.0 * 86400.0,
         30.0 * 86400.0,
     ];
@@ -362,21 +358,24 @@ async fn sweep_sl_pct_and_levels_on_real_candles() {
         "\nsl_pct={SL_PROD} levels={LEVELS_PROD} (mức production, cố định để chỉ đo lookback)"
     );
     println!("cột: ô/lệnh vào | lệnh đóng | tp/sl | P&L USD");
-    println!("{:<9} | {:<26} | {:<26}", "lookback", "TRAIN (chọn)", "TEST (kiểm)");
+    println!(
+        "{:<9} | {:<26} | {:<26}",
+        "lookback", "TRAIN (chọn)", "TEST (kiểm)"
+    );
     println!("{}", "-".repeat(96));
     for (t, v) in &rows {
         let f = |r: &Run| {
             format!(
                 "{:>2}ô/{:>3}v {:>3}đ {:>2}/{:<2} {:+8.2}$",
-                r.cells,
-                r.placed,
-                r.closed,
-                r.tp,
-                r.sl,
-                r.pnl_usd
+                r.cells, r.placed, r.closed, r.tp, r.sl, r.pnl_usd
             )
         };
-        println!("{:<9} | {:<26} | {:<26}", format!("{:.0}h", t.lookback / 3600.0), f(t), f(v));
+        println!(
+            "{:<9} | {:<26} | {:<26}",
+            format!("{:.0}h", t.lookback / 3600.0),
+            f(t),
+            f(v)
+        );
     }
 
     println!("\nNgưỡng hòa vốn và bước lưới (lấy từ plan thật của lượt TRAIN):");
@@ -398,7 +397,13 @@ async fn sweep_sl_pct_and_levels_on_real_candles() {
     for (t, v) in &by_train {
         println!(
             "  lookback={:>7.1}h sl={:.3} lv={:<2}  train {:+8.2}$ ({}đ)  →  test {:+8.2}$ ({}đ)",
-            t.lookback / 3600.0, t.sl_pct, t.levels, t.pnl_usd, t.closed, v.pnl_usd, v.closed
+            t.lookback / 3600.0,
+            t.sl_pct,
+            t.levels,
+            t.pnl_usd,
+            t.closed,
+            v.pnl_usd,
+            v.closed
         );
     }
 

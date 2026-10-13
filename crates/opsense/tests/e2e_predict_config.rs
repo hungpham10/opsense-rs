@@ -333,7 +333,7 @@ fn dump_tree(root: &Path) -> String {
 /// ── Tầng 1: config file tự nó phải parse + tất cả setting thực sự được áp ──
 #[test]
 fn config_file_contract() {
-    let cfg = Config::load(Path::new(CONFIG_PATH))
+    let (cfg, _dir) = Config::load(Path::new(CONFIG_PATH))
         .expect("strategies/predict/config.toml phải parse + validate");
 
     assert_eq!(cfg.engine.poll_interval_seconds, 10);
@@ -395,7 +395,10 @@ fn config_file_contract() {
         .downcast_ref::<RhaiTransform>()
         .expect("component 2 = rhai_transform predict");
     assert_eq!(predict.id, STATION_PREDICT);
-    assert_eq!(predict.inputs, vec!["clock".to_string(), "live-feed".to_string()]);
+    assert_eq!(
+        predict.inputs,
+        vec!["clock".to_string(), "live-feed".to_string()]
+    );
     assert_eq!(predict.script_path, "strategies/predict/predict.rhai");
     assert_eq!(
         predict.params.get("window_source").and_then(|v| v.as_str()),
@@ -455,7 +458,7 @@ async fn full_pipeline_checks_parquet_s3() {
     }
 
     // 1) Load config thật, override đường dẫn host-only.
-    let mut cfg = Config::load(Path::new(CONFIG_PATH))
+    let (mut cfg, _dir) = Config::load(Path::new(CONFIG_PATH))
         .expect("strategies/predict/config.toml phải parse + validate");
     let td = tempfile::tempdir().expect("tempdir");
     cfg.storage.data_dir = td.path().to_string_lossy().into_owned();
@@ -562,18 +565,12 @@ async fn full_pipeline_checks_parquet_s3() {
         .iter()
         .find(|o| o.metric_id == "cpu_live_steady")
         .expect("result cpu_live_steady");
-    assert_eq!(
-        ok_result.value, 1.0,
-        "steady predict 42 vs live 42 → match"
-    );
+    assert_eq!(ok_result.value, 1.0, "steady predict 42 vs live 42 → match");
     let bad_result = results
         .iter()
         .find(|o| o.metric_id == "cpu_live_ramp")
         .expect("result cpu_live_ramp");
-    assert_eq!(
-        bad_result.value, 0.0,
-        "ramp predict ~18 vs live 999 → miss"
-    );
+    assert_eq!(bad_result.value, 0.0, "ramp predict ~18 vs live 999 → miss");
 
     // 6) tsdb: predictions + checks chảy qua message → parquet local sau flush.
     let tsdb_station = wait_for_station(&ctx, STATION_TSDB, 10).await;

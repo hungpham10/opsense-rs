@@ -1032,9 +1032,9 @@ fn block_id_of(series: &[u8], ts: u64, block_secs: i64) -> u64 {
             .unwrap_or_default()
             .trim()
             .parse::<u64>()
-        {
-            return id;
-        }
+    {
+        return id;
+    }
     if block_secs > 0 {
         ts / block_secs as u64
     } else {
@@ -1365,21 +1365,22 @@ fn restore_from_s3(cfg: &S3Config, local: &Path, lake_key: Option<&str>) -> Resu
     // Restore cả ts lake (delta files + manifest) — cold-read không mất block.
     let ts_key = cfg.key(&format!("{lake_key}/ts/manifest.json"));
     if let Ok(raw_ts) = s3_get(&store, &ts_key)
-        && let Ok(list) = serde_json::from_slice::<Vec<String>>(&raw_ts) {
-            std::fs::create_dir_all(local.join("ts")).map_err(internal)?;
-            for rel in &list {
-                let key = cfg.key(&format!("{lake_key}/ts/{rel}"));
-                let Ok(bytes) = s3_get(&store, &key) else {
-                    continue; // file đã bị dọn giữa chừng (retention) — bỏ qua.
-                };
-                let dst = local.join("ts").join(rel);
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent).map_err(internal)?;
-                }
-                std::fs::write(&dst, &bytes).map_err(internal)?;
+        && let Ok(list) = serde_json::from_slice::<Vec<String>>(&raw_ts)
+    {
+        std::fs::create_dir_all(local.join("ts")).map_err(internal)?;
+        for rel in &list {
+            let key = cfg.key(&format!("{lake_key}/ts/{rel}"));
+            let Ok(bytes) = s3_get(&store, &key) else {
+                continue; // file đã bị dọn giữa chừng (retention) — bỏ qua.
+            };
+            let dst = local.join("ts").join(rel);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(internal)?;
             }
-            atomic_write(&local.join("ts_manifest.json"), &raw_ts)?;
+            std::fs::write(&dst, &bytes).map_err(internal)?;
         }
+        atomic_write(&local.join("ts_manifest.json"), &raw_ts)?;
+    }
 
     Ok(Some(generation))
 }
@@ -2198,7 +2199,10 @@ mod tests {
 
         // Buffer đã được dọn → dữ liệu chỉ ở lake files.
         assert!(s.inner.lock().ts.is_empty());
-        assert_eq!(s.range(b"blk:3", 0, 100).await.unwrap(), vec![(1, b"v3".to_vec())]);
+        assert_eq!(
+            s.range(b"blk:3", 0, 100).await.unwrap(),
+            vec![(1, b"v3".to_vec())]
+        );
 
         // Reopen: restore từ lake files (merged_ts).
         drop(s);
@@ -2210,7 +2214,10 @@ mod tests {
             s.latest(b"blk:3", 10).await.unwrap(),
             vec![(1, b"v3".to_vec()), (2, b"v3b".to_vec())]
         );
-        assert_eq!(s.latest(b"cpu", 10).await.unwrap(), vec![(105, b"v105".to_vec()), (250, b"v250".to_vec())]);
+        assert_eq!(
+            s.latest(b"cpu", 10).await.unwrap(),
+            vec![(105, b"v105".to_vec()), (250, b"v250".to_vec())]
+        );
     }
 
     #[tokio::test]
@@ -2231,7 +2238,10 @@ mod tests {
         assert!(!ts_root.join("blk=1").exists());
         assert!(ts_root.join("blk=2").exists());
         let kept: Vec<String> = s.inner.lock().ts_manifest.clone();
-        assert!(kept.iter().all(|rel| rel.starts_with("blk=2/") || rel.starts_with("blk=5/")));
+        assert!(
+            kept.iter()
+                .all(|rel| rel.starts_with("blk=2/") || rel.starts_with("blk=5/"))
+        );
     }
 
     #[tokio::test]

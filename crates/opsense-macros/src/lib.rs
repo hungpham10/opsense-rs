@@ -13,7 +13,7 @@ mod rhai_class;
 mod rhai_func;
 mod rhai_register;
 
-use configurable_component::{configurable_component_impl, ComponentType};
+use configurable_component::{ComponentType, configurable_component_impl};
 use rhai_class::rhai_class_impl;
 use rhai_func::rhai_func_impl;
 use rhai_register::rhai_register_impl;

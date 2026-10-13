@@ -136,7 +136,11 @@ impl Resolver {
                 .await
             {
                 Ok(pool) => dbs.push(pool),
-                Err(e) => return Err(Error::other(format!("Error during connect to database: {e}"))),
+                Err(e) => {
+                    return Err(Error::other(format!(
+                        "Error during connect to database: {e}"
+                    )));
+                }
             }
         }
 
@@ -212,8 +216,7 @@ impl Resolver {
         if self.dbs.is_empty() {
             return None;
         }
-        self.dbs
-            .get((tenant_id % (self.dbs.len() as i64)) as usize)
+        self.dbs.get((tenant_id % (self.dbs.len() as i64)) as usize)
     }
 
     pub fn database_kind(&self, tenant_id: i64) -> DbKind {

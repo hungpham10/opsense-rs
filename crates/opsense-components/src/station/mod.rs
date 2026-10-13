@@ -137,7 +137,10 @@ mod tests {
             json!({"event": "backfill", "from_ts": 1, "to_ts": 2}),
             json!("raw string"),
         ] {
-            assert!(extract_observations(&payload).is_empty(), "payload: {payload}");
+            assert!(
+                extract_observations(&payload).is_empty(),
+                "payload: {payload}"
+            );
         }
     }
 }

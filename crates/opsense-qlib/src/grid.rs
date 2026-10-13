@@ -304,13 +304,7 @@ impl TradingGrid {
         short_lost: Vec<usize>,
     ) -> Self {
         let n = self.levels.len();
-        let take = |v: Vec<usize>| -> Vec<usize> {
-            if v.len() == n {
-                v
-            } else {
-                vec![0; n]
-            }
-        };
+        let take = |v: Vec<usize>| -> Vec<usize> { if v.len() == n { v } else { vec![0; n] } };
         self.order_long_win_cnt = take(long_win);
         self.order_long_lost_cnt = take(long_lost);
         self.order_short_win_cnt = take(short_win);

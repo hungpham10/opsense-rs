@@ -61,13 +61,15 @@ fn surface_script() -> &'static str {
 #[tokio::test]
 async fn every_declared_accessor_is_callable() {
     let input: Vec<serde_json::Value> = (0..200)
-        .map(|i| serde_json::json!({
-            "ts": i,
-            "metric_id": "disk_usage",
-            "kind": "metric",
-            "signal": "utilization",
-            "value": i as f64 / 2.0,
-        }))
+        .map(|i| {
+            serde_json::json!({
+                "ts": i,
+                "metric_id": "disk_usage",
+                "kind": "metric",
+                "signal": "utilization",
+                "value": i as f64 / 2.0,
+            })
+        })
         .collect();
 
     let out = call_process(
@@ -166,13 +168,15 @@ async fn trend_and_capacity_accessors_are_callable() {
     // Dốc thẳng 0 → 99.5 trên capacity 100: đủ dữ liệu cho cả trend lẫn
     // capacity, và hai chuỗi "giờ tới mốc" đều xác định (không rơi vào `()`).
     let input: Vec<serde_json::Value> = (0..200)
-        .map(|i| serde_json::json!({
-            "ts": i,
-            "metric_id": "disk_usage",
-            "kind": "metric",
-            "signal": "utilization",
-            "value": i as f64 / 2.0,
-        }))
+        .map(|i| {
+            serde_json::json!({
+                "ts": i,
+                "metric_id": "disk_usage",
+                "kind": "metric",
+                "signal": "utilization",
+                "value": i as f64 / 2.0,
+            })
+        })
         .collect();
 
     let out = call_process(

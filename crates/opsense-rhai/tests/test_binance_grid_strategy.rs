@@ -12,9 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use opsense_core::{
-    Context, Observation, Station, TimeseriesStation,
-};
+use opsense_core::{Context, Observation, Station, TimeseriesStation};
 use opsense_model::events::{Signal, TelemetryKind};
 use opsense_model::secret::Secret;
 use opsense_rhai::{ScriptSource, call_process_with};
@@ -66,7 +64,9 @@ fn candle_rows(ts: i64, o: f64, h: f64, l: f64, c: f64, v: f64) -> Vec<Observati
 fn to_observations(items: &[Value]) -> Vec<Observation> {
     items
         .iter()
-        .map(|v| serde_json::from_value::<Observation>(v.clone()).expect("script output là Observation"))
+        .map(|v| {
+            serde_json::from_value::<Observation>(v.clone()).expect("script output là Observation")
+        })
         .collect()
 }
 
@@ -198,7 +198,13 @@ async fn snapshot_merges_history_and_live_candles() {
     write(&ctx, "history", &hist, now).await;
 
     // Candle live của bucket đang mở (sinh từ tick) nằm trong own station.
-    write(&ctx, "grid", &candle_rows(base, 106.0, 107.0, 105.5, 106.5, 4.0), now).await;
+    write(
+        &ctx,
+        "grid",
+        &candle_rows(base, 106.0, 107.0, 105.5, 106.5, 4.0),
+        now,
+    )
+    .await;
 
     // Clock ping (trigger None → "") → snapshot.
     let out = run(&ctx, None, Value::Array(vec![])).await;
@@ -235,8 +241,16 @@ async fn snapshot_merges_history_and_live_candles() {
         "candle live từ own station được merge vào fit: {snap:?}"
     );
     let up: f64 = snap["labels"]["up_prob"].as_str().unwrap().parse().unwrap();
-    let down: f64 = snap["labels"]["down_prob"].as_str().unwrap().parse().unwrap();
-    let stay: f64 = snap["labels"]["stay_prob"].as_str().unwrap().parse().unwrap();
+    let down: f64 = snap["labels"]["down_prob"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let stay: f64 = snap["labels"]["stay_prob"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!(
         (up + down + stay - 1.0).abs() < 1e-6,
         "xác suất transition cộng lại = 1: {snap:?}"
@@ -265,7 +279,13 @@ async fn snapshot_emits_grid_geometry_as_scalar_metrics() {
         hist.extend(candle_rows(base - 60 * i, o, c + 0.2, o - 0.2, c, 10.0));
     }
     write(&ctx, "history", &hist, now).await;
-    write(&ctx, "grid", &candle_rows(base, 106.0, 107.0, 105.5, 106.5, 4.0), now).await;
+    write(
+        &ctx,
+        "grid",
+        &candle_rows(base, 106.0, 107.0, 105.5, 106.5, 4.0),
+        now,
+    )
+    .await;
 
     let out = run(&ctx, None, Value::Array(vec![])).await;
     let val = |id: &str| -> f64 {
@@ -298,8 +318,14 @@ async fn snapshot_emits_grid_geometry_as_scalar_metrics() {
     let lo = val("grid_lo");
     let hi = val("grid_hi");
     assert!(lo < hi, "biên hợp lệ: {lo} < {hi}");
-    assert!((lo - 100.5).abs() < 1e-9, "lo = giá thấp nhất cửa sổ: {out:?}");
-    assert!((hi - 106.5).abs() < 1e-9, "hi = giá cao nhất cửa sổ: {out:?}");
+    assert!(
+        (lo - 100.5).abs() < 1e-9,
+        "lo = giá thấp nhất cửa sổ: {out:?}"
+    );
+    assert!(
+        (hi - 106.5).abs() < 1e-9,
+        "hi = giá cao nhất cửa sổ: {out:?}"
+    );
 
     let up = val("grid_up_prob");
     let down = val("grid_down_prob");
@@ -327,7 +353,14 @@ async fn snapshot_also_runs_on_history_trigger() {
     let mut hist = Vec::new();
     for i in 1..=6 {
         let c = 100.0 + i as f64;
-        hist.extend(candle_rows(base - 60 * i, c - 0.5, c + 0.1, c - 0.2, c, 3.0));
+        hist.extend(candle_rows(
+            base - 60 * i,
+            c - 0.5,
+            c + 0.1,
+            c - 0.2,
+            c,
+            3.0,
+        ));
     }
     write(&ctx, "history", &hist, now).await;
 
@@ -402,13 +435,7 @@ async fn trading_mode_places_orders_and_writes_cursor() {
     // 40 nến đã đóng + 1 nến đang mở.
     seed_candles(&ctx, 40, open_bucket).await;
 
-    let out = run_with(
-        &ctx,
-        trading_params(),
-        None,
-        Value::Array(vec![]),
-    )
-    .await;
+    let out = run_with(&ctx, trading_params(), None, Value::Array(vec![])).await;
     let rows = to_observations(&out);
 
     let orders: Vec<&Observation> = rows.iter().filter(|o| o.signal == Signal::Order).collect();
@@ -423,7 +450,8 @@ async fn trading_mode_places_orders_and_writes_cursor() {
         assert!(o.labels.contains_key("sl") && o.labels.contains_key("tp"));
         assert!(o.labels.contains_key("order_id"));
         assert_eq!(
-            o.ts, open_bucket - 60,
+            o.ts,
+            open_bucket - 60,
             "lệnh gắn với nến ĐÃ ĐÓNG gần nhất, không phải nến đang mở"
         );
     }
@@ -450,10 +478,7 @@ async fn trading_mode_is_idempotent_across_calls() {
     write(&ctx, "grid", &rows, now()).await;
 
     let second = run_with(&ctx, trading_params(), None, Value::Array(vec![])).await;
-    let orders = second
-        .iter()
-        .filter(|v| v["signal"] == "order")
-        .count();
+    let orders = second.iter().filter(|v| v["signal"] == "order").count();
     assert_eq!(orders, 0, "cursor chặn chạy lại nến đã xử lý: {second:?}");
 }
 

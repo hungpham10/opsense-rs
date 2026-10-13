@@ -75,10 +75,7 @@ pub async fn clear_station(client: &OpsenseClient, id: &str) -> Result<String, S
 
 /// Xoá sạch mọi station. `confirm` bắt buộc bằng `true` vì mất cả lệnh đang
 /// mở, cursor T+N và toàn bộ lịch sử của process.
-pub async fn clear_all_stations(
-    client: &OpsenseClient,
-    confirm: bool,
-) -> Result<String, String> {
+pub async fn clear_all_stations(client: &OpsenseClient, confirm: bool) -> Result<String, String> {
     if !confirm {
         return Err(
             "clear_all_stations xoá MẤT VẼNG dữ liệu của process (lệnh đang mở, \
@@ -117,7 +114,11 @@ fn render_clear_result(
             out.push_str(&format!("- {f}\n"));
         }
     }
-    out.push_str(&format!("cleared={} failed={}", r.cleared.len(), r.failed.len()));
+    out.push_str(&format!(
+        "cleared={} failed={}",
+        r.cleared.len(),
+        r.failed.len()
+    ));
     Ok(out)
 }
 
@@ -135,14 +136,7 @@ pub async fn query_timeseries(
 ) -> Result<String, String> {
     client
         .query_station(
-            node,
-            from_ts,
-            to_ts,
-            limit,
-            signal,
-            label_kind,
-            status,
-            order,
+            node, from_ts, to_ts, limit, signal, label_kind, status, order,
         )
         .await
         .map_err(|e| format!("{e:#}"))
@@ -159,19 +153,12 @@ pub async fn orders(
     to_ts: Option<TimeArg>,
     limit: Option<i64>,
     order: Option<&str>,
-    interval: Option<&str>,    // NEW: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0"
-    mark_price: Option<f64>,   // NEW: giá để tính unrealized PnL
+    interval: Option<&str>, // NEW: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0"
+    mark_price: Option<f64>, // NEW: giá để tính unrealized PnL
 ) -> Result<String, String> {
     client
         .orders(
-            node,
-            status,
-            from_ts,
-            to_ts,
-            limit,
-            order,
-            interval,
-            mark_price,
+            node, status, from_ts, to_ts, limit, order, interval, mark_price,
         )
         .await
         .map_err(|e| format!("{e:#}"))

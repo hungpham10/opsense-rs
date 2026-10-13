@@ -18,8 +18,8 @@ pub mod search;
 pub mod sgd;
 pub mod snowflake_id;
 pub mod tls;
-pub mod trend;
 pub mod transition;
+pub mod trend;
 
 pub mod cache;
 

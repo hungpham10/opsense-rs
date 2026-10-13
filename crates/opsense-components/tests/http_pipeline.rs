@@ -17,10 +17,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use opsense_components::TimeseriesStationSink;
 use opsense_components::http::HttpSource;
 use opsense_components::signal;
 use opsense_components::vector::runtime::{Component, Event, Runtime};
-use opsense_components::TimeseriesStationSink;
 use opsense_mlib::vector::components::clock::Clock;
 use opsense_mlib::vector::components::output::Output;
 
@@ -250,7 +250,11 @@ async fn http_forwarded_batch_reaches_station_sink() {
         !requests.lock().unwrap().is_empty(),
         "mock endpoint must have been called"
     );
-    assert_eq!(rows.len(), 1, "sink station must receive the forwarded batch");
+    assert_eq!(
+        rows.len(),
+        1,
+        "sink station must receive the forwarded batch"
+    );
     assert_eq!(rows[0].metric_id, "api_rps");
     assert_eq!(rows[0].value, 42.0);
 }

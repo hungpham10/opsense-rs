@@ -103,7 +103,10 @@ mod tests {
 
     #[test]
     fn unix_seconds_pass_through_untouched() {
-        assert_eq!(TimeArg::parse("1757000000").unwrap(), TimeArg::Unix(1757000000));
+        assert_eq!(
+            TimeArg::parse("1757000000").unwrap(),
+            TimeArg::Unix(1757000000)
+        );
         // Trim trước khi parse: shell hay dán kèm dấu cách.
         assert_eq!(res(" 1757000000 ", 1).unwrap(), 1757000000);
         // `i64::MIN` không đi qua phép trừ nào — giữ nguyên, không panic.
@@ -129,9 +132,18 @@ mod tests {
         for bad in ["", "abc", "2y", "h", "0h", "-2h", "99999999999999999999h"] {
             let err = res(bad, 1000).expect_err(&format!("`{bad}` phải bị từ chối"));
             let msg = err.to_string();
-            assert!(msg.contains(&format!("'{bad}'")), "thiếu input trong lỗi: {msg}");
-            assert!(msg.contains("1757000000"), "lỗi phải kèm ví dụ unix giây: {msg}");
-            assert!(msg.contains("now-2h"), "lỗi phải kèm ví dụ tương đối: {msg}");
+            assert!(
+                msg.contains(&format!("'{bad}'")),
+                "thiếu input trong lỗi: {msg}"
+            );
+            assert!(
+                msg.contains("1757000000"),
+                "lỗi phải kèm ví dụ unix giây: {msg}"
+            );
+            assert!(
+                msg.contains("now-2h"),
+                "lỗi phải kèm ví dụ tương đối: {msg}"
+            );
         }
     }
 }

@@ -9,8 +9,8 @@ use http::{HeaderMap, Response, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
+use opsense_ffi::cache::Cache;
 use opsense_mlib::cache::RedisBackend;
-use opsense_mod::cache::Cache;
 use opsense_model::entities::admin::{AuthConfig, Jwt, Tenant, Token, UserTokenInfo};
 
 use crate::api::AppState;
@@ -181,29 +181,31 @@ async fn issue_user_token(
         }
     };
 
-    Ok(match app_state
-        .admin_entity
-        .issue_user_token(tenant_id.into(), &payload.user_id, expires_at)
-        .await
-    {
-        Ok(token) => (
-            StatusCode::CREATED,
-            JsonResponse(UserTokenResponse {
-                token: Some(token),
-                ..Default::default()
-            }),
-        ),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            JsonResponse(UserTokenResponse {
-                error: Some(format!(
-                    "Fail issuing token for {}: {error}",
-                    payload.user_id
-                )),
-                ..Default::default()
-            }),
-        ),
-    })
+    Ok(
+        match app_state
+            .admin_entity
+            .issue_user_token(tenant_id.into(), &payload.user_id, expires_at)
+            .await
+        {
+            Ok(token) => (
+                StatusCode::CREATED,
+                JsonResponse(UserTokenResponse {
+                    token: Some(token),
+                    ..Default::default()
+                }),
+            ),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                JsonResponse(UserTokenResponse {
+                    error: Some(format!(
+                        "Fail issuing token for {}: {error}",
+                        payload.user_id
+                    )),
+                    ..Default::default()
+                }),
+            ),
+        },
+    )
 }
 
 async fn list_user_tokens(
@@ -244,26 +246,28 @@ async fn reveal_user_token(
     let caller = caller_id(&headers)?;
     require_self_or_admin(&caller, &user_id)?;
 
-    Ok(match app_state
-        .admin_entity
-        .reveal_user_token(tenant_id.into(), &user_id)
-        .await
-    {
-        Ok(token) => (
-            StatusCode::OK,
-            JsonResponse(UserTokenResponse {
-                token: Some(token),
-                ..Default::default()
-            }),
-        ),
-        Err(error) => (
-            StatusCode::NOT_FOUND,
-            JsonResponse(UserTokenResponse {
-                error: Some(format!("Fail revealing token of {user_id}: {error}")),
-                ..Default::default()
-            }),
-        ),
-    })
+    Ok(
+        match app_state
+            .admin_entity
+            .reveal_user_token(tenant_id.into(), &user_id)
+            .await
+        {
+            Ok(token) => (
+                StatusCode::OK,
+                JsonResponse(UserTokenResponse {
+                    token: Some(token),
+                    ..Default::default()
+                }),
+            ),
+            Err(error) => (
+                StatusCode::NOT_FOUND,
+                JsonResponse(UserTokenResponse {
+                    error: Some(format!("Fail revealing token of {user_id}: {error}")),
+                    ..Default::default()
+                }),
+            ),
+        },
+    )
 }
 
 async fn revoke_user_token(
@@ -380,13 +384,15 @@ async fn fetch_file(
     AdminHeaders { tenant_id, host }: AdminHeaders,
 ) -> Result<Response<Body>, (StatusCode, JsonResponse<AdminResponse>)> {
     let tenant_id = tenant_id.into();
-    let conn = app_state
-        .connector
-        .cache(tenant_id)
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, JsonResponse(AdminResponse {
-            error: Some("cache not configured".into()),
-            ..Default::default()
-        })))?;
+    let conn = app_state.connector.cache(tenant_id).ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            JsonResponse(AdminResponse {
+                error: Some("cache not configured".into()),
+                ..Default::default()
+            }),
+        )
+    })?;
     let backend = RedisBackend::new(conn);
     let cache = Cache::new(backend);
     let host = host.hostname();

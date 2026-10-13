@@ -94,8 +94,7 @@ fn candles() -> Vec<CandleStick> {
 #[allow(clippy::type_complexity)]
 fn slice_fetch(
     data: Vec<CandleStick>,
-)
-    -> impl FnMut(
+) -> impl FnMut(
     u64,
     u64,
 ) -> std::pin::Pin<
@@ -128,7 +127,10 @@ fn breakeven_at(g: &TradingGrid, j: usize) -> Option<(f64, &'static str)> {
     for (name, tp) in [("long", g.tp_above(j)), ("short", g.tp_below(j))] {
         if (tp - g.levels()[j]).abs() > 1e-9 {
             let reward = (tp - g.levels()[j]).abs() / g.levels()[j];
-            return Some((TradingGrid::breakeven_win_p(reward, g.stoploss_pct(), FEE), name));
+            return Some((
+                TradingGrid::breakeven_win_p(reward, g.stoploss_pct(), FEE),
+                name,
+            ));
         }
     }
     None
@@ -219,12 +221,7 @@ struct NoLoader;
 
 #[async_trait::async_trait]
 impl opsense_qlib::DataLoader for NoLoader {
-    async fn range(
-        &self,
-        _f: u64,
-        _t: u64,
-        _r: &str,
-    ) -> Result<Vec<CandleStick>, std::io::Error> {
+    async fn range(&self, _f: u64, _t: u64, _r: &str) -> Result<Vec<CandleStick>, std::io::Error> {
         Ok(Vec::new())
     }
 }
@@ -261,9 +258,7 @@ async fn kernel_accepts_the_higher_win_p() {
         sink.lock().expect("lock events").push(e);
         Box::pin(async { Ok(()) })
             as std::pin::Pin<
-                Box<
-                    dyn std::future::Future<Output = std::io::Result<()>> + Send + 'static,
-                >,
+                Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'static>,
             >
     };
     pf.forward(

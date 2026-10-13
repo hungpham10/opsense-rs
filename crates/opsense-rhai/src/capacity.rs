@@ -61,8 +61,8 @@
 
 use opsense_mlib::grid::{AnalysisGrid, SieveConfig};
 use opsense_mlib::script::parse_points;
-use opsense_mlib::trend::{Direction, TrendAnalysis, TrendConfig};
 use opsense_mlib::transition::TransitionAnalysis;
+use opsense_mlib::trend::{Direction, TrendAnalysis, TrendConfig};
 
 /// Cấu hình dựng [`CapacityForecast`].
 ///
@@ -224,13 +224,8 @@ impl CapacityForecast {
             min_abs_delta: SieveConfig::default().min_abs_delta,
             min_step_frac: config.min_step_frac,
         };
-        let grid = AnalysisGrid::with_config(
-            &values,
-            0.0,
-            capacity,
-            config.max_bit.clamp(1, 16),
-            &sieve,
-        );
+        let grid =
+            AnalysisGrid::with_config(&values, 0.0, capacity, config.max_bit.clamp(1, 16), &sieve);
 
         // ── 2. Xu hướng + biên độ (thuần phần dư, grid không can thiệp) ───
         let trend = TrendAnalysis::new(&pts, &config.trend)?;
@@ -482,12 +477,21 @@ impl std::fmt::Display for CapacityForecast {
             self.capacity,
             self.headroom_rel() * 100.0
         )?;
-        writeln!(f, "  window   : {} pts × {}s", self.samples(), self.span_secs())?;
+        writeln!(
+            f,
+            "  window   : {} pts × {}s",
+            self.samples(),
+            self.span_secs()
+        )?;
         writeln!(
             f,
             "  direction: {}{}",
             self.direction(),
-            if self.oscillating() { " (oscillating)" } else { "" }
+            if self.oscillating() {
+                " (oscillating)"
+            } else {
+                ""
+            }
         )?;
         writeln!(
             f,
@@ -615,8 +619,16 @@ mod tests {
         let f = CapacityForecast::new(&rising_oscillating(), 100.0, &cfg()).expect("đủ dữ liệu");
         assert_eq!(f.direction(), Direction::Rising, "{f}");
         assert!(f.oscillating(), "biên độ {} phải đáng kể", f.amplitude());
-        assert!(f.amplitude_rel() > 0.02, "amplitude_rel = {}", f.amplitude_rel());
-        assert!((f.slope_per_day() - 12.0).abs() < 1e-6, "slope/ngày = {}", f.slope_per_day());
+        assert!(
+            f.amplitude_rel() > 0.02,
+            "amplitude_rel = {}",
+            f.amplitude_rel()
+        );
+        assert!(
+            (f.slope_per_day() - 12.0).abs() < 1e-6,
+            "slope/ngày = {}",
+            f.slope_per_day()
+        );
     }
 
     #[test]
@@ -673,11 +685,22 @@ mod tests {
         // tức "đi trong một dải" sai hoàn toàn. Đó là khác biệt thật, không phải
         // artifact của test: dữ liệu trôi đều thì mức độ phân biệt được thật sự
         // mịn hơn hẳn.
-        let f = CapacityForecast::new(&rising_oscillating(), 100.0, &cfg())
-            .expect("đủ dữ liệu");
-        assert!((f.grid().step - 12.5).abs() < 1e-9, "step = {}", f.grid().step);
-        assert!(f.amplitude() > 0.8 * AMP && f.amplitude() < AMP, "biên độ = {}", f.amplitude());
-        assert!(f.envelope_cells() < 0.5, "biên chưa tới nửa dải: {}", f.envelope_cells());
+        let f = CapacityForecast::new(&rising_oscillating(), 100.0, &cfg()).expect("đủ dữ liệu");
+        assert!(
+            (f.grid().step - 12.5).abs() < 1e-9,
+            "step = {}",
+            f.grid().step
+        );
+        assert!(
+            f.amplitude() > 0.8 * AMP && f.amplitude() < AMP,
+            "biên độ = {}",
+            f.amplitude()
+        );
+        assert!(
+            f.envelope_cells() < 0.5,
+            "biên chưa tới nửa dải: {}",
+            f.envelope_cells()
+        );
         assert!(
             (f.envelope_cells() - f.amplitude() / f.grid().step).abs() < 1e-12,
             "envelope_cells phải là biên độ tính bằng ô"
@@ -692,7 +715,11 @@ mod tests {
         assert_eq!(f.current_cell(), 5, "current = {}", f.current());
         // Giá trị nằm đúng trong dải mà `cell()` trả về.
         let (lo, hi) = f.grid().cell_range(f.current_cell()).expect("dải hợp lệ");
-        assert!(lo <= f.current() && f.current() < hi, "{lo} ≤ {} < {hi}", f.current());
+        assert!(
+            lo <= f.current() && f.current() < hi,
+            "{lo} ≤ {} < {hi}",
+            f.current()
+        );
         // Biên dưới dải trên cùng nằm dưới `capacity` đúng một ô.
         assert!((f.top_cell_edge() - (100.0 - 12.5)).abs() < 1e-9);
         assert!(f.top_cell_edge() < f.capacity());
@@ -705,11 +732,18 @@ mod tests {
         let f = CapacityForecast::new(&rising_oscillating(), 100.0, &cfg()).expect("đủ dữ liệu");
         let to_top = f.hours_to_top_cell().expect("đang đi lên");
         let to_full = f.hours_to_full().expect("đang đi lên");
-        assert!(to_top < to_full, "vào dải ({to_top}h) phải trước khi đầy ({to_full}h)");
+        assert!(
+            to_top < to_full,
+            "vào dải ({to_top}h) phải trước khi đầy ({to_full}h)"
+        );
         // Mép trên phải băng qua biên dưới dải trên cùng trước khi tới capacity,
         // chênh đúng một ô chia độ dốc.
         let expect_gap = f.grid().step / (f.slope_per_day() / 24.0);
-        assert!((to_full - to_top - expect_gap).abs() < 1e-6, "chênh = {}", to_full - to_top);
+        assert!(
+            (to_full - to_top - expect_gap).abs() < 1e-6,
+            "chênh = {}",
+            to_full - to_top
+        );
     }
 
     #[test]
@@ -726,7 +760,10 @@ mod tests {
         let pts = series(50.0, 0.0, AMP, PERIOD);
         let small = CapacityForecast::new(&pts, 100.0, &cfg()).expect("đủ");
         let big = CapacityForecast::new(&pts, 400.0, &cfg()).expect("đủ");
-        assert!((small.amplitude() - big.amplitude()).abs() < 1e-9, "biên độ phải bằng nhau");
+        assert!(
+            (small.amplitude() - big.amplitude()).abs() < 1e-9,
+            "biên độ phải bằng nhau"
+        );
         assert!(small.oscillating(), "4% capacity là dao động thật");
         assert!(!big.oscillating(), "1% capacity là nhiễu");
         // Ngưỡng dùng biên vật lý, không dùng range của dữ liệu.
@@ -740,10 +777,17 @@ mod tests {
         let f = CapacityForecast::new(&rising_oscillating(), 100.0, &cfg()).expect("đủ dữ liệu");
         let edge = f.hours_to_full().expect("đang đi lên");
         let trend = f.hours_to_trend_full().expect("đang đi lên");
-        assert!(edge < trend, "mép trên ({edge}h) phải chạm trước xu hướng ({trend}h)");
+        assert!(
+            edge < trend,
+            "mép trên ({edge}h) phải chạm trước xu hướng ({trend}h)"
+        );
         // Hiệu số đúng bằng biên độ chia độ dốc — không phải con số tùy ý.
         let expect_gap = f.amplitude() / f.slope_per_day() * 24.0;
-        assert!((trend - edge - expect_gap).abs() < 1e-6, "hiệu số = {}", trend - edge);
+        assert!(
+            (trend - edge - expect_gap).abs() < 1e-6,
+            "hiệu số = {}",
+            trend - edge
+        );
         // Chênh lệch vài giờ, không phải vài tháng.
         assert!(trend - edge < 24.0, "chênh lệch {}h là vô lý", trend - edge);
     }
@@ -822,7 +866,10 @@ mod tests {
 
     #[test]
     fn interval_secs_override_is_respected() {
-        let cfg = ForecastConfig { interval_secs: 600, ..cfg() };
+        let cfg = ForecastConfig {
+            interval_secs: 600,
+            ..cfg()
+        };
         let f = CapacityForecast::new(&rising_oscillating(), 100.0, &cfg).expect("đủ dữ liệu");
         assert_eq!(f.interval_secs(), 600);
     }
@@ -830,9 +877,16 @@ mod tests {
     #[test]
     fn auto_interval_scales_with_window() {
         // Cửa sổ 24h, target_buckets = 24 ⇒ bucket ~1h.
-        let cfg = ForecastConfig { target_buckets: 24, ..cfg() };
+        let cfg = ForecastConfig {
+            target_buckets: 24,
+            ..cfg()
+        };
         let f = CapacityForecast::new(&rising_oscillating(), 100.0, &cfg).expect("đủ dữ liệu");
-        assert!((f.interval_secs() - 3_600).abs() <= STEP_SECS, "bucket = {}", f.interval_secs());
+        assert!(
+            (f.interval_secs() - 3_600).abs() <= STEP_SECS,
+            "bucket = {}",
+            f.interval_secs()
+        );
     }
 
     #[test]
@@ -862,7 +916,14 @@ mod tests {
     fn display_is_readable() {
         let f = CapacityForecast::new(&rising_oscillating(), 100.0, &cfg()).expect("đủ dữ liệu");
         let s = f.to_string();
-        for needle in ["rising", "oscillating", "edge→full", "trend→full", "→top cell", "ô lưới"] {
+        for needle in [
+            "rising",
+            "oscillating",
+            "edge→full",
+            "trend→full",
+            "→top cell",
+            "ô lưới",
+        ] {
             assert!(s.contains(needle), "thiếu {needle} trong:\n{s}");
         }
     }
