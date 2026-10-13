@@ -409,14 +409,22 @@ path = "hello.so"
 |---|---|---|---|
 | **(c) Op chưa implement** | 🟠 | `serve_host.rs:13` | `query_station`, `orders`, `clear_station`, `clear_all_stations`, `station_query` trả `"not yet implemented"`. |
 | **(g) `drive()` fallback deadlock** | 🟠 | `ffi.rs:251` | `new_current_thread()` + `block_on(spawn())` → treo vĩnh viễn (nhánh fallback không chạy ở production). **Đã sửa** (`drive()` dùng `new_multi_thread().worker_threads(1)`); test `drive_works_inside_current_thread_runtime` làm bằng chứng. |
-| **(h) nested `drive()` chưa từng test** | 🟠 | `ffi.rs:246` | Chuỗi `route()` → `host.call()` → `drive()` lồng nhau chưa từng chạy; `hello-mod` route `host-status` là bằng chứng đã test. |
+| **(h) nested `drive()` chưa từng test** | 🟠 | `ffi.rs:246` | Chuỗi `route()` → `host.call()` → `drive()` lồng nhau chưa từng chạy. `hello-mod` có route `host-status` **đã dựng sẵn** nhưng **chưa có test tự động** `dlopen` nó — chỉ mới compile được. Cần test tay: build `.so`, đặt vào `OPSENSE_CONFIG_DIR`, viết `modules.toml`, chạy `opsense serve --features dynamic-modules`. |
 | **(i) `hello-mod` phá build release musl** | 🟠 | `Cargo.toml:18` | cdylib trong workspace + cargo-dist musl ⇒ `cannot produce cdylib`. Đã tách workspace + `[workspace]` riêng. |
 
-> **Chưa có module `.so` mẫu nào** trong repo ngoài `hello-mod` (fixture test). `repl` là builtin. Nên (g) chưa từng lộ ra thực tế.
+> **Chưa có module `.so` mẫu nào** trong repo. `repl` là builtin. `hello-mod` là **fixture thủ công** — có route `host-status` đã dựng sẵn, nhưng **không có test tự động** `dlopen` nó; chỉ mới compile được. Cần test tay: build `.so`, đặt vào `OPSENSE_CONFIG_DIR`, viết `modules.toml`, chạy `opsense serve --features dynamic-modules`. Nên (g) chưa từng lộ ra thực tế.
 
 ---
 
-## 15. Link chéo
+## 15. Tham khảo & Fixture
+
+| Crate / Path | Mô tả |
+|---|---|
+| `examples/hello-mod/` | **Fixture thủ công** — module mẫu để author tham khảo. **Không** có test tự động, **không** chạy trong CI. Build tay: `cargo build --manifest-path examples/hello-mod/Cargo.toml`. Dùng để test tay streaming/DB/nested-drive. |
+
+---
+
+## 16. Link chéo
 
 - [`architecture.md`](./architecture.md) §2 — crate map có `opsense-mod`
 - [`GUIDE.md`](./GUIDE.md) — dùng `opsense status/components/query` tương tác module
