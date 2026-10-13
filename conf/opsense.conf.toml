@@ -40,3 +40,15 @@ inputs = ["clock"]
 # id = "xt-pnl"          # `[a-zA-Z0-9_-]`, cùng lúc là tên symbol `opsense_module_<id>_init`
 # path = "modules/xt-pnl.so"   # tuyệt đối (bắt đầu bằng `/`) hoặc tương đối thư mục này
 # enabled = true         # mặc định true
+#
+# ── Node nguồn cho route SSE ────────────────────────────────────────────────
+# Route SSE (khai trong manifest của module, không khai ở đây) trỏ tới một
+# node `type = "output"` qua `source_node`. Chỉ node `output` mới có broadcast
+# channel — `#[sink]` (vd station sink) KHÔNG có.
+#
+# [[pipeline.components]]
+# type = "output"
+# id = "market-out"
+# inputs = ["print"]      # node nguồn muốn stream
+#
+# Xem docs/MODULE.md §12b.

@@ -13,7 +13,7 @@ Opsense gọi là **module** mọi thứ triển khai `OpsenseModule` (`opsense-
 | Đường | Cách nạp | Ví dụ | File |
 |---|---|---|---|
 | **Builtin** | Link tĩnh vào binary, `ApiModuleRegistry::register_builtin` | `repl` | `serve.rs:136-139` |
-| **Dynamic (.so)** | `dlopen` lúc boot, `load_dynamic` + `modules.toml` | `hello` | `modules.rs:62-117` |
+| **Dynamic (.so)** | `dlopen` lúc boot, `load_dynamic` + `[[modules]]` | `hello` | `modules.rs` |
 
 Route đã là module (prefix `/api/repl`, `builtin=true`): REPL GraphQL (`repl/adapter.rs:35`).
 Route **chưa phải** module: `/health`, `/api/admin/*`, `/api/oauth/*` — vẫn mount trực tiếp (`serve.rs:159-162`).
@@ -81,13 +81,20 @@ pub struct ModuleV1 {
     pub manifest: unsafe extern "C" fn(ModuleHandle) -> *mut c_char,
     pub handle: unsafe extern "C" fn(ModuleHandle, *const TenantServices, *const c_char, *const c_char) -> *mut c_char,
     pub free: unsafe extern "C" fn(*mut c_char),
+
+    // ── SSE (ABI 4) ──
+    pub stream_open:  Option<unsafe extern "C" fn(ModuleHandle, *const TenantServices, *const c_char, *const c_char) -> *mut c_char>,
+    pub stream_push:  Option<unsafe extern "C" fn(ModuleHandle, *const c_char, *const c_char) -> *mut c_char>,
+    pub stream_close: Option<unsafe extern "C" fn(ModuleHandle, *const c_char)>,
 }
 ```
 
 - **Mọi chuỗi là JSON UTF-8, NUL-terminated**.
 - Host cấp bộ nhớ, host free (`free`). Module **không** free chuỗi nhận được.
 - `ModuleHandle` = `#[repr(transparent)]` trên `*mut c_void` → `Send + Sync` an toàn.
-- `ABI_VERSION` = 3 (`opsense-mod/src/lib.rs:33`). Tăng khi `HostV1`/`ModuleV1` đổi layout.
+- `ABI_VERSION` = **4** (`crates/opsense-ffi/src/lib.rs:33`). Tăng khi `HostV1`/`ModuleV1` đổi layout.
+- 3 entry `stream_*` là `Option` → module build với ABI 3 (thiếu entry) **vẫn `dlopen` được**.
+  Host check `is_some()` rồi trả lỗi rõ ràng, không gọi vào slot rỗng.
 
 ---
 
@@ -104,11 +111,22 @@ pub trait OpsenseModule: Send + Sync + 'static {
 
     fn tool(&self, name: String, args: Value, services: &TenantServices)
         -> BoxFut<'static, Result<String, ModuleError>>;
+
+    // ── SSE — cả 3 đều có default impl ──
+    fn stream(&self, req: HttpRequest, services: &TenantServices)
+        -> BoxFut<'static, Result<StreamHandle, ModuleError>>;
+
+    fn stream_push(&self, stream_id: String, payload: String)
+        -> BoxFut<'static, Result<String, ModuleError>>;
+
+    fn stream_close(&self, stream_id: String);
 }
 ```
 
 - `BoxFut<'a, T>` = `Pin<Box<dyn Future<Output = T> + Send + 'a>>` (object-safe).
 - `HttpRequest`/`HttpResponse` chỉ chứa `route_id`, `method`, `path`, `query`, `headers`, `body` — không dùng kiểu axum.
+- 3 method `stream*` **có default impl** → module không override vẫn compile, vẫn chạy REST bình thường.
+  `stream` mặc định trả lỗi, `stream_push` mặc định trả `""` (bỏ qua), `stream_close` không làm gì.
 
 ---
 
@@ -241,9 +259,21 @@ pub struct Manifest {
     pub tools: Vec<ToolSpec>,
 }
 
-pub struct RouteSpec { pub id: String, pub method: HttpMethod, pub path: String }
-pub struct ToolSpec  { pub name: String, pub description: String, pub input_schema: Value }
+pub struct RouteSpec {
+    pub id: String,
+    pub method: HttpMethod,
+    pub path: String,
+    pub transport: Transport,          // Rest (mặc định) | Sse
+    pub source_node: Option<String>,  // node `output` làm nguồn, chỉ dùng khi Sse
+}
+pub struct ToolSpec { pub name: String, pub description: String, pub input_schema: Value }
+
+pub enum Transport { Rest, Sse }   // serialize lowercase: "rest" / "sse"
 ```
+
+**`transport` + `source_node` có `#[serde(default)]`** — manifest viết tay (không khai
+2 field này) vẫn parse được và ra `Rest`. Nếu mất default thì **mọi** module
+build trước SSE đều không load được.
 
 **Luật khớp `route_id`** (`crates/opsense/src/api/modules.rs`):
 
@@ -376,7 +406,91 @@ path = "hello.so"
 | Symbol naming | `opsense_module_<id>_init` — `id` từ `[[modules]]` trong `opsense.conf.toml`, `-` → `_` |
 | `builtin = true` | **Bỏ qua** bởi `load_dynamic` (`modules.rs:74`) — phải tự `register_builtin` |
 
+| Node nguồn SSE | `type = "output"` trong `[[pipeline.components]]` — `#[sink]` (vd station sink) **không** broadcast được |
+| `source_node` | Trỏ tới `id` của node `output`; thiếu ⇒ host trả lỗi, stream rỗng |
+
 > **Lưu ý:** Crate `hello-mod` là fixture test (`examples/hello-mod/`, `crate-type = ["cdylib"]`). Nó **không** nằm trong workspace `members` để tránh lỗi build musl (`cannot produce cdylib`). Build tay: `cargo build --manifest-path examples/hello-mod/Cargo.toml`.
+
+---
+
+## 12b. Viết module SSE
+
+Route SSE cần **hai phần**: một node `output` trong pipeline làm nguồn, và
+module khai route trỏ tới node đó.
+
+**1. Pipeline — node nguồn:**
+
+```toml
+[[pipeline.components]]
+type = "clock"
+id = "clock"
+interval_secs = 1
+
+# Chỉ `type = "output"` mới có broadcast channel.
+[[pipeline.components]]
+type = "output"
+id = "market-out"
+inputs = ["clock"]
+```
+
+**2. Manifest — khai route:**
+
+```rust
+RouteSpec {
+    id: "ticks".into(),
+    method: HttpMethod::Get,
+    path: "/ticks".into(),
+    transport: Transport::Sse,
+    source_node: Some("market-out".into()),
+}
+```
+
+**3. Module — 3 method:**
+
+```rust
+fn stream(&self, _req, _svc)
+    -> BoxFut<'static, Result<StreamHandle, ModuleError>>
+{
+    Box::pin(async { Ok(StreamHandle { stream_id: "t1".into() }) })
+}
+
+/// Trả `""` = bỏ qua message này. Trả JSON = phát xuống client.
+/// **Đây là chỗ lọc/xào trộn dữ liệu** — host không đổi khi bạn thêm logic.
+fn stream_push(&self, _stream_id: String, payload: String)
+    -> BoxFut<'static, Result<String, ModuleError>>
+{
+    Box::pin(async move {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&payload) else {
+            return Ok(String::new());
+        };
+        if v.get("src").and_then(serde_json::Value::as_str) != Some("clock") {
+            return Ok(String::new());      // lọc rớt
+        }
+        Ok(serde_json::json!({ "seen": v }).to_string())
+    })
+}
+
+fn stream_close(&self, _stream_id: String) {
+    tracing::info!("stream đóng");
+}
+```
+
+**Vì sao vòng `recv()` nằm ở host chứ không ở module?**
+`broadcast::Receiver` không FFI-safe — nó là handle của một task đang chạy.
+Host chạy `rx.recv().await` rồi đẩy từng message qua `stream_push`. Nhờ vậy
+module không cần thread riêng, không cần runtime riêng, và logic lọc nằm hoàn
+toàn trong plugin.
+
+**Client chậm hơn pipeline:** buffer `broadcast` là 1024 message. Client chậm sẽ
+nhận event `error` báo `Data feed out of sync. Skipped N messages.` thay vì im
+lặng mất dữ liệu.
+
+**Qua nginx:** `packaging/nginx/opsense.conf:47` đã có `proxy_buffering off` +
+`proxy_http_version 1.1` ⇒ sẵn sàng. Đừng "tối ưu" bỏ dòng đó, SSE sẽ bị buffer
+hết rồi mới ra.
+
+**Chưa làm:** WebSocket. `broadcast` là một chiều; WS hai chiều cần thêm
+`socket_frame` vào vtable + registry `conn_id -> sender`.
 
 ---
 
@@ -399,7 +513,11 @@ path = "hello.so"
 
 ## 13. Ràng buộc ABI cho FFI vtable
 
-`HostV1`/`ModuleV1` thay đổi layout ⇒ bump `ABI_VERSION` (hiện = 3). Quy tắc giống §13.
+`HostV1`/`ModuleV1` thay đổi layout ⇒ bump `ABI_VERSION` (hiện = **4**). Quy tắc giống §13.
+
+Thêm 3 entry `stream_*` dạng `Option` ở **cuối** `ModuleV1` (ABI 4) là an toàn: module build
+với ABI 3 không có entry này, host check `is_some()` và trả lỗi rõ ràng thay vì gọi
+slot rỗng — không segfault. Đây là mẫu để thêm transport mới sau này.
 
 ---
 
