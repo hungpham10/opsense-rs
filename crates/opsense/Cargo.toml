@@ -119,6 +119,10 @@ parquet = { workspace = true, optional = true }
 # Dynamic module loading (dlopen) — optional, gated by `dynamic-modules` feature
 libloading = { version = "0.8", optional = true }
 form_urlencoded = { version = "1.2" }
+# SSE: `Sse` handler dùng `async_stream::stream!` để yield event từ vòng
+# `broadcast::recv()`. `futures` cho `StreamExt` trong signature handler.
+async-stream = { workspace = true }
+futures = { workspace = true }
 
 [features]
 default = ["repl"]

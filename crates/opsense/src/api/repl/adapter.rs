@@ -7,7 +7,7 @@ use {
     async_graphql::{EmptySubscription, Schema},
     opsense_ffi::{
         BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest, ModuleError, OpsenseModule,
-        RouteSpec, TenantServices,
+        RouteSpec, TenantServices, Transport,
     },
     std::sync::Arc,
 };
@@ -38,6 +38,8 @@ impl OpsenseModule for ReplApiModule {
                 id: "graphql".into(),
                 method: HttpMethod::Post,
                 path: "/graphql".into(),
+                transport: Transport::Rest,
+                source_node: None,
             }],
             tools: vec![], // Tools are registered in MCP, not API
         }

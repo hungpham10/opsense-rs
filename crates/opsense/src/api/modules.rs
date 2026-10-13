@@ -10,10 +10,14 @@ use axum::{
     Router,
     extract::State,
     http::{Request, Response},
-    routing::any,
+    response::sse::{Event, KeepAlive, Sse},
+    routing::{any, get},
 };
+use tokio::sync::broadcast;
 
-use opsense_ffi::{HttpMethod, HttpRequest, HttpResponse, Manifest, OpsenseModule, TenantServices};
+use opsense_ffi::{
+    HttpMethod, HttpRequest, HttpResponse, Manifest, OpsenseModule, TenantServices, Transport,
+};
 
 #[cfg(feature = "dynamic-modules")]
 use opsense_ffi::ModuleError;
@@ -145,17 +149,33 @@ impl ApiModuleRegistry {
             let state_for_handler = state.clone();
             let state_for_router = state.clone();
 
-            // Mount a wildcard handler at the module prefix
-            let module_router = Router::new()
-                .route(
-                    "/{*path}",
-                    any(move |req| {
-                        module_route_handler(State(state_for_handler), req, module.clone())
-                    }),
-                )
-                .with_state(state_for_router);
+            // Mỗi route mount riêng theo `transport` — REST dùng `any()`, SSE
+            // dùng `get()` vì SSE chỉ hợp với GET (client mở kết nối dài).
+            let module_router = Router::new();
+            let module_router = manifest.routes.iter().fold(module_router, |r, route| {
+                let path = route.path.clone();
+                match route.transport {
+                    Transport::Rest => r.route(
+                        &path,
+                        any({
+                            let module = module.clone();
+                            let state = state_for_handler.clone();
+                            move |req| module_route_handler(State(state), req, module.clone())
+                        }),
+                    ),
+                    Transport::Sse => r.route(
+                        &path,
+                        get({
+                            let module = module.clone();
+                            let state = state_for_handler.clone();
+                            let source_node = route.source_node.clone();
+                            move |req| sse_handler(State(state), req, module.clone(), source_node)
+                        }),
+                    ),
+                }
+            });
 
-            router = router.nest(&prefix, module_router);
+            router = router.nest(&prefix, module_router.with_state(state_for_router));
         }
 
         router
@@ -284,6 +304,119 @@ async fn module_route_handler(
     }
 }
 
+/// SSE handler — phát dữ liệu từ node `output` trong pipeline.
+///
+/// Host chạy vòng `recv()` trên broadcast channel của `source_node`
+/// (`Runtime::broadcast`, `opsense-mlib/src/vector/runtime/engine.rs:708`).
+/// Đây là event-driven: 0 CPU khi rảnh, không vòng poll.
+///
+/// Mỗi message nhận được được gửi qua `stream_push` của module — module quyết
+/// định phát gì (trả `""` = bỏ qua). Đây là chỗ "xào trộn dữ liệu" sẽ nằm.
+async fn sse_handler(
+    State(state): State<AppState>,
+    req: Request<axum::body::Body>,
+    module: Arc<dyn OpsenseModule>,
+    source_node: Option<String>,
+) -> Sse<impl futures::Stream<Item = Result<Event, axum::Error>>> {
+    // Mọi nhánh lỗi đều quy về `None` + stream rỗng **cùng một kiểu**, vì
+    // `impl Stream` trong return type chỉ nhận đúng một concrete type — trả
+    // `stream::empty()` sớm ở nhánh nào đó sẽ là E0308.
+    let rx = match source_node {
+        Some(node) => match state.runtime.read().await.broadcast(node.clone()) {
+            Ok(rx) => Some(rx),
+            Err(e) => {
+                tracing::warn!(error = %e, node = %node,
+                    "không mở được broadcast channel — node phải là `type = \"output\"` và đã chạy");
+                None
+            }
+        },
+        None => {
+            tracing::warn!("route SSE khai `transport = \"sse\"` nhưng thiếu `source_node`");
+            None
+        }
+    };
+
+    // Mở luồng qua FFI — module trả `stream_id` để định danh.
+    let stream_id = match module
+        .stream(
+            HttpRequest {
+                route_id: String::new(),
+                method: HttpMethod::Get,
+                path: req.uri().path().to_string(),
+                query: req
+                    .uri()
+                    .query()
+                    .map(|q| form_urlencoded::parse(q.as_bytes()).into_owned().collect())
+                    .unwrap_or_default(),
+                headers: req
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.as_str().to_lowercase(),
+                            v.to_str().unwrap_or("").to_string(),
+                        )
+                    })
+                    .collect(),
+                body: vec![],
+            },
+            &TenantServices {
+                tenant_id: 0,
+                cache: None,
+            },
+        )
+        .await
+    {
+        Ok(h) => Some(h.stream_id),
+        Err(e) => {
+            tracing::warn!(error = %e, "module không hỗ trợ SSE — cần override `stream` + `stream_push`");
+            None
+        }
+    };
+
+    let sse = async_stream::stream! {
+        let (mut rx, stream_id) = match (rx, stream_id) {
+            (Some(rx), Some(id)) => (rx, id),
+            _ => return,   // lỗi cấu hình/module → stream rỗng, không yield gì
+        };
+
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    // Module quyết định có phát message này không (trả "" = bỏ qua).
+                    match module.stream_push(stream_id.clone(), msg.payload.to_string()).await {
+                        Ok(json) if !json.is_empty() => {
+                            if let Ok(event) = Event::default().json_data(json) {
+                                yield Ok(event);
+                            }
+                        }
+                        Ok(_) => continue,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "stream_push lỗi");
+                            continue;
+                        }
+                    }
+                }
+                // Client chậm hơn pipeline → có message bị bỏ qua. Báo rõ
+                // thay vì im lặng, đúng như `Lagged` được sinh ra để làm.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    let data = serde_json::json!({
+                        "error": format!("Data feed out of sync. Skipped {n} messages.")
+                    })
+                    .to_string();
+                    yield Ok(Event::default().event("error").data(data));
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+
+        // Client rời đi → báo module đóng luồng.
+        module.stream_close(stream_id);
+    };
+
+    Sse::new(sse).keep_alive(KeepAlive::default().interval(std::time::Duration::from_secs(15)))
+}
+
 /// Wrapper for dynamically loaded modules that implements OpsenseModule.
 /// Uses the ModuleHandle to safely access the module state across async boundaries.
 #[cfg(feature = "dynamic-modules")]
@@ -374,6 +507,104 @@ impl OpsenseModule for DynamicModuleWrapper {
             unsafe { ((*vtable).free)(resp_ptr) };
             result
         })
+    }
+
+    fn stream(
+        &self,
+        req: HttpRequest,
+        services: &TenantServices,
+    ) -> opsense_ffi::BoxFut<'static, Result<opsense_ffi::StreamHandle, ModuleError>> {
+        // ABI 3 (module build cũ) không có entry này → trả lỗi rõ ràng thay vì
+        // gọi vào slot rỗng.
+        let Some(open) = self.vtable.stream_open else {
+            return Box::pin(async {
+                Err(ModuleError::Internal(
+                    "module không hỗ trợ SSE — build lại với opsense-ffi ABI >= 4".into(),
+                ))
+            });
+        };
+        let req_json = serde_json::to_string(&req).unwrap_or_default();
+        let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
+        let handle = self.vtable.state;
+        let services_ptr: usize = services as *const TenantServices as usize;
+
+        Box::pin(async move {
+            let vtable = vtable as *const ModuleV1;
+            let req_c = std::ffi::CString::new(req_json).unwrap_or_default();
+            let resp_ptr = unsafe {
+                open(
+                    handle,
+                    services_ptr as *const TenantServices,
+                    std::ptr::null(),
+                    req_c.as_ptr(),
+                )
+            };
+            if resp_ptr.is_null() {
+                return Err(ModuleError::Internal("null stream_open response".into()));
+            }
+            let resp_json = unsafe { std::ffi::CStr::from_ptr(resp_ptr).to_str().unwrap_or("{}") };
+            let result = match serde_json::from_str::<serde_json::Value>(resp_json) {
+                Ok(v) if v.get("error").is_some() => Err(ModuleError::Internal(
+                    v["message"]
+                        .as_str()
+                        .unwrap_or("stream_open failed")
+                        .to_string(),
+                )),
+                Ok(v) => Ok(opsense_ffi::StreamHandle {
+                    stream_id: v["stream_id"].as_str().unwrap_or("").to_string(),
+                }),
+                Err(e) => Err(ModuleError::Internal(format!("stream_open parse: {e}"))),
+            };
+            unsafe { ((*vtable).free)(resp_ptr) };
+            result
+        })
+    }
+
+    fn stream_push(
+        &self,
+        stream_id: String,
+        payload: String,
+    ) -> opsense_ffi::BoxFut<'static, Result<String, ModuleError>> {
+        let Some(push) = self.vtable.stream_push else {
+            // Không có entry ⇒ module không lọc, coi như bỏ qua hết.
+            return Box::pin(async { Ok(String::new()) });
+        };
+        let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
+        let handle = self.vtable.state;
+
+        Box::pin(async move {
+            let vtable = vtable as *const ModuleV1;
+            let id_c = std::ffi::CString::new(stream_id).unwrap_or_default();
+            let payload_c = std::ffi::CString::new(payload).unwrap_or_default();
+            let resp_ptr = unsafe { push(handle, id_c.as_ptr(), payload_c.as_ptr()) };
+            if resp_ptr.is_null() {
+                return Err(ModuleError::Internal("null stream_push response".into()));
+            }
+            let resp_json = unsafe { std::ffi::CStr::from_ptr(resp_ptr).to_str().unwrap_or("") };
+            let result = match serde_json::from_str::<serde_json::Value>(resp_json) {
+                Ok(v) if v.get("error").is_some() => Err(ModuleError::Internal(
+                    v["message"]
+                        .as_str()
+                        .unwrap_or("stream_push failed")
+                        .to_string(),
+                )),
+                // Chuỗi rỗng = module chọn bỏ qua message này.
+                Ok(serde_json::Value::String(s)) => Ok(s),
+                Ok(v) => Ok(v.to_string()),
+                Err(_) => Ok(resp_json.to_string()),
+            };
+            unsafe { ((*vtable).free)(resp_ptr) };
+            result
+        })
+    }
+
+    fn stream_close(&self, stream_id: String) {
+        let Some(close) = self.vtable.stream_close else {
+            return;
+        };
+        let handle = self.vtable.state;
+        let id_c = std::ffi::CString::new(stream_id).unwrap_or_default();
+        unsafe { close(handle, id_c.as_ptr()) };
     }
 }
 
@@ -512,6 +743,8 @@ mod tests {
                 id: "graphql".into(),
                 method: HttpMethod::Post,
                 path: "/graphql".into(),
+                transport: opsense_ffi::Transport::Rest,
+                source_node: None,
             }],
             tools: vec![],
         }

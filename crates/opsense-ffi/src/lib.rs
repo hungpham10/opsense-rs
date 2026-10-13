@@ -30,7 +30,7 @@ pub use host::HostServices;
 pub use manifest::*;
 
 /// Current ABI version. Increment when `HostV1` or `ModuleV1` layout changes.
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 /// Object-safe async return type used throughout the module contract.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -61,6 +61,47 @@ pub trait OpsenseModule: Send + Sync + 'static {
         args: serde_json::Value,
         services: &TenantServices,
     ) -> BoxFut<'static, Result<String, ModuleError>>;
+
+    /// Mở một luồng SSE cho route khai `transport = "sse"`.
+    ///
+    /// Host gọi một lần khi client kết nối, rồi chạy vòng `recv()` trên
+    /// broadcast channel của `source_node` và gọi `stream_push` cho từng
+    /// message. Khi client rời, host gọi `stream_close`.
+    ///
+    /// Default impl trả lỗi — module không override vẫn compile và chạy bình
+    /// thường với REST, chỉ không có SSE.
+    fn stream(
+        &self,
+        req: HttpRequest,
+        services: &TenantServices,
+    ) -> BoxFut<'static, Result<StreamHandle, ModuleError>> {
+        let _ = (req, services);
+        Box::pin(async { Err(ModuleError::Internal("stream unsupported".into())) })
+    }
+
+    /// Quyết định có phát một message vào luồng SSE đang mở không.
+    ///
+    /// Host gọi cho từng message nhận được từ broadcast channel của
+    /// `source_node`. Trả chuỗi rỗng `""` = bỏ qua; trả JSON = event cần phát
+    /// xuống client.
+    ///
+    /// Default impl trả `""` (bỏ qua tất cả) — module không override sẽ không
+    /// bao giờ phát event, nhưng vẫn hoạt động với REST.
+    fn stream_push(
+        &self,
+        stream_id: String,
+        payload: String,
+    ) -> BoxFut<'static, Result<String, ModuleError>> {
+        let _ = (stream_id, payload);
+        Box::pin(async { Ok(String::new()) })
+    }
+
+    /// Đóng luồng SSE — client đã rời đi.
+    ///
+    /// Default impl không làm gì.
+    fn stream_close(&self, stream_id: String) {
+        let _ = stream_id;
+    }
 }
 
 /// HTTP request envelope passed to `OpsenseModule::route`.
@@ -88,6 +129,15 @@ pub struct HttpResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+/// Handle một luồng SSE đã mở, nhận từ [`OpsenseModule::stream`].
+///
+/// Module dùng id này để định danh luồng khi host gọi `stream_push` và
+/// `stream_close` qua vtable. Chuỗi tuỳ ý — không có ý nghĩa với host.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StreamHandle {
+    pub stream_id: String,
 }
 
 /// HTTP methods supported by module routes.
@@ -175,6 +225,8 @@ mod tests {
                 id: "ping".into(),
                 method: HttpMethod::Get,
                 path: "/ping".into(),
+                transport: Transport::Rest,
+                source_node: None,
             }],
             tools: vec![ToolSpec {
                 name: "opsense_test".into(),

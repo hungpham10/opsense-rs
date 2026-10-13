@@ -90,6 +90,39 @@ pub struct ModuleV1 {
 
     /// Free a string returned by `manifest` or `handle`.
     pub free: unsafe extern "C" fn(s: *mut c_char),
+
+    // ── SSE (ABI 4) ────────────────────────────────────────────────────────
+    //
+    // Tất cả là `Option`: module build với ABI 3 không có entry này → vẫn
+    // `dlopen` được, chỉ không có SSE. Host check `is_some()` trước khi gọi.
+    //
+    // Mô hình: host chạy vòng `recv()` trên broadcast channel của `source_node`
+    // (crate `opsense`), gọi `stream_push` cho từng message, module quyết định
+    // phát gì. `broadcast::Receiver` không FFI-safe nên vòng loop phải ở host.
+    /// Mở luồng SSE. Trả JSON `{"stream_id": "..."}` hoặc null nếu lỗi.
+    pub stream_open: Option<
+        unsafe extern "C" fn(
+            state: ModuleHandle,
+            services: *const TenantServices,
+            route_id: *const c_char,
+            req_json: *const c_char,
+        ) -> *mut c_char,
+    >,
+
+    /// Module quyết định có phát message này không.
+    ///
+    /// Trả chuỗi rỗng `""` = bỏ qua. Trả JSON = event cần phát xuống client.
+    /// Đây là chỗ "xào trộn dữ liệu" sẽ nằm — host không đổi khi thêm lọc.
+    pub stream_push: Option<
+        unsafe extern "C" fn(
+            state: ModuleHandle,
+            stream_id: *const c_char,
+            payload: *const c_char,
+        ) -> *mut c_char,
+    >,
+
+    /// Đóng luồng SSE (client rời đi).
+    pub stream_close: Option<unsafe extern "C" fn(state: ModuleHandle, stream_id: *const c_char)>,
 }
 
 /// Initialize a module.
@@ -283,6 +316,12 @@ pub trait ModuleExports: super::OpsenseModule {
             manifest: Self::ffi_manifest,
             handle: Self::ffi_handle,
             free: Self::ffi_free,
+            // Module không override `stream` → default impl trả lỗi. Điền `None`
+            // để host biết module này không hỗ trợ SSE, thay vì gọi vào slot
+            // rỗng và segfault.
+            stream_open: None,
+            stream_push: None,
+            stream_close: None,
         })
     }
 
@@ -379,6 +418,89 @@ pub trait ModuleExports: super::OpsenseModule {
             drop(unsafe { std::ffi::CString::from_raw(s) });
         }
     }
+
+    // ── SSE (ABI 4) ────────────────────────────────────────────────────────
+    //
+    // Module không override `stream` → default impl trả lỗi. Ba hàm này chỉ
+    // được gọi khi module **có** override, nên `unwrap()` ở đây là an toàn:
+    // host đã check `is_some()` trước khi gọi.
+
+    /// # Safety
+    ///
+    /// `state` must come from [`ModuleExports::into_vtable`] on this same
+    /// module type; `services`/`route_id`/`req_json` must be null or valid
+    /// NUL-terminated C strings.
+    unsafe extern "C" fn ffi_stream_open(
+        state: ModuleHandle,
+        services: *const TenantServices,
+        route_id: *const c_char,
+        req_json: *const c_char,
+    ) -> *mut c_char {
+        let wrapper = unsafe { &*(state.0 as *const ModuleWrapper) };
+        let services = unsafe { services.as_ref() };
+        let _route_id = unsafe { from_c_str(route_id) };
+        let req_json = unsafe { from_c_str(req_json) };
+
+        let req: HttpRequest = match serde_json::from_str(&req_json) {
+            Ok(r) => r,
+            Err(e) => {
+                let err = ModuleError::BadRequest(format!("request parse: {e}"));
+                return to_c_string(
+                    serde_json::to_string(&super::HttpResponse::from(err)).unwrap(),
+                );
+            }
+        };
+
+        let services = services.cloned().unwrap_or(TenantServices {
+            tenant_id: 0,
+            cache: None,
+        });
+
+        let fut = wrapper.module.stream(req, &services);
+        match drive(fut) {
+            Ok(handle) => {
+                to_c_string(serde_json::json!({ "stream_id": handle.stream_id }).to_string())
+            }
+            Err(e) => to_c_string(
+                serde_json::json!({ "error": e.code(), "message": e.message() }).to_string(),
+            ),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `state` must come from [`ModuleExports::into_vtable`] on this same
+    /// module type; `stream_id`/`payload` must be null or valid NUL-terminated
+    /// C strings.
+    unsafe extern "C" fn ffi_stream_push(
+        state: ModuleHandle,
+        stream_id: *const c_char,
+        payload: *const c_char,
+    ) -> *mut c_char {
+        let wrapper = unsafe { &*(state.0 as *const ModuleWrapper) };
+        let stream_id = unsafe { from_c_str(stream_id) };
+        let payload = unsafe { from_c_str(payload) };
+
+        // Module trả chuỗi rỗng = bỏ qua message này. Trả JSON = phát xuống
+        // client. Đây là chỗ "xào trộn dữ liệu" sẽ nằm.
+        let fut = wrapper.module.stream_push(stream_id, payload);
+        match drive(fut) {
+            Ok(json) => to_c_string(json),
+            Err(e) => to_c_string(
+                serde_json::json!({ "error": e.code(), "message": e.message() }).to_string(),
+            ),
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `state` must come from [`ModuleExports::into_vtable`] on this same
+    /// module type; `stream_id` must be null or a valid NUL-terminated C string.
+    unsafe extern "C" fn ffi_stream_close(state: ModuleHandle, stream_id: *const c_char) {
+        let wrapper = unsafe { &*(state.0 as *const ModuleWrapper) };
+        let stream_id = unsafe { from_c_str(stream_id) };
+        wrapper.module.stream_close(stream_id);
+    }
 }
 
 /// Blanket implementation for all `OpsenseModule` types.
@@ -412,8 +534,11 @@ mod tests {
     }
 
     #[test]
-    fn abi_bumped_to_3() {
-        assert_eq!(ABI_VERSION, 3);
+    fn abi_bumped_to_4_for_sse() {
+        // 4 = thêm 3 entry `stream_*` (Option) vào cuối `ModuleV1`. Module
+        // build với ABI 3 vẫn dlopen được vì entry mới là `Option` — host
+        // check `is_some()` và trả lỗi rõ ràng nếu thiếu.
+        assert_eq!(ABI_VERSION, 4);
     }
 
     /// Verify the fallback branch works with current_thread runtime.
