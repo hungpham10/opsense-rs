@@ -1,8 +1,8 @@
-use opsense_mod::{BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest,
+use opsense_ffi::{BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest,
                  ModuleError, OpsenseModule, RouteSpec, TenantServices};
 
 thread_local! {
-    static HOST: std::cell::RefCell<Option<*const opsense_mod::ffi::HostV1>> = const { std::cell::RefCell::new(None) };
+    static HOST: std::cell::RefCell<Option<*const opsense_ffi::ffi::HostV1>> = const { std::cell::RefCell::new(None) };
 }
 
 pub struct HelloModule;
@@ -30,7 +30,7 @@ impl OpsenseModule for HelloModule {
             if route_id == "host-status" {
                 let host = HOST.with(|h| *h.borrow()).expect("host not set");
                 let json = unsafe {
-                    opsense_mod::ffi::host_call(&*host, "status", &serde_json::json!({}))
+                    opsense_ffi::ffi::host_call(&*host, "status", &serde_json::json!({}))
                 }.map_err(|e| ModuleError::Internal(e.to_string()))?;
                 return Ok(HttpResponse { status: 200, headers: vec![], body: json.into_bytes() });
             }
@@ -48,9 +48,9 @@ impl OpsenseModule for HelloModule {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn opsense_module_hello_init(
-    host: *const opsense_mod::ffi::HostV1,
-) -> *mut opsense_mod::ffi::ModuleV1 {
-    use opsense_mod::ffi::ModuleExports;
+    host: *const opsense_ffi::ffi::HostV1,
+) -> *mut opsense_ffi::ffi::ModuleV1 {
+    use opsense_ffi::ffi::ModuleExports;
     HOST.with(|h| *h.borrow_mut() = Some(host));
     Box::into_raw(HelloModule.into_vtable())
 }

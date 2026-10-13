@@ -1,6 +1,6 @@
 //! Host services implementation for the serve binary.
 
-use opsense_mod::{BoxFut, HostServices, ModuleError, Value};
+use opsense_ffi::{BoxFut, HostServices, ModuleError, Value};
 
 use crate::api::AppState;
 use opsense_core::Observation;

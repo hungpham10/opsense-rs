@@ -14,7 +14,7 @@ members = [
 	"crates/opsense-kernel-python",
 	"crates/opsense-kernel-julia",
 	"crates/opsense-runner",
-	"crates/opsense-mod",
+	"crates/opsense-ffi",
 ]
 exclude = ["examples/hello-mod"]
 

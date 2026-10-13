@@ -146,7 +146,7 @@ pub async fn routes(app_state: AppState) -> Result<Router, Error> {
     #[cfg(feature = "dynamic-modules")]
     {
         // Host services for dynamic modules
-        let host_services: Arc<dyn opsense_mod::HostServices> = Arc::new(crate::serve_host::ServeHostServices { state: app_state.clone() });
+        let host_services: Arc<dyn opsense_ffi::HostServices> = Arc::new(crate::serve_host::ServeHostServices { state: app_state.clone() });
         registry
             .load_dynamic(&config_dir, &modules_cfg, host_services)
             .map_err(|e| Error::other(e.to_string()))?;

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use opsense_mlib::cache::RedisBackend;
-use opsense_mod::cache::Cache;
+use opsense_ffi::cache::Cache;
 use opsense_model::entities::admin::{AuthConfig, Jwt, Tenant, Token, UserTokenInfo};
 
 use crate::api::AppState;

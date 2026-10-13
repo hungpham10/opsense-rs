@@ -13,26 +13,26 @@ use axum::{
     routing::any,
 };
 
-use opsense_mod::{
+use opsense_ffi::{
     HttpMethod, HttpRequest, HttpResponse, Manifest, OpsenseModule, TenantServices,
 };
 
 #[cfg(feature = "dynamic-modules")]
-use opsense_mod::ModuleError;
+use opsense_ffi::ModuleError;
 
 #[cfg(not(feature = "dynamic-modules"))]
 #[allow(unused_imports)]
-use opsense_mod::ModuleError;
+use opsense_ffi::ModuleError;
 
 #[cfg(feature = "dynamic-modules")]
-use opsense_mod::{HostServices, ModuleV1};
+use opsense_ffi::{HostServices, ModuleV1};
 
 use crate::api::AppState;
 
 #[cfg(feature = "dynamic-modules")]
 use {
     crate::modules_config::ModulesConfig,
-    opsense_mod::ffi::ModuleInitFn,
+    opsense_ffi::ffi::ModuleInitFn,
     std::path::Path,
 };
 
@@ -99,9 +99,9 @@ impl ApiModuleRegistry {
 
             // Verify ABI version
             unsafe {
-                if (*module_v1).abi_version != opsense_mod::ABI_VERSION {
+                if (*module_v1).abi_version != opsense_ffi::ABI_VERSION {
                     return Err(ModuleError::AbiMismatch {
-                        host: opsense_mod::ABI_VERSION,
+                        host: opsense_ffi::ABI_VERSION,
                         plugin: (*module_v1).abi_version,
                     });
                 }
@@ -276,7 +276,7 @@ impl OpsenseModule for DynamicModuleWrapper {
         serde_json::from_str(json).unwrap_or_default()
     }
 
-    fn route(&self, req: HttpRequest, services: &TenantServices) -> opsense_mod::BoxFut<'static, Result<HttpResponse, ModuleError>> {
+    fn route(&self, req: HttpRequest, services: &TenantServices) -> opsense_ffi::BoxFut<'static, Result<HttpResponse, ModuleError>> {
         let req_json = serde_json::to_string(&req).unwrap_or_default();
         let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
         let handle = self.vtable.state;
@@ -302,7 +302,7 @@ impl OpsenseModule for DynamicModuleWrapper {
         })
     }
 
-    fn tool(&self, name: String, args: serde_json::Value, services: &TenantServices) -> opsense_mod::BoxFut<'static, Result<String, ModuleError>> {
+    fn tool(&self, name: String, args: serde_json::Value, services: &TenantServices) -> opsense_ffi::BoxFut<'static, Result<String, ModuleError>> {
         let req_json = serde_json::to_string(&args).unwrap_or_default();
         let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
         let handle = self.vtable.state;
@@ -345,9 +345,9 @@ fn host_context(host_services: &Arc<dyn HostServices>) -> *mut std::ffi::c_void 
 
 /// Build the HostV1 vtable with context from host_services.
 #[cfg(feature = "dynamic-modules")]
-fn build_host_v1(host_services: &Arc<dyn HostServices>) -> opsense_mod::HostV1 {
-    opsense_mod::HostV1 {
-        abi_version: opsense_mod::ABI_VERSION,
+fn build_host_v1(host_services: &Arc<dyn HostServices>) -> opsense_ffi::HostV1 {
+    opsense_ffi::HostV1 {
+        abi_version: opsense_ffi::ABI_VERSION,
         context: host_context(host_services),
         call: host_call_ffi,
         log: host_log_ffi,
@@ -358,7 +358,7 @@ fn build_host_v1(host_services: &Arc<dyn HostServices>) -> opsense_mod::HostV1 {
 /// Stub implementation when dynamic-modules feature is disabled.
 #[cfg(not(feature = "dynamic-modules"))]
 #[allow(dead_code)]
-fn build_host_v1() -> opsense_mod::HostV1 {
+fn build_host_v1() -> opsense_ffi::HostV1 {
     use std::ffi::c_char;
 
     // Return a dummy HostV1 with null function pointers - should never be called
@@ -369,8 +369,8 @@ fn build_host_v1() -> opsense_mod::HostV1 {
     unsafe extern "C" fn dummy_log(_: *mut c_void, _: u32, _: *const c_char, _: *const c_char) {}
     unsafe extern "C" fn dummy_free(_: *mut c_char) {}
 
-    opsense_mod::HostV1 {
-        abi_version: opsense_mod::ABI_VERSION,
+    opsense_ffi::HostV1 {
+        abi_version: opsense_ffi::ABI_VERSION,
         context: std::ptr::null_mut(),
         call: dummy_call,
         log: dummy_log,
@@ -392,7 +392,7 @@ unsafe extern "C" fn host_call_ffi(
     let host: &Arc<dyn HostServices> = unsafe { &*(ctx as *const Arc<dyn HostServices>) };
     let host = host.clone();
 
-    let out = opsense_mod::drive(async move { host.call(op, req_json).await });
+    let out = opsense_ffi::drive(async move { host.call(op, req_json).await });
 
     let resp_json = match out {
         Ok(v) => serde_json::to_string(&v).unwrap_or_else(|e| {
@@ -449,7 +449,7 @@ mod tests {
             version: "0".into(),
             builtin: true,
             prefix: "/api/repl".into(),
-            routes: vec![opsense_mod::RouteSpec {
+            routes: vec![opsense_ffi::RouteSpec {
                 id: "graphql".into(),
                 method: HttpMethod::Post,
                 path: "/graphql".into(),

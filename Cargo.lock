@@ -4008,8 +4008,8 @@ dependencies = [
  "opentelemetry_sdk",
  "opsense-components",
  "opsense-core",
+ "opsense-ffi",
  "opsense-mlib",
- "opsense-mod",
  "opsense-model",
  "opsense-proto",
  "opsense-qlib",
@@ -4076,6 +4076,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "opsense-ffi"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "opsense-kernel-echo"
 version = "1.0.36"
 dependencies = [
@@ -4131,8 +4143,8 @@ dependencies = [
  "futures-util",
  "log",
  "object_store",
+ "opsense-ffi",
  "opsense-macros",
- "opsense-mod",
  "parking_lot",
  "parquet",
  "rand 0.8.8",
@@ -4148,18 +4160,6 @@ dependencies = [
  "tokio-util",
  "typetag",
  "utoipa",
-]
-
-[[package]]
-name = "opsense-mod"
-version = "1.0.36"
-dependencies = [
- "axum",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]

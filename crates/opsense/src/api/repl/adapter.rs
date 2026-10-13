@@ -4,7 +4,7 @@
 use {
     crate::api::AppState,
     crate::api::repl::{schema, v1},
-    opsense_mod::{BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest, ModuleError, OpsenseModule, RouteSpec, TenantServices},
+    opsense_ffi::{BoxFut, HttpMethod, HttpRequest, HttpResponse, Manifest, ModuleError, OpsenseModule, RouteSpec, TenantServices},
     async_graphql::{Schema, EmptySubscription},
     std::sync::Arc,
 };

@@ -73,7 +73,7 @@ sentry = { workspace = true }
 backtrace = { workspace = true }
 libc = { workspace = true }
 opsense-model = { path = "../opsense-model" }
-opsense-mod = { path = "../opsense-mod" }
+opsense-ffi = { path = "../opsense-ffi" }
 # `parquet` + `sqlite` storage backends: strategy configs in
 # strategies/<name>/config.toml use these, so the serve/runner binaries must
 # link them or stations fail to open (`storage backend 'parquet' … requires
