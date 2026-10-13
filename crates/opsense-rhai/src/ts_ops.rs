@@ -23,7 +23,8 @@ fn parse_points(points: &Array) -> Result<Vec<(i64, f64)>, String> {
         if let Ok(obj) = item.as_map_ref() {
             let ts = obj.get("ts").and_then(|v| v.clone().try_cast::<i64>());
             let val = obj.get("value").and_then(|v| {
-                v.clone().try_cast::<f64>()
+                v.clone()
+                    .try_cast::<f64>()
                     .or_else(|| v.clone().try_cast::<i64>().map(|x| x as f64))
                     .or_else(|| v.clone().try_cast::<u64>().map(|x| x as f64))
             });
@@ -94,61 +95,89 @@ fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
 pub fn register(engine: &mut rhai::Engine) {
     // ts_rate
     engine.register_fn("ts_rate", |points: Array| -> Dynamic {
-        let Ok(p) = parse_points(&points) else { return Dynamic::UNIT; };
-        if p.len() < 2 { return Dynamic::UNIT; }
+        let Ok(p) = parse_points(&points) else {
+            return Dynamic::UNIT;
+        };
+        if p.len() < 2 {
+            return Dynamic::UNIT;
+        }
         let dt = (p.last().unwrap().0 - p.first().unwrap().0) as f64;
-        if dt <= 0.0 { return Dynamic::UNIT; }
+        if dt <= 0.0 {
+            return Dynamic::UNIT;
+        }
         let rate = (p.last().unwrap().1 - p.first().unwrap().1) / dt;
         Dynamic::from(rate)
     });
 
     // ts_moving_avg - returns array (series operator)
-    engine.register_fn("ts_moving_avg", |points: Array, window_secs: i64| -> Dynamic {
-        let Ok(p) = parse_points(&points) else { return Dynamic::from(Array::new()); };
-        if p.is_empty() || window_secs <= 0 { return Dynamic::from(Array::new()); }
-        let ws = window_secs;
-        let mut out = Array::new();
-        for i in 0..p.len() {
-            let cutoff = p[i].0 - ws;
-            let window_vals: Vec<f64> = p[..=i]
-                .iter()
-                .filter(|(ts, _)| *ts >= cutoff)
-                .map(|(_, v)| *v)
-                .collect();
-            let avg = if window_vals.is_empty() { 0.0 } else { window_vals.iter().sum::<f64>() / window_vals.len() as f64 };
-            out.push(point_map(p[i].0, avg));
-        }
-        Dynamic::from(out)
-    });
+    engine.register_fn(
+        "ts_moving_avg",
+        |points: Array, window_secs: i64| -> Dynamic {
+            let Ok(p) = parse_points(&points) else {
+                return Dynamic::from(Array::new());
+            };
+            if p.is_empty() || window_secs <= 0 {
+                return Dynamic::from(Array::new());
+            }
+            let ws = window_secs;
+            let mut out = Array::new();
+            for i in 0..p.len() {
+                let cutoff = p[i].0 - ws;
+                let window_vals: Vec<f64> = p[..=i]
+                    .iter()
+                    .filter(|(ts, _)| *ts >= cutoff)
+                    .map(|(_, v)| *v)
+                    .collect();
+                let avg = if window_vals.is_empty() {
+                    0.0
+                } else {
+                    window_vals.iter().sum::<f64>() / window_vals.len() as f64
+                };
+                out.push(point_map(p[i].0, avg));
+            }
+            Dynamic::from(out)
+        },
+    );
 
     // ts_resample - returns array (series operator)
-    engine.register_fn("ts_resample", |points: Array, bucket_secs: i64, agg: &str| -> Dynamic {
-        let Ok(p) = parse_points(&points) else { return Dynamic::from(Array::new()); };
-        if p.is_empty() || bucket_secs <= 0 { return Dynamic::from(Array::new()); }
-        let bs = bucket_secs;
-        let t0 = p[0].0;
-        let t1 = p.last().unwrap().0;
-        let num_buckets = ((t1 - t0) / bs + 1) as usize;
-        let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); num_buckets];
-        for (ts, v) in p {
-            let idx = ((ts - t0) / bs) as usize;
-            buckets[idx].push(v);
-        }
-        let mut out = Array::new();
-        for (i, bucket) in buckets.into_iter().enumerate() {
-            if bucket.is_empty() { continue; }
-            let val = aggregate(&bucket, agg);
-            let ts = t0 + i as i64 * bs;
-            out.push(point_map(ts, val));
-        }
-        Dynamic::from(out)
-    });
+    engine.register_fn(
+        "ts_resample",
+        |points: Array, bucket_secs: i64, agg: &str| -> Dynamic {
+            let Ok(p) = parse_points(&points) else {
+                return Dynamic::from(Array::new());
+            };
+            if p.is_empty() || bucket_secs <= 0 {
+                return Dynamic::from(Array::new());
+            }
+            let bs = bucket_secs;
+            let t0 = p[0].0;
+            let t1 = p.last().unwrap().0;
+            let num_buckets = ((t1 - t0) / bs + 1) as usize;
+            let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); num_buckets];
+            for (ts, v) in p {
+                let idx = ((ts - t0) / bs) as usize;
+                buckets[idx].push(v);
+            }
+            let mut out = Array::new();
+            for (i, bucket) in buckets.into_iter().enumerate() {
+                if bucket.is_empty() {
+                    continue;
+                }
+                let val = aggregate(&bucket, agg);
+                let ts = t0 + i as i64 * bs;
+                out.push(point_map(ts, val));
+            }
+            Dynamic::from(out)
+        },
+    );
 
     // ts_quantile - extract values from observation maps
     engine.register_fn("ts_quantile", |points: Array, q: f64| -> Dynamic {
         let mut vals = extract_values(&points);
         eprintln!("DEBUG ts_quantile extracted values: {:?}", vals);
-        if vals.is_empty() { return Dynamic::UNIT; }
+        if vals.is_empty() {
+            return Dynamic::UNIT;
+        }
         vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
         Dynamic::from(quantile_sorted(&vals, q.clamp(0.0, 1.0)))
     });
@@ -157,7 +186,9 @@ pub fn register(engine: &mut rhai::Engine) {
     engine.register_fn("ts_p95", |points: Array| -> Dynamic {
         let mut vals = extract_values(&points);
         eprintln!("DEBUG ts_p95 extracted values: {:?}", vals);
-        if vals.is_empty() { return Dynamic::UNIT; }
+        if vals.is_empty() {
+            return Dynamic::UNIT;
+        }
         vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
         Dynamic::from(quantile_sorted(&vals, 0.95))
     });
@@ -166,15 +197,21 @@ pub fn register(engine: &mut rhai::Engine) {
     engine.register_fn("ts_p99", |points: Array| -> Dynamic {
         let mut vals = extract_values(&points);
         eprintln!("DEBUG ts_p99 extracted values: {:?}", vals);
-        if vals.is_empty() { return Dynamic::UNIT; }
+        if vals.is_empty() {
+            return Dynamic::UNIT;
+        }
         vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
         Dynamic::from(quantile_sorted(&vals, 0.99))
     });
 
     // ts_delta - returns array (series operator)
     engine.register_fn("ts_delta", |points: Array| -> Dynamic {
-        let Ok(p) = parse_points(&points) else { return Dynamic::from(Array::new()); };
-        if p.len() < 2 { return Dynamic::from(Array::new()); }
+        let Ok(p) = parse_points(&points) else {
+            return Dynamic::from(Array::new());
+        };
+        if p.len() < 2 {
+            return Dynamic::from(Array::new());
+        }
         let mut out = Array::new();
         for i in 1..p.len() {
             let d = p[i].1 - p[i - 1].1;
@@ -185,16 +222,23 @@ pub fn register(engine: &mut rhai::Engine) {
 
     // ts_pct_change - returns array (series operator)
     engine.register_fn("ts_pct_change", |points: Array| -> Dynamic {
-        let Ok(p) = parse_points(&points) else { return Dynamic::from(Array::new()); };
-        if p.len() < 2 { return Dynamic::from(Array::new()); }
+        let Ok(p) = parse_points(&points) else {
+            return Dynamic::from(Array::new());
+        };
+        if p.len() < 2 {
+            return Dynamic::from(Array::new());
+        }
         let mut out = Array::new();
         for i in 1..p.len() {
             let prev = p[i - 1].1;
             let curr = p[i].1;
-            let pct = if prev.abs() < f64::EPSILON { 0.0 } else { (curr - prev) / prev.abs() };
+            let pct = if prev.abs() < f64::EPSILON {
+                0.0
+            } else {
+                (curr - prev) / prev.abs()
+            };
             out.push(point_map(p[i].0, pct));
         }
         Dynamic::from(out)
     });
 }
-

@@ -12,9 +12,10 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error as StdError;
-use std::path::Path;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
+use config_crate::FileFormat;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -381,7 +382,11 @@ impl GossipConfig {
     /// Seed đã tách thành danh sách URL.
     #[must_use]
     pub fn seed_urls(&self) -> Vec<&str> {
-        self.seeds.split(',').map(str::trim).filter(|s| !s.is_empty()).collect()
+        self.seeds
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect()
     }
 
     /// Cấu hình sau khi áp env override: `OPSENSE_GOSSIP_<FIELD>` (tên field viết
@@ -399,7 +404,9 @@ impl GossipConfig {
         let mut out = self.clone();
         const PREFIX: &str = "OPSENSE_GOSSIP_";
         for (env_key, value) in std::env::vars() {
-            let Some(field) = env_key.strip_prefix(PREFIX) else { continue };
+            let Some(field) = env_key.strip_prefix(PREFIX) else {
+                continue;
+            };
             if value.is_empty() {
                 continue;
             }
@@ -459,7 +466,9 @@ impl GossipConfig {
             return Err(ConfigError::Invalid("gossip.tick_secs must be > 0".into()));
         }
         if self.suspect_secs == 0 {
-            return Err(ConfigError::Invalid("gossip.suspect_secs must be > 0".into()));
+            return Err(ConfigError::Invalid(
+                "gossip.suspect_secs must be > 0".into(),
+            ));
         }
         if self.dead_secs < self.suspect_secs {
             return Err(ConfigError::Invalid(format!(
@@ -484,8 +493,55 @@ pub struct RaftConfig {
     pub pipeline: String,
 }
 
+/// Module động nạp lúc boot — xem [`Config::modules`].
+///
+/// Trước đây nằm ở `crates/opsense/src/modules_config.rs` đọc `modules.toml`
+/// riêng, và **không có validate**: hai `[[module]]` cùng `id` bị
+/// `HashMap::insert` ghi đè im lặng, còn `path` trỏ `.so` không tồn tại làm
+/// `serve` crash-loop lúc khởi động. Gộp vào đây để dùng chung
+/// [`Config::validate`] — lỗi nổi trước khi serve cố `dlopen`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModuleConfig {
+    /// Định danh module. **Cùng lúc** là tên symbol init:
+    /// `opsense_module_<id>_init` (`-` → `_`).
+    ///
+    /// Nên chỉ chứa `[a-zA-Z0-9_-]` — char khác sinh symbol không đoán được.
+    pub id: String,
 
-/// Cấu hình Prometheus /metrics endpoint.
+    /// `true` nếu module được đăng ký bằng `register_builtin` (link tĩnh).
+    /// Loader chỉ coi `false` là `.so` cần `dlopen`.
+    #[serde(default)]
+    pub builtin: bool,
+
+    /// `false` thì loader bỏ qua. Mặc định `true`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Đường dẫn `.so` — bắt buộc với module không builtin.
+    ///
+    /// Tuyệt đối nếu bắt đầu bằng `/`; không thì tương đối thư mục chứa file
+    /// config (trong container = `/app`, xem `docker-compose.yml`).
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ModuleConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            builtin: false,
+            enabled: true,
+            path: None,
+        }
+    }
+}
+
+/// Cấu hình tầng raft — xem [`crate::config::Config::raft`].
 ///
 /// Mặc định tắt (enabled = false) để không đổi hành vi hiện có.
 /// Khi bật, expose /metrics trên HTTP server (route /metrics).
@@ -586,14 +642,35 @@ pub struct Config {
     /// Prometheus /metrics endpoint configuration.
     #[serde(default)]
     pub prometheus: PrometheusConfig,
-}
 
+    /// Module động nạp lúc boot — xem [`Config::enabled_modules`].
+    #[serde(default)]
+    pub modules: Vec<ModuleConfig>,
+}
 
 impl Config {
     /// Load and validate a TOML config from `path`.
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+    ///
+    /// Returns a tuple of `(Config, config_dir)` where `config_dir` is the
+    /// directory containing the config file. This is needed to resolve
+    /// relative `.so` paths in module configuration.
+    pub fn load(path: &Path) -> Result<(Self, PathBuf), ConfigError> {
+        let config_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         let raw = config_crate::Config::builder()
             .add_source(config_crate::File::from(path.to_path_buf()))
+            .build()?;
+        let cfg: Config = raw.try_deserialize()?;
+        cfg.validate()?;
+        Ok((cfg, config_dir))
+    }
+
+    /// Parse a TOML config from a string.
+    ///
+    /// This is useful for testing where you want to create a config from a string
+    /// without writing to a file.
+    pub fn parse(toml: &str) -> Result<Self, ConfigError> {
+        let raw = config_crate::Config::builder()
+            .add_source(config_crate::File::from_str(toml, FileFormat::Toml))
             .build()?;
         let cfg: Config = raw.try_deserialize()?;
         cfg.validate()?;
@@ -616,7 +693,9 @@ impl Config {
             ));
         }
         if self.storage.backend.trim().is_empty() {
-            return Err(ConfigError::Invalid("storage.backend must not be empty".into()));
+            return Err(ConfigError::Invalid(
+                "storage.backend must not be empty".into(),
+            ));
         }
         if self.storage.block_secs == 0 {
             return Err(ConfigError::Invalid(
@@ -672,6 +751,44 @@ impl Config {
                 ));
             }
         }
+
+        // ── modules ──
+        let mut seen_ids = std::collections::HashSet::new();
+        for m in &self.modules {
+            // id rỗng: symbol `opsense_module__init` — không ai đặt tên này cả,
+            // nhưng đủ để loader tìm symbol sai rồi trả lỗi khó hiểu.
+            if m.id.is_empty() {
+                return Err(ConfigError::Invalid("modules.id must not be empty".into()));
+            }
+
+            // Char lạ trong id → symbol `opsense_module_<id>_init` không dựng được.
+            // Chỉ cho `[a-zA-Z0-9_-]`, mọi thứ khác Viết Hoa có thể là lỗi ý.
+            if !m
+                .id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(ConfigError::Invalid(format!(
+                    "modules.id {:?} must only contain [a-zA-Z0-9_-] — có char khác nên symbol `opsense_module_{}_init` không đọc được",
+                    m.id, m.id
+                )));
+            }
+
+            // Trùng id: `HashMap::insert` ghi đè im lặng, deploy tưởng nạp N module.
+            if !seen_ids.insert(&m.id) {
+                return Err(ConfigError::Invalid(format!(
+                    "modules.id {:?} appears more than once — loader dùng HashMap nên module sau ghi đè module trước, deploy tưởng nạp cả hai",
+                    m.id
+                )));
+            }
+
+            // Module động PHẢI có `.so` để `dlopen`.
+            if !m.builtin && m.path.as_ref().is_none_or(|p| p.trim().is_empty()) {
+                let msg = format!("modules.{}.path must be set for non-builtin module", m.id);
+                return Err(ConfigError::Invalid(msg));
+            }
+        }
+
         // Kiểm tra Prometheus config.
         if self.prometheus.enabled {
             if self.prometheus.path.trim().is_empty() {
@@ -686,7 +803,8 @@ impl Config {
             }
             if self.prometheus.max_series == 0 {
                 return Err(ConfigError::Invalid(
-                    "prometheus.max_series must be > 0 (use a positive integer, 0 disables limit)".into(),
+                    "prometheus.max_series must be > 0 (use a positive integer, 0 disables limit)"
+                        .into(),
                 ));
             }
             if self.prometheus.default_window_secs == 0 {
@@ -696,9 +814,17 @@ impl Config {
             }
             // Validate signals in station targets
             let valid_signals: std::collections::HashSet<&str> = [
-                "raw", "summary", "utilization", "saturation", "rate",
-                "errors", "duration", "order",
-            ].into_iter().collect();
+                "raw",
+                "summary",
+                "utilization",
+                "saturation",
+                "rate",
+                "errors",
+                "duration",
+                "order",
+            ]
+            .into_iter()
+            .collect();
             for st in &self.prometheus.stations {
                 if st.station.trim().is_empty() {
                     return Err(ConfigError::Invalid(
@@ -721,6 +847,39 @@ impl Config {
         // không phải lúc node đã vào mesh.
         self.gossip.resolved()?.validate()?;
         Ok(())
+    }
+
+    /// Danh sách module đáng nạp: `enabled` và (nếu có) trong allowlist
+    /// `OPSENSE_MODULES` (phân tách bằng dấu phẩy, id không trong danh sách
+    /// bị bỏ). Env rỗng ⇒ không lọc.
+    #[must_use]
+    pub fn enabled_modules(&self) -> Vec<&ModuleConfig> {
+        let allowlist: Option<Vec<String>> = std::env::var("OPSENSE_MODULES")
+            .ok()
+            .map(|s| s.split(',').map(str::trim).map(String::from).collect());
+
+        self.modules
+            .iter()
+            .filter(|m| m.enabled)
+            .filter(|m| allowlist.as_ref().is_none_or(|al| al.contains(&m.id)))
+            .collect()
+    }
+
+    /// Đường dẫn tuyệt đối tới `.so` của `m`, đã resolve theo thư mục config.
+    ///
+    /// Trả `None` khi module builtin (không cần `.so`) hoặc không khai `path`.
+    #[must_use]
+    pub fn module_path(&self, m: &ModuleConfig, config_dir: &Path) -> Option<PathBuf> {
+        if m.builtin {
+            return None;
+        }
+        let p = m.path.as_ref()?;
+        let path = Path::new(p);
+        if path.is_absolute() {
+            Some(path.to_path_buf())
+        } else {
+            Some(config_dir.join(path))
+        }
     }
 
     /// `[gossip]` sau khi áp `OPSENSE_GOSSIP_<FIELD>` — thứ tầng vận chuyển dùng,
@@ -749,7 +908,7 @@ impl Config {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use config_crate::FileFormat;
 
@@ -774,7 +933,10 @@ env_name = "prod"
     fn parses_attributes() {
         let cfg = sample();
         assert_eq!(cfg.attributes.get("dc").map(String::as_str), Some("hcm"));
-        assert_eq!(cfg.attributes.get("env_name").map(String::as_str), Some("prod"));
+        assert_eq!(
+            cfg.attributes.get("env_name").map(String::as_str),
+            Some("prod")
+        );
     }
 
     #[test]
@@ -812,9 +974,9 @@ s3_flush_interval_secs = 15
             .add_source(config_crate::File::from_str(toml, FileFormat::Toml))
             .build()
             .unwrap();
-        let err = raw.try_deserialize::<Config>().expect_err(
-            "key sai cấp phải bị từ chối, không được bỏ qua im lặng",
-        );
+        let err = raw
+            .try_deserialize::<Config>()
+            .expect_err("key sai cấp phải bị từ chối, không được bỏ qua im lặng");
         assert!(
             err.to_string().contains("s3_flush_interval_secs"),
             "lỗi phải nêu đúng tên key, thực tế: {err}"
@@ -839,12 +1001,13 @@ prefix = "p"
             .add_source(config_crate::File::from_str(toml, FileFormat::Toml))
             .build()
             .unwrap();
-        let cfg: Config = raw
-            .try_deserialize()
-            .expect("đặt đúng cấp phải parse được");
+        let cfg: Config = raw.try_deserialize().expect("đặt đúng cấp phải parse được");
         assert_eq!(cfg.storage.s3_flush_interval_secs, 15);
         assert_eq!(cfg.storage.s3_snapshot_interval_secs, 60);
-        assert_eq!(cfg.storage.s3.as_ref().map(|s| s.bucket.as_str()), Some("b"));
+        assert_eq!(
+            cfg.storage.s3.as_ref().map(|s| s.bucket.as_str()),
+            Some("b")
+        );
     }
 
     #[test]
@@ -875,11 +1038,11 @@ prefix = "p"
     /// env đều phải khoá lại — không thì đọc trúng giá trị của nhau và fail
     /// ngẫu nhiên (đã gặp: `dead < suspect` không báo lỗi vì bị test khác set
     /// `SUSPECT_SECS`).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Gom mọi env `OPSENSE_GOSSIP_*` vào scope test rồi xoá, kể cả khi assert
     /// panic — không thì test sau đọc trúng giá trị rò rỉ.
-    struct GossipEnv(Vec<String>);
+    pub(crate) struct GossipEnv(Vec<String>);
 
     impl GossipEnv {
         fn set(pairs: &[(&str, &str)]) -> Self {
@@ -902,7 +1065,7 @@ prefix = "p"
         }
     }
 
-    fn gossip_toml(extra: &str) -> Config {
+    pub(crate) fn gossip_toml(extra: &str) -> Config {
         let toml = format!(
             r#"
 [engine]
@@ -1031,7 +1194,9 @@ own_url = "http://node-a:8080"
 token = "s3cret"
 "#,
         );
-        let err = cfg.validate().expect_err("node_id có khoảng trắng phải báo");
+        let err = cfg
+            .validate()
+            .expect_err("node_id có khoảng trắng phải báo");
         assert!(err.to_string().contains("node_id"), "{err}");
     }
 
@@ -1080,7 +1245,10 @@ quorum = 2
             ("OPSENSE_GOSSIP_QUORUM", ""),
         ]);
         let g = cfg.resolved_gossip().expect("env rỗng không phải lỗi");
-        assert_eq!(g.node_id, "node-file", "env rỗng không được xoá giá trị file");
+        assert_eq!(
+            g.node_id, "node-file",
+            "env rỗng không được xoá giá trị file"
+        );
         assert_eq!(g.quorum, 2);
     }
 
@@ -1179,10 +1347,7 @@ backend = "memory"
             matches!(other, Cow::Borrowed(_)),
             "không override thì không được copy"
         );
-        assert!(matches!(
-            cfg.storage.for_station("grid"),
-            Cow::Owned(_)
-        ));
+        assert!(matches!(cfg.storage.for_station("grid"), Cow::Owned(_)));
     }
 
     /// Key sai chính tả trong override phải nổi lúc parse. Nếu serde bỏ qua
@@ -1207,9 +1372,9 @@ retention_sec = 0
             ))
             .build()
             .unwrap();
-        let err = raw.try_deserialize::<Config>().expect_err(
-            "key sai trong override phải bị từ chối, không được bỏ qua im lặng",
-        );
+        let err = raw
+            .try_deserialize::<Config>()
+            .expect_err("key sai trong override phải bị từ chối, không được bỏ qua im lặng");
         assert!(
             err.to_string().contains("retention_sec"),
             "lỗi phải nêu đúng tên key, thực tế: {err}"
@@ -1329,7 +1494,9 @@ backend = "redis"
 "#,
         )
         .unwrap();
-        let err = cfg.validate().expect_err("redis mà không DSN thì phải bị chặn");
+        let err = cfg
+            .validate()
+            .expect_err("redis mà không DSN thì phải bị chặn");
         assert!(err.to_string().contains("OPSENSE_REDIS_URL"), "lỗi: {err}");
     }
 
@@ -1361,7 +1528,10 @@ backend = "redis"
         };
         // Không có env ⇒ vẫn rỗng: không đoán "localhost", vì đoán sai host là
         // mất state chứ không phải chỉ chậm.
-        assert!(r.resolved_url().is_empty(), "không có env thì không đoán host");
+        assert!(
+            r.resolved_url().is_empty(),
+            "không có env thì không đoán host"
+        );
 
         let _env = RedisUrlEnv::set("redis://from-env:6379");
         assert_eq!(r.resolved_url(), "redis://from-env:6379");
@@ -1395,7 +1565,9 @@ backend = "redis"
 "#,
         )
         .unwrap();
-        let err = cfg.validate().expect_err("station redis thiếu DSN phải bị chặn");
+        let err = cfg
+            .validate()
+            .expect_err("station redis thiếu DSN phải bị chặn");
         assert!(
             err.to_string().contains("storage.stations.grid.backend"),
             "lỗi: {err}"
@@ -1452,5 +1624,200 @@ port = 6379
         let msg = err.to_string();
         assert!(msg.contains("unknown field"), "lỗi: {msg}");
         assert!(msg.contains("storage.redis"), "lỗi: {msg}");
+    }
+
+    // ── modules: validation tests ────────────────────────────
+
+    #[allow(dead_code)]
+    fn modules_toml(extra: &str) -> Config {
+        let toml = format!(
+            r#"
+[engine]
+poll_interval_seconds = 60
+{extra}
+"#
+        );
+        let raw = config_crate::Config::builder()
+            .add_source(config_crate::File::from_str(&toml, FileFormat::Toml))
+            .build()
+            .unwrap();
+        raw.try_deserialize().expect("parse")
+    }
+
+    #[test]
+    fn modules_default_empty_and_backward_compatible() {
+        // Config hiện có (không khai [[modules]]) vẫn parse + validate.
+        let cfg = gossip_toml("").clone();
+        assert!(cfg.modules.is_empty(), "default phải mảng rỗng");
+        assert!(cfg.enabled_modules().is_empty());
+        assert!(
+            cfg.validate().is_ok(),
+            "config không khai module vẫn hợp lệ"
+        );
+    }
+
+    #[test]
+    fn modules_parse_and_filter() {
+        let cfg = modules_toml(
+            r#"
+[[modules]]
+id = "repl"
+builtin = true
+
+[[modules]]
+id = "xt-pnl"
+path = "modules/xt-pnl.so"
+"#,
+        );
+        assert_eq!(cfg.modules.len(), 2);
+        assert!(cfg.enabled_modules().iter().any(|m| m.id == "xt-pnl"));
+    }
+
+    #[test]
+    fn duplicate_module_id_is_rejected() {
+        let cfg = modules_toml(
+            r#"
+[[modules]]
+id = "repl"
+builtin = true
+
+[[modules]]
+id = "repl"
+builtin = false
+path = "repl.so"
+"#,
+        );
+        let err = cfg
+            .validate()
+            .expect_err("duplicate module id should be rejected");
+        assert!(err.to_string().contains("modules.id"));
+    }
+
+    #[test]
+    fn empty_module_id_is_rejected() {
+        let cfg = modules_toml(
+            r#"
+[[modules]]
+id = ""
+builtin = false
+path = "test.so"
+"#,
+        );
+        let err = cfg
+            .validate()
+            .expect_err("empty module id should be rejected");
+        assert!(err.to_string().contains("modules.id must not be empty"));
+    }
+
+    #[test]
+    fn module_id_with_bad_char_is_rejected() {
+        let cfg = modules_toml(
+            r#"
+[[modules]]
+id = "my module"
+builtin = false
+path = "test.so"
+"#,
+        );
+        let err = cfg
+            .validate()
+            .expect_err("module id with bad char should be rejected");
+        assert!(err.to_string().contains("modules.id"));
+    }
+
+    #[test]
+    fn dynamic_module_without_path_is_rejected() {
+        let cfg = modules_toml(
+            r#"
+[[modules]]
+id = "xt-pnl"
+builtin = false
+"#,
+        );
+        let err = cfg
+            .validate()
+            .expect_err("dynamic module without path should be rejected");
+        assert!(
+            err.to_string()
+                .contains("modules.xt-pnl.path must be set for non-builtin module")
+        );
+    }
+
+    #[test]
+    fn module_enabled_false_is_skipped() {
+        let cfg = modules_toml(
+            r#"
+[[modules]]
+id = "repl"
+builtin = true
+
+[[modules]]
+id = "xt-pnl"
+builtin = false
+path = "xt-pnl.so"
+enabled = false
+"#,
+        );
+        let enabled: Vec<_> = cfg
+            .enabled_modules()
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(enabled, vec!["repl"]);
+    }
+
+    #[test]
+    fn module_allowlist_env_filters() {
+        let cfg = modules_toml(
+            r#"
+[[modules]]
+id = "a"
+builtin = true
+enabled = true
+
+[[modules]]
+id = "b"
+builtin = false
+path = "b.so"
+enabled = true
+"#,
+        );
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = GossipEnv::set(&[("OPSENSE_MODULES", "a")]);
+        let enabled: Vec<_> = cfg
+            .enabled_modules()
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(enabled, vec!["a"]);
+    }
+
+    #[test]
+    fn module_path_resolves_relative_to_config_dir() {
+        let cfg = modules_toml(
+            r#"
+[[modules]]
+id = "test"
+builtin = false
+path = "modules/test.so"
+"#,
+        );
+        let path = Config::module_path(&cfg, &cfg.modules[0], std::path::Path::new("/app"));
+        assert_eq!(path, Some(std::path::PathBuf::from("/app/modules/test.so")));
+
+        // Absolute path should be kept as-is
+        let cfg2 = Config::parse(
+            r#"
+[engine]
+poll_interval_seconds = 60
+[[modules]]
+id = "abs"
+builtin = false
+path = "/absolute/path.so"
+"#,
+        )
+        .unwrap();
+        let path = Config::module_path(&cfg2, &cfg2.modules[0], std::path::Path::new("/app"));
+        assert_eq!(path, Some(std::path::PathBuf::from("/absolute/path.so")));
     }
 }

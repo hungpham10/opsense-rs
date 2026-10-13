@@ -13,9 +13,7 @@ use axum::{
     routing::any,
 };
 
-use opsense_ffi::{
-    HttpMethod, HttpRequest, HttpResponse, Manifest, OpsenseModule, TenantServices,
-};
+use opsense_ffi::{HttpMethod, HttpRequest, HttpResponse, Manifest, OpsenseModule, TenantServices};
 
 #[cfg(feature = "dynamic-modules")]
 use opsense_ffi::ModuleError;
@@ -30,11 +28,7 @@ use opsense_ffi::{HostServices, ModuleV1};
 use crate::api::AppState;
 
 #[cfg(feature = "dynamic-modules")]
-use {
-    crate::modules_config::ModulesConfig,
-    opsense_ffi::ffi::ModuleInitFn,
-    std::path::Path,
-};
+use {opsense_core::Config, opsense_ffi::ffi::ModuleInitFn, std::path::Path};
 
 /// Registry of loaded API modules.
 pub struct ApiModuleRegistry {
@@ -60,12 +54,14 @@ impl ApiModuleRegistry {
         self
     }
 
-    /// Load dynamic modules from the configured directory.
+    /// Load dynamic modules khai báo trong `[[modules]]` (xem [`Config::modules`]).
+    ///
+    /// `config_dir` là thư mục chứa file config — `path` tương đối resolve theo nó.
     #[cfg(feature = "dynamic-modules")]
     pub fn load_dynamic(
         &mut self,
-        module_dir: &Path,
-        cfg: &ModulesConfig,
+        cfg: &Config,
+        config_dir: &Path,
         host_services: Arc<dyn HostServices>,
     ) -> Result<(), ModuleError> {
         use libloading::Library;
@@ -76,12 +72,14 @@ impl ApiModuleRegistry {
                 continue;
             }
 
-            let path = cfg.dynamic_path(module_dir, mcfg)
-                .ok_or_else(|| ModuleError::InitFailed(format!("no path for dynamic module {}", mcfg.id)))?;
+            let path = cfg.module_path(mcfg, config_dir).ok_or_else(|| {
+                ModuleError::InitFailed(format!("no path for dynamic module {}", mcfg.id))
+            })?;
 
             tracing::info!(module = %mcfg.id, path = %path.display(), "loading dynamic module");
-            let lib = unsafe { Library::new(&path) }
-                .map_err(|e| ModuleError::InitFailed(format!("dlopen {}: {}", path.display(), e)))?;
+            let lib = unsafe { Library::new(&path) }.map_err(|e| {
+                ModuleError::InitFailed(format!("dlopen {}: {}", path.display(), e))
+            })?;
 
             // Symbol name: opsense_module_<id>_init (with - replaced by _)
             let sym_name = format!("opsense_module_{}_init", mcfg.id.replace('-', "_"));
@@ -94,7 +92,10 @@ impl ApiModuleRegistry {
             // Initialize module
             let module_v1 = unsafe { init_fn(&host_v1) };
             if module_v1.is_null() {
-                return Err(ModuleError::InitFailed(format!("init returned null for {}", mcfg.id)));
+                return Err(ModuleError::InitFailed(format!(
+                    "init returned null for {}",
+                    mcfg.id
+                )));
             }
 
             // Verify ABI version
@@ -146,7 +147,12 @@ impl ApiModuleRegistry {
 
             // Mount a wildcard handler at the module prefix
             let module_router = Router::new()
-                .route("/{*path}", any(move |req| module_route_handler(State(state_for_handler), req, module.clone())))
+                .route(
+                    "/{*path}",
+                    any(move |req| {
+                        module_route_handler(State(state_for_handler), req, module.clone())
+                    }),
+                )
                 .with_state(state_for_router);
 
             router = router.nest(&prefix, module_router);
@@ -157,7 +163,9 @@ impl ApiModuleRegistry {
 }
 
 impl Default for ApiModuleRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Tra `manifest.routes[].id` cho `(method, path)`.
@@ -214,16 +222,32 @@ async fn module_route_handler(
         cache: cache_backend,
     };
     let method = HttpMethod::from_axum(req.method());
-    let path = req.uri().path().trim_start_matches(&manifest.prefix).to_string();
-    let path = if path.is_empty() { "/".to_string() } else { path };
+    let path = req
+        .uri()
+        .path()
+        .trim_start_matches(&manifest.prefix)
+        .to_string();
+    let path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        path
+    };
 
-    let query: Vec<_> = req.uri().query()
+    let query: Vec<_> = req
+        .uri()
+        .query()
         .map(|q| form_urlencoded::parse(q.as_bytes()).into_owned().collect())
         .unwrap_or_default();
 
-    let headers: Vec<_> = req.headers()
+    let headers: Vec<_> = req
+        .headers()
         .iter()
-        .map(|(k, v)| (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string()))
+        .map(|(k, v)| {
+            (
+                k.as_str().to_lowercase(),
+                v.to_str().unwrap_or("").to_string(),
+            )
+        })
         .collect();
 
     let body = axum::body::to_bytes(req.into_body(), usize::MAX)
@@ -276,7 +300,11 @@ impl OpsenseModule for DynamicModuleWrapper {
         serde_json::from_str(json).unwrap_or_default()
     }
 
-    fn route(&self, req: HttpRequest, services: &TenantServices) -> opsense_ffi::BoxFut<'static, Result<HttpResponse, ModuleError>> {
+    fn route(
+        &self,
+        req: HttpRequest,
+        services: &TenantServices,
+    ) -> opsense_ffi::BoxFut<'static, Result<HttpResponse, ModuleError>> {
         let req_json = serde_json::to_string(&req).unwrap_or_default();
         let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
         let handle = self.vtable.state;
@@ -287,22 +315,30 @@ impl OpsenseModule for DynamicModuleWrapper {
             let route_id = std::ffi::CString::new(req.route_id.clone()).unwrap_or_default();
             let req_c = std::ffi::CString::new(req_json).unwrap_or_default();
             let resp_ptr = unsafe {
-                ((*vtable).handle)(handle, services_ptr as *const TenantServices, route_id.as_ptr(), req_c.as_ptr())
+                ((*vtable).handle)(
+                    handle,
+                    services_ptr as *const TenantServices,
+                    route_id.as_ptr(),
+                    req_c.as_ptr(),
+                )
             };
             if resp_ptr.is_null() {
                 return Err(ModuleError::Internal("null response from plugin".into()));
             }
             let resp_json = unsafe { std::ffi::CStr::from_ptr(resp_ptr).to_str().unwrap_or("{}") };
-            let resp: Result<HttpResponse, ModuleError> =
-                serde_json::from_str(resp_json).map_err(|e| {
-                    ModuleError::Internal(format!("response parse: {e}"))
-                });
+            let resp: Result<HttpResponse, ModuleError> = serde_json::from_str(resp_json)
+                .map_err(|e| ModuleError::Internal(format!("response parse: {e}")));
             unsafe { ((*vtable).free)(resp_ptr) };
             resp
         })
     }
 
-    fn tool(&self, name: String, args: serde_json::Value, services: &TenantServices) -> opsense_ffi::BoxFut<'static, Result<String, ModuleError>> {
+    fn tool(
+        &self,
+        name: String,
+        args: serde_json::Value,
+        services: &TenantServices,
+    ) -> opsense_ffi::BoxFut<'static, Result<String, ModuleError>> {
         let req_json = serde_json::to_string(&args).unwrap_or_default();
         let vtable: usize = &*self.vtable as *const ModuleV1 as usize;
         let handle = self.vtable.state;
@@ -313,18 +349,28 @@ impl OpsenseModule for DynamicModuleWrapper {
             let name_c = std::ffi::CString::new(name).unwrap_or_default();
             let args_c = std::ffi::CString::new(req_json).unwrap_or_default();
             let resp_ptr = unsafe {
-                ((*vtable).handle)(handle, services_ptr as *const TenantServices, name_c.as_ptr(), args_c.as_ptr())
+                ((*vtable).handle)(
+                    handle,
+                    services_ptr as *const TenantServices,
+                    name_c.as_ptr(),
+                    args_c.as_ptr(),
+                )
             };
             if resp_ptr.is_null() {
                 return Err(ModuleError::Internal("null response from plugin".into()));
             }
             let resp_json = unsafe { std::ffi::CStr::from_ptr(resp_ptr).to_str().unwrap_or("{}") };
-            let result: Result<String, ModuleError> = match serde_json::from_str::<serde_json::Value>(resp_json) {
-                Ok(v) if v.get("text").is_some() => Ok(v["text"].as_str().unwrap_or("").to_string()),
-                Ok(v) if v.get("error").is_some() => Err(ModuleError::Internal(v["message"].as_str().unwrap_or("tool error").to_string())),
-                Ok(v) => Ok(v.to_string()),
-                Err(e) => Err(ModuleError::Internal(format!("tool response parse: {e}"))),
-            };
+            let result: Result<String, ModuleError> =
+                match serde_json::from_str::<serde_json::Value>(resp_json) {
+                    Ok(v) if v.get("text").is_some() => {
+                        Ok(v["text"].as_str().unwrap_or("").to_string())
+                    }
+                    Ok(v) if v.get("error").is_some() => Err(ModuleError::Internal(
+                        v["message"].as_str().unwrap_or("tool error").to_string(),
+                    )),
+                    Ok(v) => Ok(v.to_string()),
+                    Err(e) => Err(ModuleError::Internal(format!("tool response parse: {e}"))),
+                };
             unsafe { ((*vtable).free)(resp_ptr) };
             result
         })
@@ -363,7 +409,11 @@ fn build_host_v1() -> opsense_ffi::HostV1 {
 
     // Return a dummy HostV1 with null function pointers - should never be called
     // when the feature is disabled since load_dynamic won't be called.
-    unsafe extern "C" fn dummy_call(_: *mut c_void, _: *const c_char, _: *const c_char) -> *mut c_char {
+    unsafe extern "C" fn dummy_call(
+        _: *mut c_void,
+        _: *const c_char,
+        _: *const c_char,
+    ) -> *mut c_char {
         std::ptr::null_mut()
     }
     unsafe extern "C" fn dummy_log(_: *mut c_void, _: u32, _: *const c_char, _: *const c_char) {}
@@ -396,12 +446,15 @@ unsafe extern "C" fn host_call_ffi(
 
     let resp_json = match out {
         Ok(v) => serde_json::to_string(&v).unwrap_or_else(|e| {
-            serde_json::json!({ "error": "internal", "message": format!("serialize: {e}") }).to_string()
+            serde_json::json!({ "error": "internal", "message": format!("serialize: {e}") })
+                .to_string()
         }),
         Err(e) => serde_json::json!({ "error": "internal", "message": format!("{e}") }).to_string(),
     };
 
-    std::ffi::CString::new(resp_json).unwrap_or_default().into_raw()
+    std::ffi::CString::new(resp_json)
+        .unwrap_or_default()
+        .into_raw()
 }
 
 #[cfg(feature = "dynamic-modules")]
@@ -412,7 +465,11 @@ unsafe extern "C" fn host_log_ffi(
     msg: *const c_char,
 ) {
     let msg = unsafe { std::ffi::CStr::from_ptr(msg).to_str().unwrap_or("") };
-    let target = unsafe { std::ffi::CStr::from_ptr(target).to_str().unwrap_or("module") };
+    let target = unsafe {
+        std::ffi::CStr::from_ptr(target)
+            .to_str()
+            .unwrap_or("module")
+    };
     match level {
         0 => tracing::error!("{} {}", target, msg),
         1 => tracing::warn!("{} {}", target, msg),
@@ -428,7 +485,9 @@ use std::ffi::c_char;
 #[cfg(feature = "dynamic-modules")]
 unsafe extern "C" fn host_free_ffi(s: *mut c_char) {
     if !s.is_null() {
-        unsafe { drop(std::ffi::CString::from_raw(s)); }
+        unsafe {
+            drop(std::ffi::CString::from_raw(s));
+        }
     }
 }
 
@@ -473,16 +532,16 @@ mod tests {
     #[test]
     fn route_id_falls_back_to_path() {
         let m = repl_manifest();
-        assert_eq!(resolve_route_id(&m, HttpMethod::Post, "/khong-co"), "/khong-co");
+        assert_eq!(
+            resolve_route_id(&m, HttpMethod::Post, "/khong-co"),
+            "/khong-co"
+        );
     }
 
     /// Method lệch vẫn khớp theo path — module dùng `any` cần điều này.
     #[test]
     fn route_id_matches_path_even_when_method_differs() {
         let m = repl_manifest();
-        assert_eq!(
-            resolve_route_id(&m, HttpMethod::Get, "/graphql"),
-            "graphql"
-        );
+        assert_eq!(resolve_route_id(&m, HttpMethod::Get, "/graphql"), "graphql");
     }
 }

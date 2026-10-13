@@ -18,7 +18,10 @@ fn gossip(node_id: &str) -> Gossip {
 #[test]
 fn join_registers_the_newcomer_and_roster_includes_the_seed() {
     let mut seed = gossip("node-a");
-    assert!(seed.nodes().is_empty(), "node không tự làm peer của chính mình");
+    assert!(
+        seed.nodes().is_empty(),
+        "node không tự làm peer của chính mình"
+    );
 
     let roster = seed.handle_join("http://node-z", "node-z", T0);
     assert_eq!(roster.len(), 2, "roster phải gồm cả seed lẫn node mới");
@@ -55,14 +58,20 @@ fn detection_never_declares_dead_on_a_single_timeout() {
     a.add_peer("http://node-c", "node-c", T0);
 
     a.tick_suspects(0, T0 + 1_000);
-    assert!(a.nodes().iter().all(|n| n.alive || n.suspect), "chưa node nào bị coi là chết");
+    assert!(
+        a.nodes().iter().all(|n| n.alive || n.suspect),
+        "chưa node nào bị coi là chết"
+    );
     assert!(a.dead_peers().is_empty());
     // Suspect vẫn phải được ping — một lần trả lời là xoá nghi ngờ.
     assert_eq!(a.probe_targets().len(), 2);
 
     // Lời xác nhận của peer cũng không được vượt thời gian.
     a.report_missing("node-c", "node-b");
-    assert!(a.dead_peers().is_empty(), "xác nhận không được bỏ qua thời gian im lặng");
+    assert!(
+        a.dead_peers().is_empty(),
+        "xác nhận không được bỏ qua thời gian im lặng"
+    );
 
     a.tick_reap(30_000, T0 + 31_000);
     assert_eq!(a.dead_peers(), vec!["node-b", "node-c"]);
@@ -77,9 +86,16 @@ fn any_success_reclears_suspicion_so_a_flapping_network_stays_quiet() {
     assert!(a.nodes().iter().any(|n| n.suspect));
 
     a.mark_alive("http://node-b", "node-b", T0 + 1_000);
-    let n = a.nodes().into_iter().find(|n| n.node_id == "node-b").unwrap();
+    let n = a
+        .nodes()
+        .into_iter()
+        .find(|n| n.node_id == "node-b")
+        .unwrap();
     assert!(n.alive && !n.suspect);
-    assert!(!a.is_settled(T0 + 1_000, 10), "vừa xác nhận lại thì view chưa yên");
+    assert!(
+        !a.is_settled(T0 + 1_000, 10),
+        "vừa xác nhận lại thì view chưa yên"
+    );
 }
 
 #[test]
@@ -89,13 +105,19 @@ fn indirect_probe_only_asks_peers_we_still_trust() {
     a.add_peer("http://node-c", "node-c", T0);
     a.add_peer("http://node-d", "node-d", T0);
     a.tick_suspects(0, T0 + 1_000);
-    assert!(a.indirect_probe_targets().is_empty(), "cả ba đều nghi thì không hỏi ai");
+    assert!(
+        a.indirect_probe_targets().is_empty(),
+        "cả ba đều nghi thì không hỏi ai"
+    );
 
     a.mark_alive("http://node-d", "node-d", T0 + 1_000);
     let pairs = a.indirect_probe_targets();
     assert!(pairs.contains(&("node-d", "node-b")));
     assert!(pairs.contains(&("node-d", "node-c")));
-    assert!(!pairs.iter().any(|(_, s)| *s == "node-d"), "không hỏi về chính mình");
+    assert!(
+        !pairs.iter().any(|(_, s)| *s == "node-d"),
+        "không hỏi về chính mình"
+    );
 }
 
 /// Info là *quan sát* nên hợp nhất LWW là đủ, và nó phải hội tử bất kể thứ tự
@@ -105,9 +127,18 @@ fn info_converges_regardless_of_message_order() {
     let mut a = gossip("node-a");
     let mut b = gossip("node-b");
     let mut c = gossip("node-c");
-    a.publish(Info { version: "1.0.12".into(), ..Info::default() });
-    b.publish(Info { version: "1.0.12".into(), ..Info::default() });
-    c.publish(Info { version: "1.0.11".into(), ..Info::default() });
+    a.publish(Info {
+        version: "1.0.12".into(),
+        ..Info::default()
+    });
+    b.publish(Info {
+        version: "1.0.12".into(),
+        ..Info::default()
+    });
+    c.publish(Info {
+        version: "1.0.11".into(),
+        ..Info::default()
+    });
 
     let mut first = a.clone();
     first.apply(b.state());
@@ -126,11 +157,20 @@ fn info_converges_regardless_of_message_order() {
 #[test]
 fn stale_state_never_rolls_back_a_newer_info() {
     let mut a = gossip("node-a");
-    a.publish(Info { version: "1.0.12".into(), ..Info::default() });
+    a.publish(Info {
+        version: "1.0.12".into(),
+        ..Info::default()
+    });
     let stale = a.state().clone();
-    a.publish(Info { version: "1.0.13".into(), ..Info::default() });
+    a.publish(Info {
+        version: "1.0.13".into(),
+        ..Info::default()
+    });
     assert!(!a.apply(&stale), "tin cũ không được đè bản mới hơn");
-    assert_eq!(a.state().info("node-a").map(|i| i.version.as_str()), Some("1.0.13"));
+    assert_eq!(
+        a.state().info("node-a").map(|i| i.version.as_str()),
+        Some("1.0.13")
+    );
 }
 
 #[test]
@@ -146,7 +186,11 @@ fn dirty_flag_is_consumed_so_unchanged_state_is_not_pushed_every_tick() {
 #[test]
 fn state_survives_json_round_trip_for_the_internal_endpoint() {
     let mut a = gossip("node-a");
-    a.publish(Info { version: "1.0.12".into(), started_at: 42, note: "x".into() });
+    a.publish(Info {
+        version: "1.0.12".into(),
+        started_at: 42,
+        note: "x".into(),
+    });
     let json = serde_json::to_string(a.state()).expect("serialize");
     let back: InfoState = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(a.state().snapshot(), back.snapshot());

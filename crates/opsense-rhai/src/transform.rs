@@ -34,11 +34,8 @@ use crate::vector::runtime::{Component, Event, Fault, Identify, Message, Outboun
 /// State tĩnh theo tên node thay vì field trong `RhaiTransform`: macro
 /// `#[transform]` sinh `Clone`/`PartialEq`, mà `AtomicBool`/`Mutex` không có, nên
 /// thêm field sẽ không biên dịch được.
-static NODES_WITH_FAULT: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<String>>,
-> = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new(std::collections::HashSet::new())
-});
+static NODES_WITH_FAULT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 /// Ghi nhớ node vừa lỗi, hoặc hỏi "lượt trước có lỗi không".
 fn note_fault(node: &str, has: bool) -> bool {
@@ -198,7 +195,11 @@ impl_rhai_transform!(
                 .params
                 .get("write_stations")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             write_stations.push(self.id.clone());
 

@@ -36,19 +36,16 @@ use opsense_core::Context;
 use opsense_core::Observation;
 use opsense_core::Station;
 use opsense_core::TimeseriesStation;
-use opsense_mlib::jq::JsonQuery;
 use opsense_macros::{source, transform};
+use opsense_mlib::jq::JsonQuery;
 
 use crate::station::downcast_ctx;
 use crate::vector::runtime::{Component, Event, Fault, Identify, Message, Outbound, Severity};
 
 /// Node nào chu kỳ trước vừa lỗi — để chu kỳ này thành công thì báo hồi phục
 /// thay vì để `last_error` ám vĩnh viễn trong `opsense_status`.
-static NODES_WITH_FAULT: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<String>>,
-> = std::sync::LazyLock::new(|| {
-    std::sync::Mutex::new(std::collections::HashSet::new())
-});
+static NODES_WITH_FAULT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 fn note_fault(node: &str, has: bool) -> bool {
     let Ok(mut set) = NODES_WITH_FAULT.lock() else {
@@ -665,15 +662,18 @@ impl_http_origin!(
         let station = std::sync::Arc::new(tokio::sync::RwLock::new(
             TimeseriesStation::from_storage(&self.id, ctx.storage()).await?,
         ));
-        ctx.registry(&self.id, Station::Timeseries(std::sync::Arc::clone(&station)))
-            .await
-            .or_else(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })?;
+        ctx.registry(
+            &self.id,
+            Station::Timeseries(std::sync::Arc::clone(&station)),
+        )
+        .await
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })?;
 
         // `interval_secs = 0` hoặc âm là nguồn chết: `sleep(0)` quay vô hạn và
         // spam API, `sleep` âm thì tokio lo. Chặn ở đây cho thành lỗi cấu
@@ -821,10 +821,7 @@ impl_http_source!(
                 .and_then(Value::as_i64)
                 .unwrap_or(self.interval_secs);
 
-            let batch = match fetcher
-                .fetch_once(ts, interval, ts, ts, &msg.payload)
-                .await
-            {
+            let batch = match fetcher.fetch_once(ts, interval, ts, ts, &msg.payload).await {
                 Ok(b) => {
                     if note_fault(&self.id, false) {
                         let _ = tx.event.send(Event::Recovered(id)).await;

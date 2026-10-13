@@ -14,7 +14,7 @@
 
 use std::ffi::c_char;
 
-use super::{HttpRequest, ModuleError, ABI_VERSION, OpsenseModule, cache::TenantServices};
+use super::{ABI_VERSION, HttpRequest, ModuleError, OpsenseModule, cache::TenantServices};
 
 /// Opaque module state pointer for FFI (C-ABI compatible).
 /// We use `*mut c_void` for FFI compatibility, but wrap it in a Send/Sync type on the host side.
@@ -172,7 +172,10 @@ unsafe fn from_c_str(ptr: *const c_char) -> String {
     if ptr.is_null() {
         return String::new();
     }
-    unsafe { std::ffi::CStr::from_ptr(ptr) }.to_str().unwrap_or("").to_string()
+    unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_str()
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Helper: call a host operation from plugin Rust code.
@@ -194,9 +197,8 @@ pub unsafe fn host_call(
     req: &serde_json::Value,
 ) -> Result<String, ModuleError> {
     let op_c = to_c_string(op.into());
-    let req_c = to_c_string(
-        serde_json::to_string(req).map_err(|e| ModuleError::Json(e.to_string()))?,
-    );
+    let req_c =
+        to_c_string(serde_json::to_string(req).map_err(|e| ModuleError::Json(e.to_string()))?);
 
     let res_ptr = unsafe { (host.call)(host.context, op_c, req_c) };
     unsafe { (host.free)(op_c) };
@@ -246,7 +248,8 @@ where
             tokio::task::block_in_place(|| h.block_on(fut))
         }
         _ => {
-            static MODULE_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+            static MODULE_RT: std::sync::OnceLock<tokio::runtime::Runtime> =
+                std::sync::OnceLock::new();
             let rt = MODULE_RT.get_or_init(|| {
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(1)
@@ -315,7 +318,9 @@ pub trait ModuleExports: super::OpsenseModule {
             Ok(r) => r,
             Err(e) => {
                 let err = ModuleError::BadRequest(format!("request parse: {e}"));
-                return to_c_string(serde_json::to_string(&super::HttpResponse::from(err)).unwrap());
+                return to_c_string(
+                    serde_json::to_string(&super::HttpResponse::from(err)).unwrap(),
+                );
             }
         };
 
@@ -338,9 +343,9 @@ pub trait ModuleExports: super::OpsenseModule {
                     let err = ModuleError::Internal(format!("response serialize: {e}"));
                     serde_json::to_string(&super::HttpResponse::from(err)).unwrap()
                 }),
-                Err(e) => serde_json::to_string(&super::HttpResponse::from(
-                    ModuleError::Internal(format!("panic: {e:?}"))
-                ))
+                Err(e) => serde_json::to_string(&super::HttpResponse::from(ModuleError::Internal(
+                    format!("panic: {e:?}"),
+                )))
                 .unwrap(),
             }
         } else {
@@ -420,9 +425,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let out = rt.block_on(async {
-            drive(async { 42 })
-        });
+        let out = rt.block_on(async { drive(async { 42 }) });
         assert_eq!(out, 42);
     }
 }

@@ -71,7 +71,11 @@ async fn cmd_status(client: &OpsenseClient) -> anyhow::Result<Option<String>> {
     out.push_str(&format_stations_table(&status.stations).to_string());
     // Bỏ hẳn mục khi không có node lỗi: một mục rỗng chỉ dạy người đọc rằng
     // "fault" là thứ gì đó bình thường cần soi.
-    let faulted: Vec<_> = status.nodes.iter().filter(|n| n.last_error.is_some()).collect();
+    let faulted: Vec<_> = status
+        .nodes
+        .iter()
+        .filter(|n| n.last_error.is_some())
+        .collect();
     if !faulted.is_empty() {
         out.push_str(&format!("\nNodes in fault ({}):\n", faulted.len()));
         for n in faulted {
@@ -231,13 +235,12 @@ async fn cmd_query(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<
         "order",
     ];
     let args = parse_args(rest, FLAGS)?;
-    let node = args
-        .positional
-        .first()
-        .ok_or_else(|| anyhow::anyhow!(
+    let node = args.positional.first().ok_or_else(|| {
+        anyhow::anyhow!(
             "usage: :query <node> [from] [to] [limit] [signal] [label_kind] [status] \
              [--from X] [--to Y] [--limit N] [--order asc|desc]"
-        ))?;
+        )
+    })?;
     let pick = |i: usize, name: &str| -> anyhow::Result<Option<String>> {
         Ok(args
             .flags
@@ -248,7 +251,9 @@ async fn cmd_query(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<
     let now = opsense_components::signal::now_secs();
     let from_ts = pick(1, "from")?.map(|s| time_arg(&s, now)).transpose()?;
     let to_ts = pick(2, "to")?.map(|s| time_arg(&s, now)).transpose()?;
-    let limit = pick(3, "limit")?.map(|s| parse_i64("limit", &s)).transpose()?;
+    let limit = pick(3, "limit")?
+        .map(|s| parse_i64("limit", &s))
+        .transpose()?;
     let signal = pick(4, "signal")?;
     let label_kind = pick(5, "label-kind")?;
     // `status` lọc `labels.status` — khác `label_kind` (lọc `labels.kind`).
@@ -294,7 +299,15 @@ async fn cmd_query(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<
 
 /// `:orders <node> [--status open|closed] [--from X] [--to Y] [--limit N] [--order asc|desc] [--interval 1d] [--mark-price 123.45]`
 async fn cmd_orders(client: &OpsenseClient, rest: &str) -> anyhow::Result<Option<String>> {
-    const FLAGS: &[&str] = &["status", "from", "to", "limit", "order", "interval", "mark-price"];
+    const FLAGS: &[&str] = &[
+        "status",
+        "from",
+        "to",
+        "limit",
+        "order",
+        "interval",
+        "mark-price",
+    ];
     let args = parse_args(rest, FLAGS)?;
     let node = args.positional.first().ok_or_else(|| {
         anyhow::anyhow!(
@@ -393,10 +406,7 @@ fn parse_args(rest: &str, allowed: &[&str]) -> anyhow::Result<Args> {
             None => (body, None),
         };
         if !allowed.contains(&key) {
-            anyhow::bail!(
-                "unknown flag '--{key}'; chỉ nhận --{}",
-                allowed.join(" --")
-            );
+            anyhow::bail!("unknown flag '--{key}'; chỉ nhận --{}", allowed.join(" --"));
         }
         let value = match inline {
             Some(v) => v,

@@ -131,32 +131,32 @@ pub struct Graph {
     prebuilt: Option<Arc<Vec<u8>>>,
 }
 
-    impl Graph {
-        #[allow(clippy::too_many_arguments)]
-        pub fn new(
-            window_size: usize,
-            ops: Vec<Box<dyn Op>>,
-            nodes: Vec<Node>,
-            extractors: Vec<Box<dyn Extractor>>,
-            inited_bias: Vec<f32>,
-            inited_weights: Vec<f32>,
-            num_of_grids: usize,
-            lookback_time_to_rebuild: usize,
-            interval_time_to_rebuild: usize,
-        ) -> Self {
-            Self {
-                window_size,
-                ops,
-                nodes,
-                extractors,
-                inited_bias,
-                inited_weights,
-                num_of_grids,
-                lookback_time_to_rebuild,
-                interval_time_to_rebuild,
-                prebuilt: None,
-            }
+impl Graph {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        window_size: usize,
+        ops: Vec<Box<dyn Op>>,
+        nodes: Vec<Node>,
+        extractors: Vec<Box<dyn Extractor>>,
+        inited_bias: Vec<f32>,
+        inited_weights: Vec<f32>,
+        num_of_grids: usize,
+        lookback_time_to_rebuild: usize,
+        interval_time_to_rebuild: usize,
+    ) -> Self {
+        Self {
+            window_size,
+            ops,
+            nodes,
+            extractors,
+            inited_bias,
+            inited_weights,
+            num_of_grids,
+            lookback_time_to_rebuild,
+            interval_time_to_rebuild,
+            prebuilt: None,
         }
+    }
 
     /// Gắn ONNX bytes đã build sẵn — `model()` bỏ qua `build_onnx` và compile
     /// thẳng từ bytes này.
@@ -191,8 +191,7 @@ pub struct Graph {
     /// thật — genome mới là).
     pub fn write_onnx(&self, path: impl AsRef<std::path::Path>) -> Result<(), Error> {
         let bytes = self.onnx_bytes()?;
-        std::fs::write(path, bytes)
-            .map_err(|e| Error::other(format!("ghi ONNX thất bại: {e}")))
+        std::fs::write(path, bytes).map_err(|e| Error::other(format!("ghi ONNX thất bại: {e}")))
     }
 
     /// Nạp cặp **genome + ONNX**: đọc genome JSON (nguồn sự thật) rồi gắn

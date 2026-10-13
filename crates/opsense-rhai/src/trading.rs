@@ -30,11 +30,7 @@ pub fn min_profitable_step(fee_rate: Dynamic, at_price: Dynamic) -> Dynamic {
 /// Số mốc tối đa trong `[min, max]` mà bước giữa hai mốc vẫn lãi sau phí
 /// (tối thiểu 2). Dùng để đặt mốc trong ô của `AnalysisGrid`.
 pub fn max_levels_for_profit(min: Dynamic, max: Dynamic, fee_rate: Dynamic) -> Dynamic {
-    let (Some(lo), Some(hi), Some(fee)) = (
-        as_f64(&min),
-        as_f64(&max),
-        as_f64(&fee_rate),
-    ) else {
+    let (Some(lo), Some(hi), Some(fee)) = (as_f64(&min), as_f64(&max), as_f64(&fee_rate)) else {
         return Dynamic::UNIT;
     };
     Dynamic::from(TradingGrid::max_levels_for_profit(lo, hi, fee) as i64)

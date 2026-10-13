@@ -64,7 +64,8 @@ pub fn rhai_register_impl(_attr: TokenStream, item: TokenStream) -> TokenStream 
         let use_inventory: ItemUse = parse2(quote! { use inventory; }).unwrap();
         items.insert(0, Item::Use(use_inventory));
         // Insert `use crate::rhai_collect::RhaiFreeFn;`
-        let use_rhaifreefn: ItemUse = parse2(quote! { use crate::rhai_collect::RhaiFreeFn; }).unwrap();
+        let use_rhaifreefn: ItemUse =
+            parse2(quote! { use crate::rhai_collect::RhaiFreeFn; }).unwrap();
         items.insert(1, Item::Use(use_rhaifreefn));
     }
 
@@ -84,14 +85,13 @@ mod tests {
                 fn now_secs() -> i64 { 42 }
             }
         "#;
-        let out = rhai_register_impl(
-            TokenStream::new(),
-            item.parse::<TokenStream>().unwrap(),
-        );
+        let out = rhai_register_impl(TokenStream::new(), item.parse::<TokenStream>().unwrap());
         let s = out.to_string();
         assert!(s.contains("fn register"));
         // inventory::iter might be formatted as "inventory :: iter" in token stream string
-        assert!(s.contains("inventory::iter") || s.contains("inventory :: iter") || s.contains("iter"));
+        assert!(
+            s.contains("inventory::iter") || s.contains("inventory :: iter") || s.contains("iter")
+        );
         assert!(s.contains("RhaiFreeFn"));
     }
 }

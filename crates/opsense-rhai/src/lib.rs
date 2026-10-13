@@ -29,8 +29,8 @@ mod runtime;
 mod station;
 mod strategy;
 mod time_fns;
-mod trading;
 mod tools;
+mod trading;
 mod transform;
 mod ts_ops;
 
@@ -53,5 +53,5 @@ pub mod vector {
 /// path is hard-coded in the macro — so any crate using it needs a `crate::script`
 /// that resolves. Same trick, same reason, as the `vector` mirror above.
 pub mod script {
-    pub use opsense_mlib::script::{parse_points, RhaiBindings};
+    pub use opsense_mlib::script::{RhaiBindings, parse_points};
 }

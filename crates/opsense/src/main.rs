@@ -334,7 +334,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     order,
                     endpoint,
                 }) => {
-                    if let Err(e) = opsense::cli::query(endpoint, &node, from, to, limit, signal, label_kind, status, order).await {
+                    if let Err(e) = opsense::cli::query(
+                        endpoint, &node, from, to, limit, signal, label_kind, status, order,
+                    )
+                    .await
+                    {
                         eprintln!("query error: {e}");
                         std::process::exit(1);
                     }
@@ -350,7 +354,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     mark_price,
                     endpoint,
                 }) => {
-                    if let Err(e) = opsense::cli::orders(endpoint, &node, status, from, to, limit, order, interval, mark_price).await {
+                    if let Err(e) = opsense::cli::orders(
+                        endpoint, &node, status, from, to, limit, order, interval, mark_price,
+                    )
+                    .await
+                    {
                         eprintln!("orders error: {e}");
                         std::process::exit(1);
                     }
@@ -434,7 +442,9 @@ mod tests {
             vec!["opsense", "components", "grid"],
             vec!["opsense", "get-param", "grid", "/params/sl_pct"],
             vec!["opsense", "set-param", "grid", "/params/sl_pct", "0.02"],
-            vec!["opsense", "query", "grid", "--signal", "order", "--limit", "10"],
+            vec![
+                "opsense", "query", "grid", "--signal", "order", "--limit", "10",
+            ],
             vec!["opsense", "orders", "grid", "--status", "open"],
         ] {
             Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?} không parse: {e}"));

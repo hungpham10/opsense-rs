@@ -71,7 +71,8 @@ fn find<'a>(out: &'a [serde_json::Value], metric_id: &str) -> &'a serde_json::Va
 }
 
 fn num(v: &serde_json::Value) -> f64 {
-    v.as_f64().unwrap_or_else(|| panic!("value không phải số: {v}"))
+    v.as_f64()
+        .unwrap_or_else(|| panic!("value không phải số: {v}"))
 }
 
 #[tokio::test]
@@ -89,13 +90,21 @@ async fn every_disk_gets_three_observations() {
     assert_eq!(out.len(), 9, "3 đĩa × 3 observation:\n{out:#?}");
 
     for mp in ["/", "/var", "/boot"] {
-        for prefix in ["disk_capacity_hours", "disk_capacity_trend", "disk_capacity_band"] {
+        for prefix in [
+            "disk_capacity_hours",
+            "disk_capacity_trend",
+            "disk_capacity_band",
+        ] {
             let id = format!("{prefix}:{mp}");
             let obs = find(&out, &id);
-            assert!(num(&obs["value"]).is_finite(), "{id} có value không hữu hạn");
+            assert!(
+                num(&obs["value"]).is_finite(),
+                "{id} có value không hữu hạn"
+            );
             assert_eq!(obs["labels"]["mountpoint"], mp, "{id} sai mountpoint");
             assert!(
-                ["rising", "falling", "flat"].contains(&obs["labels"]["direction"].as_str().unwrap()),
+                ["rising", "falling", "flat"]
+                    .contains(&obs["labels"]["direction"].as_str().unwrap()),
                 "{id} direction lạ: {}",
                 obs["labels"]["direction"]
             );
@@ -106,13 +115,18 @@ async fn every_disk_gets_three_observations() {
 #[tokio::test]
 async fn rising_disk_gets_a_finite_eta_and_flat_disk_does_not() {
     let input = windows(&[("/", wave(50.0, 0.5, 4.0)), ("/var", wave(30.0, 0.0, 4.0))]);
-    let out = call_process(script(), input).await.expect("script chạy được");
+    let out = call_process(script(), input)
+        .await
+        .expect("script chạy được");
 
     // Đang đi lên ⇒ có mốc chạm trần ở tương lai, và cả hai mốc đều dương.
     let hours = num(&find(&out, "disk_capacity_hours:/")["value"]);
     let trend = num(&find(&out, "disk_capacity_trend:/")["value"]);
     assert!(hours > 0.0, "disk đi lên phải có ETA dương, got {hours}");
-    assert!(trend > hours, "xu hướng ({trend}h) phải chậm hơn mép trên ({hours}h)");
+    assert!(
+        trend > hours,
+        "xu hướng ({trend}h) phải chậm hơn mép trên ({hours}h)"
+    );
     // Biên độ ~4% capacity, đi lên 12%/ngày ⇒ chênh lệch vài giờ, không phải vài tháng.
     assert!(
         trend - hours < 48.0,
@@ -134,7 +148,10 @@ async fn rising_disk_gets_a_finite_eta_and_flat_disk_does_not() {
     // Đi ngang ⇒ slope 0 ⇒ không có mốc chạm trần nào. Script ép -1 để series
     // không biến mất (thiếu series thì alert không bắt được).
     let flat = num(&find(&out, "disk_capacity_hours:/var")["value"]);
-    assert!((flat + 1.0).abs() < 1e-9, "disk đi ngang phải trả -1, got {flat}");
+    assert!(
+        (flat + 1.0).abs() < 1e-9,
+        "disk đi ngang phải trả -1, got {flat}"
+    );
     assert_eq!(
         find(&out, "disk_capacity_hours:/var")["labels"]["direction"],
         "flat"
@@ -147,7 +164,9 @@ async fn band_is_reported_in_grid_cells() {
     // quanh một mức thì ngưỡng dừng cho lưới mịn hơn hẳn (step 1.5625 / 64 dải
     // thay vì 12.5 / 8 dải) — biên cùng 4 đơn vị đó trải ra 2.5 dải thay vì 0.3.
     let input = windows(&[("/", wave(50.0, 0.5, 4.0))]);
-    let out = call_process(script(), input).await.expect("script chạy được");
+    let out = call_process(script(), input)
+        .await
+        .expect("script chạy được");
 
     let band = num(&find(&out, "disk_capacity_band:/")["value"]);
     // Dao động ±4% trên capacity 100, sieve chọn step ≈ 12.5 ⇒ biên ≈ 0.3 ô.
@@ -171,7 +190,10 @@ async fn disks_with_too_few_points_are_skipped() {
     let out = call_process(script(), serde_json::Value::Array(few))
         .await
         .expect("script không lỗi khi thiếu dữ liệu");
-    assert!(out.is_empty(), "phải bỏ qua đĩa thiếu dữ liệu, không đoán bừa: {out:#?}");
+    assert!(
+        out.is_empty(),
+        "phải bỏ qua đĩa thiếu dữ liệu, không đoán bừa: {out:#?}"
+    );
 
     // Cửa sổ rỗng sau khi cắt recent_secs.
     let out = call_process(script(), serde_json::Value::Array(vec![]))

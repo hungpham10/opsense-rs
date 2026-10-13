@@ -9,8 +9,8 @@ use opsense_ffi::cache::{CacheBackend, CacheError};
 #[cfg(feature = "redis")]
 pub mod redis_backend {
     use super::*;
-    use redis::aio::MultiplexedConnection;
     use redis::AsyncCommands;
+    use redis::aio::MultiplexedConnection;
 
     pub struct RedisBackend(pub MultiplexedConnection);
 
@@ -22,7 +22,10 @@ pub mod redis_backend {
     }
 
     impl CacheBackend for RedisBackend {
-        fn get(&self, key: &str) -> opsense_ffi::cache::BoxFuture<Result<Option<String>, CacheError>> {
+        fn get(
+            &self,
+            key: &str,
+        ) -> opsense_ffi::cache::BoxFuture<Result<Option<String>, CacheError>> {
             let key = key.to_string();
             let mut conn = self.0.clone();
             Box::pin(async move {
@@ -32,7 +35,12 @@ pub mod redis_backend {
             })
         }
 
-        fn set_ex(&self, key: &str, value: &str, ttl: u64) -> opsense_ffi::cache::BoxFuture<Result<(), CacheError>> {
+        fn set_ex(
+            &self,
+            key: &str,
+            value: &str,
+            ttl: u64,
+        ) -> opsense_ffi::cache::BoxFuture<Result<(), CacheError>> {
             let key = key.to_string();
             let value = value.to_string();
             let mut conn = self.0.clone();

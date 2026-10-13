@@ -19,10 +19,10 @@
 
 use std::sync::Arc;
 
-use opsense_mlib::lru::LruCache;
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use ed25519_dalek::{SIGNATURE_LENGTH, SigningKey, Verifier, VerifyingKey};
+use opsense_mlib::lru::LruCache;
 use rand::{RngCore, rngs::OsRng};
 use subtle::ConstantTimeEq;
 

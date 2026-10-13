@@ -35,10 +35,16 @@ async fn context_station_registry_and_query() {
 
     // Write some data
     let batch = vec![obs(100, 30.0), obs(200, 40.0), obs(300, 50.0)];
-    station_arc.write().await.update_range(&batch, 100, 300, 300);
+    station_arc
+        .write()
+        .await
+        .update_range(&batch, 100, 300, 300);
 
     // Query via Context
-    let retrieved = ctx.station::<Arc<RwLock<TimeseriesStation>>>("test-station").await.unwrap();
+    let retrieved = ctx
+        .station::<Arc<RwLock<TimeseriesStation>>>("test-station")
+        .await
+        .unwrap();
     // Query within the written data range (100-300)
     let data = retrieved.write().await.query_range(100, 300).await.unwrap();
 
@@ -55,7 +61,9 @@ async fn context_station_missing_returns_error() {
     let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
     // Query non-existent station
-    let result = ctx.station::<Arc<RwLock<TimeseriesStation>>>("nonexistent").await;
+    let result = ctx
+        .station::<Arc<RwLock<TimeseriesStation>>>("nonexistent")
+        .await;
     assert!(result.is_err());
 }
 
@@ -114,7 +122,9 @@ async fn station_query_filters_signal_and_label_kind() {
     // (`capacity_per_shard = 1`): số obs thực sự còn lại tụt xuống dưới trần.
     // Tức test vô tình dựa vào hành vi mất dữ liệu. Cỡ 15.000 vẫn lớn hơn
     // ngưỡng 10.000 mà không cần dựa vào điều đó.
-    let ticks: Vec<Observation> = (0..12_000).map(|i| obs(1_700_000_000 + i, i as f64)).collect();
+    let ticks: Vec<Observation> = (0..12_000)
+        .map(|i| obs(1_700_000_000 + i, i as f64))
+        .collect();
     station_arc
         .write()
         .await
@@ -130,10 +140,12 @@ async fn station_query_filters_signal_and_label_kind() {
     let mut cursor = obs(1_700_000_600, 0.0);
     cursor.signal = Signal::Summary;
     cursor.labels.insert("kind".into(), "trading_step".into());
-    station_arc
-        .write()
-        .await
-        .update_range(&[order, cursor], 1_700_000_500, 1_700_000_600, 1_700_099_999);
+    station_arc.write().await.update_range(
+        &[order, cursor],
+        1_700_000_500,
+        1_700_000_600,
+        1_700_099_999,
+    );
 
     // Script trả thẳng kết quả truy vấn (mảng observation — hợp lệ với
     // `fn process`), nên lỗi nếu có **chỉ** có thể đến từ truy vấn, không từ
@@ -147,8 +159,8 @@ async fn station_query_filters_signal_and_label_kind() {
             Default::default(),
             None,
             Some(ctx.clone()),
-        std::sync::Arc::new(Vec::new()),
-    )
+            std::sync::Arc::new(Vec::new()),
+        )
         .await
     }
     let ctx = &ctx;
@@ -177,13 +189,10 @@ async fn station_query_filters_signal_and_label_kind() {
         return;
     }
 
-    let all = run(
-        ctx,
-        "station_query(\"mixed\", 1700000000, 1700099999)",
-    )
-    .await
-    .expect("đọc không lọc ở station lớn")
-    .len();
+    let all = run(ctx, "station_query(\"mixed\", 1700000000, 1700099999)")
+        .await
+        .expect("đọc không lọc ở station lớn")
+        .len();
     // Ngưỡng này phải nhỏ hơn **số obs còn lại sau khi LRU xử lý**, vì:
     //
     //   arena chung  → giữ đủ 12.000 obs
@@ -227,12 +236,9 @@ async fn station_query_filters_signal_and_label_kind() {
 
     // `()` = không lọc (giữ nghĩa của lời gọi cũ 3 tham số) → cùng số dòng với
     // lời gọi 3 tham số.
-    let unit = run(
-        ctx,
-        "station_query(\"mixed\", 1700000000, 1700099999, ())",
-    )
-    .await
-    .expect("`()` = không lọc, phải đọc được");
+    let unit = run(ctx, "station_query(\"mixed\", 1700000000, 1700099999, ())")
+        .await
+        .expect("`()` = không lọc, phải đọc được");
     assert_eq!(unit.len(), all, "`()` phải nghĩa là không lọc");
 }
 
@@ -248,11 +254,10 @@ async fn station_write_respects_allowlist() {
     let secret = Secret::new().await.unwrap();
     let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
-    async fn mk(
-        ctx: &Arc<Context>,
-        id: &'static str,
-    ) -> Arc<RwLock<TimeseriesStation>> {
-        let st = TimeseriesStation::from_storage(id, ctx.storage()).await.unwrap();
+    async fn mk(ctx: &Arc<Context>, id: &'static str) -> Arc<RwLock<TimeseriesStation>> {
+        let st = TimeseriesStation::from_storage(id, ctx.storage())
+            .await
+            .unwrap();
         let arc = Arc::new(RwLock::new(st));
         ctx.registry(id, Station::Timeseries(arc.clone()))
             .await
@@ -312,7 +317,10 @@ async fn station_write_respects_allowlist() {
         .await
         .expect("station phải đọc được");
     assert_eq!(got.len(), 1, "phải ghi đúng 1 observation: {got:?}");
-    assert_eq!(got[0].labels.get("order_id").map(String::as_str), Some("o1700000000"));
+    assert_eq!(
+        got[0].labels.get("order_id").map(String::as_str),
+        Some("o1700000000")
+    );
 
     // Own station: **transform** gộp id của chính nó vào allowlist, nên ở đây
     // mô phỏng allowlist mà transform dựng (`params.write_stations` + own id).

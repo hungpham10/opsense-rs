@@ -144,8 +144,8 @@ fn call_rebuild(
     prev: &[CellStats],
     params: &serde_json::Value,
 ) -> Result<Vec<GridPlan>, Error> {
-    let ast = runtime::acquire_any(script)
-        .map_err(|e| Error::other(format!("strategy script: {e}")))?;
+    let ast =
+        runtime::acquire_any(script).map_err(|e| Error::other(format!("strategy script: {e}")))?;
     if ast.iter_functions().all(|f| f.name != "rebuild") {
         return Err(Error::other(
             "strategy script phải định nghĩa `fn rebuild(candles, prev, params)`",
@@ -153,29 +153,35 @@ fn call_rebuild(
     }
 
     let candles_dyn = candles_to_dynamic(candles);
-    let prev_dyn = rhai::serde::to_dynamic(prev)
-        .map_err(|e| Error::other(format!("prev stats: {e}")))?;
-    let params_dyn = rhai::serde::to_dynamic(params)
-        .map_err(|e| Error::other(format!("params: {e}")))?;
+    let prev_dyn =
+        rhai::serde::to_dynamic(prev).map_err(|e| Error::other(format!("prev stats: {e}")))?;
+    let params_dyn =
+        rhai::serde::to_dynamic(params).map_err(|e| Error::other(format!("params: {e}")))?;
 
     let deadline = std::time::Instant::now() + runtime::rhai_timeout();
-    let out = STRATEGY_ENGINE.with(|cell| {
-        let mut eng = cell.borrow_mut();
-        // `fn rebuild` chạy trên engine strategy này, **không phải** engine của
-        // transform, nên phải đăng ký lại ở đây — cùng bộ hàm, cùng lý do.
-        // Thiếu bước này thì script gọi `min_profitable_step` trong `rebuild`
-        // chết với "Function not found" ⇒ plan rỗng ⇒ không lệnh nào.
-        crate::trading::register(&mut eng);
-        eng.on_progress(move |_| {
-            if std::time::Instant::now() <= deadline {
-                None
-            } else {
-                Some(Dynamic::UNIT)
-            }
-        });
-        eng.call_fn::<Dynamic>(&mut rhai::Scope::new(), &ast, "rebuild", (candles_dyn, prev_dyn, params_dyn))
-    })
-    .map_err(|e| Error::other(format!("strategy rebuild(): {e}")))?;
+    let out = STRATEGY_ENGINE
+        .with(|cell| {
+            let mut eng = cell.borrow_mut();
+            // `fn rebuild` chạy trên engine strategy này, **không phải** engine của
+            // transform, nên phải đăng ký lại ở đây — cùng bộ hàm, cùng lý do.
+            // Thiếu bước này thì script gọi `min_profitable_step` trong `rebuild`
+            // chết với "Function not found" ⇒ plan rỗng ⇒ không lệnh nào.
+            crate::trading::register(&mut eng);
+            eng.on_progress(move |_| {
+                if std::time::Instant::now() <= deadline {
+                    None
+                } else {
+                    Some(Dynamic::UNIT)
+                }
+            });
+            eng.call_fn::<Dynamic>(
+                &mut rhai::Scope::new(),
+                &ast,
+                "rebuild",
+                (candles_dyn, prev_dyn, params_dyn),
+            )
+        })
+        .map_err(|e| Error::other(format!("strategy rebuild(): {e}")))?;
 
     let json: serde_json::Value = rhai::serde::from_dynamic(&out)
         .map_err(|e| Error::other(format!("rebuild() result: {e}")))?;
@@ -282,7 +288,11 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(grids[0].long_win_count(0), 1, "bộ đếm phải sống qua rebuild");
+        assert_eq!(
+            grids[0].long_win_count(0),
+            1,
+            "bộ đếm phải sống qua rebuild"
+        );
         assert_eq!(grids[0].long_lost_count(1), 1);
         assert_eq!(grids[0].long_win_count(2), 0);
     }
@@ -302,10 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn script_without_rebuild_is_rejected() {
-        let s = ScriptStrategy::new(
-            ScriptSource::Inline("fn process(x) { x }".into()),
-            900,
-        );
+        let s = ScriptStrategy::new(ScriptSource::Inline("fn process(x) { x }".into()), 900);
         let mut f = fetch(candles(20));
         let err = s
             .rebuild(4_800, &[], &mut f, &|i| {
@@ -324,12 +331,7 @@ mod tests {
         struct L;
         #[async_trait::async_trait]
         impl DataLoader for L {
-            async fn range(
-                &self,
-                _f: u64,
-                _t: u64,
-                _r: &str,
-            ) -> Result<Vec<CandleStick>, Error> {
+            async fn range(&self, _f: u64, _t: u64, _r: &str) -> Result<Vec<CandleStick>, Error> {
                 Ok(candles(300))
             }
         }
@@ -355,9 +357,7 @@ mod tests {
             events.push(e);
             Box::pin(async { Ok(()) })
                 as std::pin::Pin<
-                    Box<
-                        dyn std::future::Future<Output = std::io::Result<()>> + Send + 'static,
-                    >,
+                    Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'static>,
                 >
         };
         session.next_ts = 7_200;

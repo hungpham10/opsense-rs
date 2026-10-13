@@ -118,7 +118,6 @@ parquet = { workspace = true, optional = true }
 
 # Dynamic module loading (dlopen) — optional, gated by `dynamic-modules` feature
 libloading = { version = "0.8", optional = true }
-toml = { version = "0.8" }
 form_urlencoded = { version = "1.2" }
 
 [features]
@@ -150,6 +149,7 @@ tokio = { workspace = true }
 # Test parse `[[pipeline.components]]` tu TOML that. `opsense-core` co
 # `config` nhung crate nay thi khong, ma `Config` o day chi deserialize
 # duoc tu TOML thuan.
+toml = "0.8"
 tempfile = "3"
 futures-util = { workspace = true }
 rexpect = "0.5"

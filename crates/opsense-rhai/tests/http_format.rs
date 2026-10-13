@@ -39,7 +39,9 @@ async fn spawn_mock(
                     }
                     buf.extend_from_slice(&chunk[..n]);
                 }
-                reqs.lock().unwrap().push(String::from_utf8_lossy(&buf).into_owned());
+                reqs.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf).into_owned());
                 let resp = format!(
                     "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -63,12 +65,11 @@ async fn http_source_maps_prometheus_through_jq() {
     let secret = Secret::new().await.unwrap();
     let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
-    let url = format!("http://{}/api/v1/query_range?from_ts={{from_ts}}&to_ts={{to_ts}}&step={{step}}", addr);
-    let mut src = HttpSource::new(
-        "cpu-http",
-        &["clock"],
-        &url,
+    let url = format!(
+        "http://{}/api/v1/query_range?from_ts={{from_ts}}&to_ts={{to_ts}}&step={{step}}",
+        addr
     );
+    let mut src = HttpSource::new("cpu-http", &["clock"], &url);
     src.bindings = {
         let mut m = HashMap::new();
         m.insert("from_ts".into(), "{{from_ts}}".into());
@@ -79,14 +80,14 @@ async fn http_source_maps_prometheus_through_jq() {
     src.interval_secs = 60;
     src.timeout_secs = 10;
 
-    let output = Output { id: "output".into(), inputs: vec!["cpu-http".into()] };
+    let output = Output {
+        id: "output".into(),
+        inputs: vec!["cpu-http".into()],
+    };
     let clock = Clock::new(Duration::from_secs(1));
 
-    let components: Vec<Arc<dyn Component>> = vec![
-        Arc::new(clock),
-        Arc::new(src),
-        Arc::new(output),
-    ];
+    let components: Vec<Arc<dyn Component>> =
+        vec![Arc::new(clock), Arc::new(src), Arc::new(output)];
     let mut rt = Runtime::new();
     rt.set_context(ctx.clone());
     rt.reload(components).expect("valid graph");
@@ -100,10 +101,7 @@ async fn http_source_maps_prometheus_through_jq() {
         if !requests.lock().unwrap().is_empty() {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no HTTP request made"
-        );
+        assert!(std::time::Instant::now() < deadline, "no HTTP request made");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
@@ -123,12 +121,11 @@ async fn http_source_handles_http_errors_gracefully() {
     let secret = Secret::new().await.unwrap();
     let ctx = Arc::new(Context::new(&cfg, Arc::new(secret)));
 
-    let url = format!("http://{}/api/v1/query_range?from_ts={{from_ts}}&to_ts={{to_ts}}&step={{step}}", addr);
-    let mut src = HttpSource::new(
-        "bad-http",
-        &["clock"],
-        &url,
+    let url = format!(
+        "http://{}/api/v1/query_range?from_ts={{from_ts}}&to_ts={{to_ts}}&step={{step}}",
+        addr
     );
+    let mut src = HttpSource::new("bad-http", &["clock"], &url);
     src.bindings = HashMap::from([
         ("from_ts".into(), "{{from_ts}}".into()),
         ("to_ts".into(), "{{to_ts}}".into()),
@@ -137,14 +134,14 @@ async fn http_source_handles_http_errors_gracefully() {
     src.interval_secs = 60;
     src.timeout_secs = 1;
 
-    let output = Output { id: "output".into(), inputs: vec!["bad-http".into()] };
+    let output = Output {
+        id: "output".into(),
+        inputs: vec!["bad-http".into()],
+    };
     let clock = Clock::new(Duration::from_secs(1));
 
-    let components: Vec<Arc<dyn Component>> = vec![
-        Arc::new(clock),
-        Arc::new(src),
-        Arc::new(output),
-    ];
+    let components: Vec<Arc<dyn Component>> =
+        vec![Arc::new(clock), Arc::new(src), Arc::new(output)];
     let mut rt = Runtime::new();
     rt.set_context(ctx);
     rt.reload(components).expect("valid graph");

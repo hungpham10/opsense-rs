@@ -14,20 +14,20 @@
 //!    the only escape hatch; new ops are added without ABI changes.
 //! 4. **ABI versioning** — `ABI_VERSION` constant; host refuses mismatched plugins.
 
+pub mod cache;
+pub mod error;
 pub mod ffi;
 pub mod host;
 pub mod manifest;
-pub mod error;
-pub mod cache;
 
 use std::future::Future;
 use std::pin::Pin;
 
-pub use manifest::*;
-pub use error::ModuleError;
-pub use host::HostServices;
-pub use ffi::*;
 pub use cache::{Cache, CacheBackend, CacheError, Page, TenantServices};
+pub use error::ModuleError;
+pub use ffi::*;
+pub use host::HostServices;
+pub use manifest::*;
 
 /// Current ABI version. Increment when `HostV1` or `ModuleV1` layout changes.
 pub const ABI_VERSION: u32 = 3;
@@ -46,13 +46,21 @@ pub trait OpsenseModule: Send + Sync + 'static {
     /// Handle an HTTP request. The host converts the incoming axum request
     /// into `HttpRequest`, calls this, and converts the response back.
     /// `services` provides per-tenant cache and other host services.
-    fn route(&self, req: HttpRequest, services: &TenantServices) -> BoxFut<'static, Result<HttpResponse, ModuleError>>;
+    fn route(
+        &self,
+        req: HttpRequest,
+        services: &TenantServices,
+    ) -> BoxFut<'static, Result<HttpResponse, ModuleError>>;
 
     /// Handle an MCP tool call. The host converts the MCP `CallToolRequest`
     /// into `name` + `args` JSON, calls this, and wraps the result.
     /// `services` provides per-tenant cache and other host services.
-    fn tool(&self, name: String, args: serde_json::Value, services: &TenantServices)
-        -> BoxFut<'static, Result<String, ModuleError>>;
+    fn tool(
+        &self,
+        name: String,
+        args: serde_json::Value,
+        services: &TenantServices,
+    ) -> BoxFut<'static, Result<String, ModuleError>>;
 }
 
 /// HTTP request envelope passed to `OpsenseModule::route`.
@@ -123,9 +131,11 @@ impl HttpMethod {
     }
 }
 
-
 /// Helper: create a successful JSON response.
-pub fn json_response<T: serde::Serialize>(status: u16, value: &T) -> Result<HttpResponse, ModuleError> {
+pub fn json_response<T: serde::Serialize>(
+    status: u16,
+    value: &T,
+) -> Result<HttpResponse, ModuleError> {
     let body = serde_json::to_vec(value)
         .map_err(|e| ModuleError::Internal(format!("JSON serialize: {e}")))?;
     Ok(HttpResponse {

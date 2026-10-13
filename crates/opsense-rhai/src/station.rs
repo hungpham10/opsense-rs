@@ -60,16 +60,12 @@ pub fn register(
     let (ctx4, handle4) = (ctx.clone(), handle.clone());
     eng.register_fn(
         "station_query",
-        move |name: String, from: i64, to: i64, signal: Dynamic| -> Result<Dynamic, Box<EvalAltResult>> {
-            run_query(
-                &ctx4,
-                &handle4,
-                &name,
-                from,
-                to,
-                read_signal(&signal),
-                None,
-            )
+        move |name: String,
+              from: i64,
+              to: i64,
+              signal: Dynamic|
+              -> Result<Dynamic, Box<EvalAltResult>> {
+            run_query(&ctx4, &handle4, &name, from, to, read_signal(&signal), None)
         },
     );
     // Arity 5: lọc theo `signal` + `labels.kind`.
@@ -146,8 +142,7 @@ fn write_obs(
         let st = match station_handle(ctx, name).await {
             Ok(st) => st,
             Err(e) => {
-                let msg =
-                    format!("station_write(\"{name}\"): không resolve được station: {e}");
+                let msg = format!("station_write(\"{name}\"): không resolve được station: {e}");
                 tracing::warn!("{msg}");
                 return;
             }
@@ -177,7 +172,11 @@ fn read_signal(v: &Dynamic) -> Option<Signal> {
 
 /// Lọc **trước** khi chuyển sang Dynamic — nếu lọc sau thì mọi map vẫn được
 /// dựng và vẫn chạm trần `max_map_size`.
-fn filter_obs(rows: Vec<Observation>, signal: Option<Signal>, label_kind: Option<&str>) -> Vec<Observation> {
+fn filter_obs(
+    rows: Vec<Observation>,
+    signal: Option<Signal>,
+    label_kind: Option<&str>,
+) -> Vec<Observation> {
     rows.into_iter()
         .filter(|o| signal.is_none_or(|want| o.signal == want))
         .filter(|o| match label_kind {

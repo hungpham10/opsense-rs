@@ -68,7 +68,13 @@ pub fn install() {
     let f: extern "C" fn(i32) = handle_fatal_signal;
     let handler: libc::sighandler_t = f as libc::sighandler_t;
     unsafe {
-        for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT, libc::SIGILL, libc::SIGFPE] {
+        for sig in [
+            libc::SIGSEGV,
+            libc::SIGBUS,
+            libc::SIGABRT,
+            libc::SIGILL,
+            libc::SIGFPE,
+        ] {
             libc::signal(sig, handler);
         }
     }

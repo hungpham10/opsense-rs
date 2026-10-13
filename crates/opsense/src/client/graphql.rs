@@ -390,10 +390,12 @@ impl OpsenseClient {
         if !status.is_success() {
             anyhow::bail!("HTTP {status}: {}", truncate_body(&text));
         }
-        let request: GqlResponse<serde_json::Value> =
-            serde_json::from_str(&text).map_err(|e| {
-                anyhow::anyhow!("HTTP {status} nhưng body không phải JSON: {e}; body: {}", truncate_body(&text))
-            })?;
+        let request: GqlResponse<serde_json::Value> = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!(
+                "HTTP {status} nhưng body không phải JSON: {e}; body: {}",
+                truncate_body(&text)
+            )
+        })?;
         let data = request.into_result()?;
         let value = data
             .get(root)
@@ -533,8 +535,8 @@ impl OpsenseClient {
         to_ts: Option<TimeArg>,
         limit: Option<i64>,
         order: Option<&str>,
-        interval: Option<&str>,    // NEW: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0"
-        mark_price: Option<f64>,   // NEW: giá để tính unrealized PnL
+        interval: Option<&str>, // NEW: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0"
+        mark_price: Option<f64>, // NEW: giá để tính unrealized PnL
     ) -> anyhow::Result<OrdersResult> {
         const QUERY: &str = r#"
             query($node: String!, $status: String, $fromTs: Int, $toTs: Int,
@@ -631,10 +633,12 @@ impl OpsenseClient {
             path: &'a str,
             value: &'a str,
         }
-        self.gql("patchComponent", MUTATION, Vars { id, path, value }).await
+        self.gql("patchComponent", MUTATION, Vars { id, path, value })
+            .await
     }
 
-    pub async fn set_attribute(        &self,
+    pub async fn set_attribute(
+        &self,
         name: &str,
         value: &str,
     ) -> anyhow::Result<SetAttributeResult> {
@@ -648,7 +652,8 @@ impl OpsenseClient {
             name: &'a str,
             value: &'a str,
         }
-        self.gql("setAttribute", MUTATION, Vars { name, value }).await
+        self.gql("setAttribute", MUTATION, Vars { name, value })
+            .await
     }
 
     pub async fn remove_attribute(&self, name: &str) -> anyhow::Result<bool> {
@@ -779,7 +784,11 @@ mod tests {
         let home = std::env::var("HOME").unwrap();
         unsafe { std::env::set_var("HOME", home) };
 
-        assert_eq!(loaded.as_deref(), Some("file-token-xyz"), "phải trim newline");
+        assert_eq!(
+            loaded.as_deref(),
+            Some("file-token-xyz"),
+            "phải trim newline"
+        );
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
             before,
@@ -818,7 +827,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             for _ in 0..2 {
-                let Ok((mut sock, _)) = listener.accept() else { return };
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
                 // Đọc trọn request — xem `read_full_request`.
                 let _ = read_full_request(&mut sock);
                 let resp = format!(
@@ -835,14 +846,21 @@ mod tests {
             .build()
             .expect("rt");
         rt.block_on(async {
-            let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
-            let st = c.status().await.expect("status phải bóc được root `status`");
+            let c =
+                OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+            let st = c
+                .status()
+                .await
+                .expect("status phải bóc được root `status`");
             assert_eq!(st.nodes.len(), 1);
             assert_eq!(st.nodes[0].id, "tsdb");
             assert_eq!(st.nodes[0].description.as_deref(), Some("ghi observation"));
             assert_eq!(st.stations.len(), 1);
 
-            let comps = c.components(None).await.expect("components phải bóc root `components`");
+            let comps = c
+                .components(None)
+                .await
+                .expect("components phải bóc root `components`");
             assert_eq!(comps.len(), 1);
             assert_eq!(comps[0].id, "clock");
             assert_eq!(comps[0].kind, "Source", "`type` phải map vào `kind`");
@@ -886,7 +904,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             for body in bodies {
-                let Ok((mut sock, _)) = listener.accept() else { return };
+                let Ok((mut sock, _)) = listener.accept() else {
+                    return;
+                };
                 // Đọc **trọn** request trước khi trả lời — xem `read_full_request`.
                 let _ = read_full_request(&mut sock);
                 let resp = format!(
@@ -903,23 +923,43 @@ mod tests {
             .build()
             .expect("rt");
         rt.block_on(async {
-            let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+            let c =
+                OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
 
-            let r = c.set_attribute("p", "1").await.expect("setAttribute phải decode được");
+            let r = c
+                .set_attribute("p", "1")
+                .await
+                .expect("setAttribute phải decode được");
             assert!(r.ok);
-            assert!(!r.env_override_active, "envOverrideActive phải map vào `env_override_active`");
+            assert!(
+                !r.env_override_active,
+                "envOverrideActive phải map vào `env_override_active`"
+            );
 
-            let r = c.query_station("grid", None, None, Some(1), None, None, None, None)
+            let r = c
+                .query_station("grid", None, None, Some(1), None, None, None, None)
                 .await
                 .expect("queryTimeseries phải decode được");
             assert_eq!(r.observations.len(), 1);
-            assert_eq!(r.observations[0].metric_id, "BTCUSDT", "`metricId` phải map vào `metric_id`");
-            assert_eq!(r.observations[0].labels.get("grid_cell").map(String::as_str), Some("1"));
+            assert_eq!(
+                r.observations[0].metric_id, "BTCUSDT",
+                "`metricId` phải map vào `metric_id`"
+            );
+            assert_eq!(
+                r.observations[0]
+                    .labels
+                    .get("grid_cell")
+                    .map(String::as_str),
+                Some("1")
+            );
             assert_eq!(r.scanned, 1);
 
             let r = c.status().await.expect("status phải decode được");
             assert_eq!(r.nodes[0].kind, "Transform", "`type` phải map vào `kind`");
-            assert_eq!(r.nodes[0].description.as_deref(), Some("Đọc nến, dựng lưới"));
+            assert_eq!(
+                r.nodes[0].description.as_deref(),
+                Some("Đọc nến, dựng lưới")
+            );
             assert_eq!(r.stations[0].kind, "timeseries");
         });
     }
@@ -1000,12 +1040,14 @@ mod tests {
             sock.write_all(b"hello world").expect("body");
             std::thread::sleep(Duration::from_millis(60));
             // Request thứ hai phải **không** lọt vào kết quả lần đọc đầu.
-            sock.write_all(b"GET /y HTTP/1.1\r\nHost: h\r\n\r\n").expect("next");
+            sock.write_all(b"GET /y HTTP/1.1\r\nHost: h\r\n\r\n")
+                .expect("next");
             std::thread::sleep(Duration::from_millis(60));
         });
 
         let (mut sock, _) = listener.accept().expect("accept");
-        sock.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+        sock.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
         let got = read_full_request(&mut sock).expect("read");
         writer.join().expect("writer");
 
@@ -1055,7 +1097,8 @@ mod tests {
             .build()
             .expect("rt");
         rt.block_on(async {
-            let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+            let c =
+                OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
             c.query_station(
                 "grid",
                 Some(TimeArg::Unix(111)),
@@ -1066,8 +1109,8 @@ mod tests {
                 None,
                 None,
             )
-                .await
-                .expect("query");
+            .await
+            .expect("query");
         });
         let req = rx.recv().expect("request body");
 
@@ -1099,9 +1142,10 @@ mod tests {
             serde_json::from_str(r#"{"observations":[],"truncated":false,"scanned":0}"#)
                 .expect("thiếu `order` vẫn phải decode");
         assert_eq!(r.order, "asc");
-        let r: QueryResult =
-            serde_json::from_str(r#"{"observations":[],"truncated":false,"scanned":0,"order":"desc"}"#)
-                .expect("decode");
+        let r: QueryResult = serde_json::from_str(
+            r#"{"observations":[],"truncated":false,"scanned":0,"order":"desc"}"#,
+        )
+        .expect("decode");
         assert_eq!(r.order, "desc");
     }
 
@@ -1166,7 +1210,8 @@ mod tests {
             .build()
             .expect("rt");
         let err = rt.block_on(async {
-            let c = OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
+            let c =
+                OpsenseClient::new(format!("http://127.0.0.1:{port}/api/repl/graphql")).unwrap();
             c.query_station("tsdb", None, None, Some(10), None, None, None, None)
                 .await
                 .expect_err("thiếu root phải báo lỗi")
@@ -1226,8 +1271,7 @@ mod tests {
             let (mut sock, _) = listener.accept().expect("accept");
             let buf = read_full_request(&mut sock).unwrap_or_default();
             let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
-            const BODY: &str =
-                r#"{"data":{"orders":{"observations":[],"truncated":false,"scanned":0,"order":"desc"}}}"#;
+            const BODY: &str = r#"{"data":{"orders":{"observations":[],"truncated":false,"scanned":0,"order":"desc"}}}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
                  content-length: {}\r\nconnection: close\r\n\r\n{BODY}",

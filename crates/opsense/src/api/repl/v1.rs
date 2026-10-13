@@ -12,7 +12,10 @@
 //! là cách sửa một phần (thêm ở G2).
 use opsense_model::events::Signal;
 
-use crate::api::repl::pnl::{aggregate, dedup_orders, parse_bucket_secs, PnlBucket as InternalPnlBucket, PnlSummary as InternalPnlSummary};
+use crate::api::repl::pnl::{
+    PnlBucket as InternalPnlBucket, PnlSummary as InternalPnlSummary, aggregate, dedup_orders,
+    parse_bucket_secs,
+};
 use std::sync::Arc;
 
 use async_graphql::{Context, EmptySubscription, InputObject, Object, Schema, SimpleObject};
@@ -482,8 +485,7 @@ impl QueryRoot {
     ) -> async_graphql::Result<Vec<ComponentConfig>> {
         let s = state(ctx);
         let descriptions = s.context.node_descriptions().await;
-        Ok(s
-            .components(id.as_deref())
+        Ok(s.components(id.as_deref())
             .await
             .into_iter()
             .filter_map(|value| component_config(value, &descriptions))
@@ -562,16 +564,25 @@ impl QueryRoot {
 
         let want_signal = match &signal {
             None => None,
-            Some(raw) => Some(serde_json::from_value::<opsense_model::events::Signal>(
-                serde_json::Value::String(raw.clone()),
-            )
-            .map_err(|e| {
-                async_graphql::Error::new(format!("signal '{raw}' không hợp lệ: {e}"))
-            })?),
+            Some(raw) => Some(
+                serde_json::from_value::<opsense_model::events::Signal>(serde_json::Value::String(
+                    raw.clone(),
+                ))
+                .map_err(|e| {
+                    async_graphql::Error::new(format!("signal '{raw}' không hợp lệ: {e}"))
+                })?,
+            ),
         };
         let matched: Vec<&Observation> = rows
             .iter()
-            .filter(|o| matches_filters(o, want_signal.as_ref(), label_kind.as_deref(), status.as_deref()))
+            .filter(|o| {
+                matches_filters(
+                    o,
+                    want_signal.as_ref(),
+                    label_kind.as_deref(),
+                    status.as_deref(),
+                )
+            })
             .collect();
         let matched: Vec<Observation> = matched.into_iter().cloned().collect();
         let (observations, truncated) = order_and_limit(&matched, limit, order == Order::Desc);
@@ -601,8 +612,8 @@ impl QueryRoot {
         to_ts: Option<i64>,
         limit: Option<i64>,
         order: Option<String>,
-        interval: Option<String>,    // NEW: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0"
-        mark_price: Option<f64>,     // NEW: giá để tính unrealized PnL
+        interval: Option<String>, // NEW: "1m"|"5m"|"15m"|"30m"|"1h"|"4h"|"1d"|"1w"|"1M"|"0"
+        mark_price: Option<f64>,  // NEW: giá để tính unrealized PnL
     ) -> async_graphql::Result<OrdersResult> {
         let s = state(ctx);
         let now = opsense_components::signal::now_secs();
@@ -663,9 +674,8 @@ impl QueryRoot {
 
         // 4. PnL aggregation nếu có interval.
         let pnl = if let Some(interval_str) = interval {
-            let bucket_secs = parse_bucket_secs(&interval_str).map_err(|e| {
-                async_graphql::Error::new(e)
-            })?;
+            let bucket_secs =
+                parse_bucket_secs(&interval_str).map_err(async_graphql::Error::new)?;
 
             let fee_roundtrip = fee_roundtrip(&s.components(Some(&node)).await);
 
@@ -903,7 +913,8 @@ impl MutationRoot {
         })
     }
 
-    async fn set_attribute(        &self,
+    async fn set_attribute(
+        &self,
         ctx: &Context<'_>,
         name: String,
         value: String,
@@ -937,9 +948,10 @@ impl MutationRoot {
         ctx: &Context<'_>,
         id: String,
     ) -> async_graphql::Result<ClearStationResult> {
-        let kind = state(ctx).clear_station(&id).await.map_err(|e| {
-            async_graphql::Error::new(e.to_string())
-        })?;
+        let kind = state(ctx)
+            .clear_station(&id)
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         Ok(ClearStationResult {
             cleared: vec![Station { id, kind }],
             failed: Vec::new(),
@@ -957,9 +969,10 @@ impl MutationRoot {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<ClearStationResult> {
-        let (cleared, failed) = state(ctx).clear_all_stations().await.map_err(|e| {
-            async_graphql::Error::new(e.to_string())
-        })?;
+        let (cleared, failed) = state(ctx)
+            .clear_all_stations()
+            .await
+            .map_err(|e| async_graphql::Error::new(e.to_string()))?;
         Ok(ClearStationResult {
             cleared: cleared
                 .into_iter()
@@ -1091,7 +1104,13 @@ mod tests {
     /// hết về lọc tay — và `limit` cắt cụt **trước** khi lọc.
     #[test]
     fn status_and_label_kind_filter_different_labels() {
-        let mut open = Observation::new(1, "BTCUSDT".into(), TelemetryKind::Metric, Signal::Order, 100.0);
+        let mut open = Observation::new(
+            1,
+            "BTCUSDT".into(),
+            TelemetryKind::Metric,
+            Signal::Order,
+            100.0,
+        );
         open.labels.insert("order_id".into(), "o1".into());
         open.labels.insert("status".into(), "open".into());
 
@@ -1100,7 +1119,13 @@ mod tests {
         closed.labels.insert("order_id".into(), "o1".into());
         closed.labels.insert("status".into(), "closed".into());
 
-        let mut step = Observation::new(3, "BTCUSDT".into(), TelemetryKind::Metric, Signal::Summary, 3.0);
+        let mut step = Observation::new(
+            3,
+            "BTCUSDT".into(),
+            TelemetryKind::Metric,
+            Signal::Summary,
+            3.0,
+        );
         step.labels.insert("kind".into(), "trading_step".into());
 
         // `status` lấy đúng lệnh đã đóng, và **không** lấy cursor.
@@ -1109,7 +1134,10 @@ mod tests {
             .filter(|o| super::matches_filters(o, Some(&Signal::Order), None, Some("closed")))
             .collect();
         assert_eq!(hit.len(), 1, "phải ra đúng 1 lệnh đóng");
-        assert_eq!(hit[0].labels.get("status").map(String::as_str), Some("closed"));
+        assert_eq!(
+            hit[0].labels.get("status").map(String::as_str),
+            Some("closed")
+        );
 
         // `labelKind: "closed"` rỗng — vì lệnh không có label `kind`.
         let miss: Vec<_> = [&open, &closed]
@@ -1174,23 +1202,17 @@ mod tests {
         assert_eq!(out["script_path"], "strategies/binance/grid.rhai");
 
         // 2. Thêm knob mới vào `params`, các key cũ giữ nguyên.
-        let out = patch_json_pointer(
-            base(),
-            "/params/grid_min_trades",
-            serde_json::json!(5),
-        )
-        .unwrap();
+        let out =
+            patch_json_pointer(base(), "/params/grid_min_trades", serde_json::json!(5)).unwrap();
         assert_eq!(out["params"]["grid_min_trades"], serde_json::json!(5));
         assert_eq!(out["params"]["strategy"], "rhai");
         assert_eq!(out["params"]["sl_pct"], serde_json::json!(0.008));
 
         // 3. Path sai cú pháp / không có cha → lỗi, không im lặng bỏ qua.
-        let err = patch_json_pointer(base(), "params.sl_pct", serde_json::json!(0.02))
-            .unwrap_err();
+        let err = patch_json_pointer(base(), "params.sl_pct", serde_json::json!(0.02)).unwrap_err();
         let err = err.message.clone();
         assert!(err.contains("JSON pointer"), "{err}");
-        let err = patch_json_pointer(base(), "/params/a/b", serde_json::json!(1))
-            .unwrap_err();
+        let err = patch_json_pointer(base(), "/params/a/b", serde_json::json!(1)).unwrap_err();
         let err = err.message.clone();
         assert!(err.contains("không có"), "{err}");
         // Dấu chấm là ký tự thường trong JSON pointer: `/params.a.b` là MỘT key
@@ -1224,7 +1246,11 @@ mod tests {
             "id": "grid",
             "params": { "fee_rate": 0.0005 }
         });
-        assert_eq!(fee_roundtrip(&[other]), 0.001, "0.0005 × 2 phải ra 0.001, không phải mặc định 0.0004");
+        assert_eq!(
+            fee_roundtrip(&[other]),
+            0.001,
+            "0.0005 × 2 phải ra 0.001, không phải mặc định 0.0004"
+        );
 
         // Không khai `fee_rate` → mặc định.
         let none = serde_json::json!({ "type": "clock", "id": "clock" });
@@ -1305,11 +1331,19 @@ mod tests {
 
         // Giá trị cũ lấy từ node **trước** khi patch.
         let old = json_pointer_value(&target, "/params/sl_pct");
-        assert_eq!(old, serde_json::json!(0.008), "old phải là 0.008, không phải null");
+        assert_eq!(
+            old,
+            serde_json::json!(0.008),
+            "old phải là 0.008, không phải null"
+        );
 
         // Giá trị mới lấy từ node **sau** khi patch.
         let new = json_pointer_value(&patched, "/params/sl_pct");
-        assert_eq!(new, serde_json::json!(0.02), "new phải là 0.02, không phải null");
+        assert_eq!(
+            new,
+            serde_json::json!(0.02),
+            "new phải là 0.02, không phải null"
+        );
 
         // Và hai giá trị đó phải ra đúng label audit.
         let obs = config_edit_observation("grid", "params/sl_pct", &old, &new, 1_800_000_000);
@@ -1323,7 +1357,10 @@ mod tests {
             json_pointer_value(&target, "/params/new_knob"),
             serde_json::Value::Null
         );
-        assert_eq!(json_pointer_value(&added, "/params/new_knob"), serde_json::json!(7));
+        assert_eq!(
+            json_pointer_value(&added, "/params/new_knob"),
+            serde_json::json!(7)
+        );
     }
 
     /// Audit phải đủ để trả lời "đổi gì, từ giá trị nào sang nào, ở node nào,
@@ -1339,9 +1376,15 @@ mod tests {
         );
         assert_eq!(obs.ts, 1_800_000_000);
         assert_eq!(obs.metric_id, "config_edit");
-        assert_eq!(obs.labels.get("kind").map(String::as_str), Some("config_edit"));
+        assert_eq!(
+            obs.labels.get("kind").map(String::as_str),
+            Some("config_edit")
+        );
         assert_eq!(obs.labels.get("node").map(String::as_str), Some("grid"));
-        assert_eq!(obs.labels.get("path").map(String::as_str), Some("params/sl_pct"));
+        assert_eq!(
+            obs.labels.get("path").map(String::as_str),
+            Some("params/sl_pct")
+        );
         assert_eq!(obs.labels.get("from").map(String::as_str), Some("0.008"));
         assert_eq!(obs.labels.get("to").map(String::as_str), Some("0.02"));
     }
@@ -1355,11 +1398,7 @@ mod tests {
             "type": "khong_ton_tai", "id": "x"
         }))
         .expect_err("type lạ phải lỗi");
-        assert!(
-            err.message.contains("khong_ton_tai"),
-            "{}",
-            err.message
-        );
+        assert!(err.message.contains("khong_ton_tai"), "{}", err.message);
 
         // Sai kiểu field: `interval_secs` của clock phải là số.
         let err = parse_component_json(serde_json::json!({

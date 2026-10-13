@@ -496,17 +496,9 @@ mod tests {
     /// là mặc định và `grid_fit` dùng cho phân tích thuần.
     #[test]
     fn no_min_step_frac_keeps_old_behaviour() {
-        let values: Vec<f64> = (0..60)
-            .map(|i| 84_600.0 + (i % 7) as f64 * 40.0)
-            .collect();
+        let values: Vec<f64> = (0..60).map(|i| 84_600.0 + (i % 7) as f64 * 40.0).collect();
         let (lo, hi) = (84_600.0, 84_840.0);
-        let with_default = AnalysisGrid::with_config(
-            &values,
-            lo,
-            hi,
-            20,
-            &SieveConfig::default(),
-        );
+        let with_default = AnalysisGrid::with_config(&values, lo, hi, 20, &SieveConfig::default());
         let without = AnalysisGrid::new(&values, lo, hi, 20);
         assert_eq!(with_default.step, without.step);
         assert_eq!(with_default.num_cells(), without.num_cells());

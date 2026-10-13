@@ -33,10 +33,10 @@ use opsense_components::http::HttpOrigin;
 use opsense_components::signal;
 use opsense_components::vector::runtime::Runtime;
 use opsense_core::{Config, Context, Observation, TimeseriesStation};
-use opsense_model::events::Signal;
 use opsense_mlib::cast::CastType;
 use opsense_mlib::jq::JsonQuery;
 use opsense_mlib::vector::components::{Json2Json, Websocket2Json};
+use opsense_model::events::Signal;
 use opsense_model::secret::Secret;
 use opsense_rhai::RhaiTransform;
 use serde_json::{Value, json};
@@ -72,7 +72,7 @@ fn memonly(cfg: &mut Config) {
 /// ── Tầng 1: config contract ────────────────────────────────────────────────
 #[test]
 fn config_file_contract() {
-    let cfg = Config::load(Path::new(CONFIG_PATH))
+    let (cfg, _dir) = Config::load(Path::new(CONFIG_PATH))
         .expect("strategies/binance/config.toml phải parse + validate");
     // Config thật persist qua Redis/Valkey — xem `strategies/binance/config.toml`.
     // Test này **không** mở backend (chỉ contract), nên assert trên chính
@@ -127,7 +127,6 @@ fn config_file_contract() {
             .as_any()
     };
 
-
     // History: node **kéo theo yêu cầu** — `http_origin` là
     // `ComponentType::Source` nên không cần node `clock`: nó tự làm origin của
     // chính station nên dữ liệu tới đúng lúc có người đọc.
@@ -145,8 +144,14 @@ fn config_file_contract() {
         history.bindings.is_empty(),
         "không binding: node không lo phép nhân đơn vị — xem `grid.rhai`"
     );
-    assert!(history.station, "http_origin phải terminal: không còn node sink");
-    let candles = history.candles.as_ref().expect("http source phải bật candle parse mode");
+    assert!(
+        history.station,
+        "http_origin phải terminal: không còn node sink"
+    );
+    let candles = history
+        .candles
+        .as_ref()
+        .expect("http source phải bật candle parse mode");
     assert_eq!(candles.symbol, SYMBOL);
     assert_eq!(candles.resolution, "1m");
     assert_eq!(candles.unit_ms, 1, "Binance openTime là milliseconds");
@@ -178,7 +183,10 @@ fn config_file_contract() {
         "E (event time) → ts"
     );
     assert_eq!(
-        map.transforms.get("metric_id").expect("transform metric_id").query,
+        map.transforms
+            .get("metric_id")
+            .expect("transform metric_id")
+            .query,
         JsonQuery::parse("s").expect("parse s").operators(),
         "s (symbol) → metric_id"
     );
@@ -193,8 +201,14 @@ fn config_file_contract() {
         Some(CastType::F64),
         "Binance price là string → phải cast f64"
     );
-    let constants = map.constants.as_ref().expect("tick map phải khai constants");
-    assert_eq!(constants["trigger"], "tick", "trigger định danh người gửi (ưu tiên payload.trigger)");
+    let constants = map
+        .constants
+        .as_ref()
+        .expect("tick map phải khai constants");
+    assert_eq!(
+        constants["trigger"], "tick",
+        "trigger định danh người gửi (ưu tiên payload.trigger)"
+    );
     assert_eq!(constants["kind"], "metric");
     assert_eq!(constants["signal"], "raw");
     assert_eq!(constants["labels"]["resolution"], "1m");
@@ -242,7 +256,10 @@ fn config_file_contract() {
         grid.params.get("own_station").and_then(Value::as_str),
         Some(STATION_GRID)
     );
-    assert_eq!(grid.params.get("symbol").and_then(Value::as_str), Some(SYMBOL));
+    assert_eq!(
+        grid.params.get("symbol").and_then(Value::as_str),
+        Some(SYMBOL)
+    );
 
     // Strategy = script: `fn rebuild` trong grid.rhai dựng plan (opsense-rhai
     // `ScriptStrategy`), knob dưới đây là tham số `fn rebuild` đọc. Ghi rõ ở
@@ -291,7 +308,7 @@ async fn full_pipeline_ticks_and_snapshot() {
     let now = signal::now_secs();
 
     // 1) Load config thật, override các đường dẫn host-only.
-    let mut cfg = Config::load(Path::new(CONFIG_PATH))
+    let (mut cfg, _dir) = Config::load(Path::new(CONFIG_PATH))
         .expect("strategies/binance/config.toml phải parse + validate");
     let dir = Path::new(CONFIG_PATH)
         .parent()
@@ -352,7 +369,9 @@ async fn full_pipeline_ticks_and_snapshot() {
         "nến phải có obs OHLCV (labels.field): {candles:?}"
     );
     assert!(
-        candles.iter().any(|o| o.labels.get("field").map(String::as_str) == Some("c")),
+        candles
+            .iter()
+            .any(|o| o.labels.get("field").map(String::as_str) == Some("c")),
         "nến phải có field `c` (close): {candles:?}"
     );
 
@@ -481,10 +500,13 @@ async fn full_pipeline_trading_emits_orders() {
         .with_test_writer()
         .try_init();
 
-    let mut cfg = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
+    let (mut cfg, _dir) = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
     // Storage về memory — job này build không bật feature `opsense-core/redis`.
     memonly(&mut cfg);
-    let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
+    let dir = Path::new(CONFIG_PATH)
+        .parent()
+        .expect("config parent")
+        .to_path_buf();
     let script = dir.join("grid.rhai");
 
     // `history` là http_origin → trỏ về mock, nếu không test gọi Binance thật.
@@ -502,7 +524,10 @@ async fn full_pipeline_trading_emits_orders() {
                     obj.insert("uri".into(), json!(ws_uri));
                 }
                 Some(STATION_GRID) => {
-                    obj.insert("script_path".into(), json!(script.to_string_lossy().as_ref()));
+                    obj.insert(
+                        "script_path".into(),
+                        json!(script.to_string_lossy().as_ref()),
+                    );
                     let params = obj
                         .get_mut("params")
                         .and_then(Value::as_object_mut)
@@ -523,10 +548,7 @@ async fn full_pipeline_trading_emits_orders() {
     let _runtime_handle = rt.start(|_| async {}).unwrap();
 
     let obs = wait_orders(&ctx, 90).await;
-    let orders: Vec<&Observation> = obs
-        .iter()
-        .filter(|o| o.signal == Signal::Order)
-        .collect();
+    let orders: Vec<&Observation> = obs.iter().filter(|o| o.signal == Signal::Order).collect();
     assert!(!orders.is_empty(), "trading mode phải sinh order: {obs:?}");
     let mut opened = 0usize;
     for order in &orders {
@@ -571,7 +593,10 @@ async fn full_pipeline_trading_emits_orders() {
             );
         }
         for key in ["order_id", "dtype", "grid", "level", "size", "sl", "tp"] {
-            assert!(order.labels.contains_key(key), "thiếu label `{key}`: {order:?}");
+            assert!(
+                order.labels.contains_key(key),
+                "thiếu label `{key}`: {order:?}"
+            );
         }
     }
     assert!(
@@ -594,7 +619,10 @@ async fn full_pipeline_trading_emits_orders() {
         // chỉ đòi label phải đọc được, còn "đã tiến" thì kiểm trên giá trị lớn
         // nhất bên dưới.
         assert!(
-            c.labels.get("candle_seq").and_then(|v| v.parse::<u64>().ok()).is_some(),
+            c.labels
+                .get("candle_seq")
+                .and_then(|v| v.parse::<u64>().ok())
+                .is_some(),
             "cursor phải lưu candle_seq đọc được: {c:?}"
         );
         // Nến đã đóng = ts của cursor, luôn trùng bucket 60s của resolution 1m.
@@ -653,10 +681,13 @@ async fn trading_orders_readable_via_graphql() {
         std::env::set_var("DB_DSN", "postgres://poc:poc@127.0.0.1:1/poc");
     }
 
-    let mut cfg = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
+    let (mut cfg, _dir) = Config::load(Path::new(CONFIG_PATH)).expect("config parse + validate");
     // Storage về memory — job này build không bật feature `opsense-core/redis`.
     memonly(&mut cfg);
-    let dir = Path::new(CONFIG_PATH).parent().expect("config parent").to_path_buf();
+    let dir = Path::new(CONFIG_PATH)
+        .parent()
+        .expect("config parent")
+        .to_path_buf();
     let script = dir.join("grid.rhai");
 
     // `history` là http_origin → trỏ về mock, nếu không test gọi Binance thật.
@@ -674,7 +705,10 @@ async fn trading_orders_readable_via_graphql() {
                     obj.insert("uri".into(), json!(ws_uri));
                 }
                 Some(STATION_GRID) => {
-                    obj.insert("script_path".into(), json!(script.to_string_lossy().as_ref()));
+                    obj.insert(
+                        "script_path".into(),
+                        json!(script.to_string_lossy().as_ref()),
+                    );
                     let params = obj
                         .get_mut("params")
                         .and_then(Value::as_object_mut)
@@ -843,7 +877,10 @@ async fn trading_orders_readable_via_graphql() {
             );
         }
         // ts phải nằm trong cửa sổ đã xin (guard chéo cho lọc ts ở tầng API).
-        assert!(ts <= signal::now_secs(), "order ts={ts} ở tương lai: {order}");
+        assert!(
+            ts <= signal::now_secs(),
+            "order ts={ts} ở tương lai: {order}"
+        );
     }
     assert!(
         opened > 0,
@@ -853,9 +890,9 @@ async fn trading_orders_readable_via_graphql() {
     // `opsense orders` lọc theo `labels.kind`, nên `order_id` phải hiện được ở
     // tầng GraphQL (không bị lọc/strip trong `queryTimeseries`).
     assert!(
-        orders
-            .iter()
-            .all(|o| o["labels"]["order_id"].as_str().is_some_and(|s| !s.is_empty())),
+        orders.iter().all(|o| o["labels"]["order_id"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())),
         "mọi order phải có order_id để `opsense orders` dùng được: {orders:?}"
     );
 
@@ -865,7 +902,10 @@ async fn trading_orders_readable_via_graphql() {
 async fn wait_orders(ctx: &Arc<Context>, timeout_secs: u64) -> Vec<Observation> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
-        if let Ok(st) = ctx.station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID).await {
+        if let Ok(st) = ctx
+            .station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID)
+            .await
+        {
             let now = signal::now_secs();
             let obs = st
                 .write()
@@ -969,8 +1009,7 @@ async fn handle_ticks(mut socket: WebSocket) {
 /// nến hỏng: không mốc lưới nào nằm trong `[l, h]` nên kernel không vào lệnh
 /// — đúng triệu chứng đã gặp (`low=83932.0 high=83932.01`).
 fn candle_ranges(obs: &[Observation]) -> Vec<(i64, f64)> {
-    let mut acc: std::collections::BTreeMap<i64, (f64, f64)> =
-        std::collections::BTreeMap::new();
+    let mut acc: std::collections::BTreeMap<i64, (f64, f64)> = std::collections::BTreeMap::new();
     for o in obs {
         let Some(f) = o.labels.get("field").map(String::as_str) else {
             continue;
@@ -985,7 +1024,16 @@ fn candle_ranges(obs: &[Observation]) -> Vec<(i64, f64)> {
         }
     }
     acc.into_iter()
-        .map(|(ts, (h, l))| (ts, if h.is_finite() && l.is_finite() { h - l } else { 0.0 }))
+        .map(|(ts, (h, l))| {
+            (
+                ts,
+                if h.is_finite() && l.is_finite() {
+                    h - l
+                } else {
+                    0.0
+                },
+            )
+        })
         .collect()
 }
 
@@ -1115,7 +1163,9 @@ async fn wait_grid_snapshot(
         };
         let has_candle = candles.iter().any(|o| o.labels.contains_key("field"));
 
-        let has_snapshot = match ctx.station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID).await
+        let has_snapshot = match ctx
+            .station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID)
+            .await
         {
             Ok(st) => st
                 .write()
@@ -1132,7 +1182,10 @@ async fn wait_grid_snapshot(
             return candles;
         }
         if Instant::now() >= deadline {
-            let dump = match ctx.station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID).await {
+            let dump = match ctx
+                .station::<Arc<RwLock<TimeseriesStation>>>(STATION_GRID)
+                .await
+            {
                 Ok(s) => {
                     let v = s
                         .read()
@@ -1166,7 +1219,10 @@ async fn wait_grid_snapshot(
             // "fetch thất bại") bị capture rồi bỏ — nên chỗ đúng để ghi lại
             // bằng chứng là message của panic này.
             let n_candles = candles.len();
-            let n_candles_with_field = candles.iter().filter(|o| o.labels.contains_key("field")).count();
+            let n_candles_with_field = candles
+                .iter()
+                .filter(|o| o.labels.contains_key("field"))
+                .count();
             let last_candle = candles
                 .iter()
                 .max_by_key(|o| o.ts)

@@ -36,8 +36,8 @@ use opsense_core::Observation;
 use opsense_model::events::{Signal, TelemetryKind};
 use opsense_qlib::{
     Calendar, CandleStick, CryptoCalendar, DataLoader, Fee, ForexCalendar, Graph, Order,
-    OrderEvent, OrderType, Portfolio, PortfolioConfig, Score, Session, SharpeScore,
-    SimpleFixedFee, StockCalendar, Strategy, TradingGrid,
+    OrderEvent, OrderType, Portfolio, PortfolioConfig, Score, Session, SharpeScore, SimpleFixedFee,
+    StockCalendar, Strategy, TradingGrid,
 };
 use rhai::{Array, Dynamic, Map};
 
@@ -107,13 +107,11 @@ impl Diagnostics {
     /// sau một `Transient` (chưa đủ nến) vẫn phải là thứ được báo, vì nó là
     /// thứ **không tự hết**.
     fn worst(&self) -> Option<&Fault> {
-        self.faults
-            .iter()
-            .max_by_key(|f| match f.severity {
-                Severity::Transient => 0,
-                Severity::Corrupt => 1,
-                Severity::Fatal => 2,
-            })
+        self.faults.iter().max_by_key(|f| match f.severity {
+            Severity::Transient => 0,
+            Severity::Corrupt => 1,
+            Severity::Fatal => 2,
+        })
     }
 }
 
@@ -174,7 +172,10 @@ pub fn register(eng: &mut rhai::Engine) {
                 diag.push(Fault::new(
                     Severity::Corrupt,
                     "candle_shape",
-                    format!("{dropped}/{} phần tử không đọc được thành nến", dropped + candles.len()),
+                    format!(
+                        "{dropped}/{} phần tử không đọc được thành nến",
+                        dropped + candles.len()
+                    ),
                 ));
             }
             let incoming = candle_from_map(&candle);
@@ -193,12 +194,7 @@ pub fn register(eng: &mut rhai::Engine) {
             let result = tokio::runtime::Handle::try_current()
                 .map(|handle| {
                     handle.block_on(feed(
-                        &candles,
-                        &state,
-                        incoming,
-                        &settings,
-                        &symbol,
-                        &mut inner,
+                        &candles, &state, incoming, &settings, &symbol, &mut inner,
                     ))
                 })
                 .unwrap_or_else(|_| {
@@ -324,10 +320,7 @@ impl Settings {
         let mut s = Self::default();
         let num = |k: &str| cfg.get(k).map(as_f64);
         let int = |k: &str| cfg.get(k).map(as_i64);
-        let text = |k: &str| {
-            cfg.get(k)
-                .and_then(|v| v.clone().into_string().ok())
-        };
+        let text = |k: &str| cfg.get(k).and_then(|v| v.clone().into_string().ok());
 
         if let Some(v) = text("resolution") {
             s.resolution = v;
@@ -422,9 +415,10 @@ impl Settings {
     /// riêng: `PortfolioConfig::min_rr`.
     fn params(&self) -> Vec<f64> {
         if (self.strategy == "dag" || self.strategy == "graph")
-            && let Ok(graph) = self.dag() {
-                return graph.init();
-            }
+            && let Ok(graph) = self.dag()
+        {
+            return graph.init();
+        }
         vec![
             self.kelly_fraction,
             self.base_capital,
@@ -473,7 +467,10 @@ impl Settings {
                     .with_knob("trend_bias_max", self.trend_bias_max.into())
                     .with_knob("trend_er_gate", self.trend_er_gate.into())
                     // Sàn bước lưới cho sieve.
-                    .with_knob("grid_min_step_frac", self.grid_min_step_frac.unwrap_or(0.0).into());
+                    .with_knob(
+                        "grid_min_step_frac",
+                        self.grid_min_step_frac.unwrap_or(0.0).into(),
+                    );
                 if let Some(amp) = self.grid_level_edge_amp {
                     s = s.with_knob("level_edge_amp", amp.into());
                 }
@@ -734,13 +731,21 @@ async fn feed(
             // được strategy. Trước đây trả rỗng **không log** — node chạy, không
             // đặt lệnh, không ai biết vì sao. Không tự hết được, nhưng cũng
             // **không được** làm chết pipeline.
-            diag.push(Fault::new(Severity::Fatal, "portfolio_build", e.to_string()));
+            diag.push(Fault::new(
+                Severity::Fatal,
+                "portfolio_build",
+                e.to_string(),
+            ));
             return Vec::new();
         }
     };
 
     // Series phân tích: nến đã đóng trước đó + nến mới.
-    let mut series: Vec<CandleStick> = candles.iter().copied().filter(|c| c.t < incoming.t).collect();
+    let mut series: Vec<CandleStick> = candles
+        .iter()
+        .copied()
+        .filter(|c| c.t < incoming.t)
+        .collect();
     series.push(incoming);
     series.sort_by_key(|c| c.t);
     series.dedup_by_key(|c| c.t);
@@ -787,11 +792,10 @@ async fn feed(
         // Rebuild thiếu nến là chuyện thường ở nhịp đầu, nên `Transient`; kernel
         // đã **tự giữ plan cũ và tiến `review_at`** nên lần sau thử lại — ghi rõ
         // điều đó trong `recovered` thay vì chỉ báo lỗi.
-        diag.push(Fault::new(
-            Severity::Transient,
-            "forward",
-            format!("forward lỗi: {e}"),
-        ).recovered("giữ plan cũ, thử lại ở nhịp sau"));
+        diag.push(
+            Fault::new(Severity::Transient, "forward", format!("forward lỗi: {e}"))
+                .recovered("giữ plan cũ, thử lại ở nhịp sau"),
+        );
     }
 
     let events = events.lock().map(|g| g.clone()).unwrap_or_default();
@@ -855,9 +859,7 @@ async fn feed(
 
 /// Fetch đóng trên series cố định: kernel hỏi range nào cũng trả đúng candles ở
 /// trong đó. Series nhỏ (vài trăm nến) nên lọc tuyến tính là đủ.
-fn slice_fetch(
-    series: Vec<CandleStick>,
-) -> Box<dyn FnMut(u64, u64) -> LoaderFuture + Send + Sync> {
+fn slice_fetch(series: Vec<CandleStick>) -> Box<dyn FnMut(u64, u64) -> LoaderFuture + Send + Sync> {
     Box::new(move |from: u64, to: u64| {
         let out: Vec<CandleStick> = series
             .iter()
@@ -1047,7 +1049,13 @@ fn order_labels(id: &str, order: &Order, status: &str) -> HashMap<String, String
 
 /// Cursor: nến cuối đã chạy trading step + seq toàn cục tới đó, cộng trạng
 /// thái review để lời gọi sau khôi phục đúng nhịp rebuild và đúng cột weight.
-fn step_cursor(ts: i64, candle_seq: u64, review_at: u64, candle_id: usize, symbol: &str) -> Observation {
+fn step_cursor(
+    ts: i64,
+    candle_seq: u64,
+    review_at: u64,
+    candle_id: usize,
+    symbol: &str,
+) -> Observation {
     let mut o = Observation::new(
         ts,
         symbol.to_string(),
@@ -1067,7 +1075,12 @@ fn step_cursor(ts: i64, candle_seq: u64, review_at: u64, candle_id: usize, symbo
 
 /// Dựng lại `Order` từ observation; `None` khi thiếu dữ liệu dùng được.
 fn order_of(o: &Observation) -> Option<Order> {
-    let num = |key: &str| -> f64 { o.labels.get(key).and_then(|v| v.parse().ok()).unwrap_or(0.0) };
+    let num = |key: &str| -> f64 {
+        o.labels
+            .get(key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0)
+    };
     let dtype = match o.labels.get(L_DTYPE).map(String::as_str) {
         Some("long") => OrderType::Long,
         Some("short") => OrderType::Short,
@@ -1097,7 +1110,10 @@ fn parse_u64(o: &Observation, key: &str) -> u64 {
 }
 
 fn tail_num(id: &str) -> u64 {
-    id.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
+    id.rsplit('-')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1283,10 +1299,10 @@ mod tests {
             unlock_seq: 0,
         };
 
-        let mut obs: Array = vec![rhai::serde::to_dynamic(
-            plan_observation(1_000, &[grid], "BTCUSDT").expect("plan obs"),
-        )
-        .expect("serialize")];
+        let mut obs: Array = vec![
+            rhai::serde::to_dynamic(plan_observation(1_000, &[grid], "BTCUSDT").expect("plan obs"))
+                .expect("serialize"),
+        ];
         obs.push(
             rhai::serde::to_dynamic(open_observation(1_000, "o1-1", &order, "BTCUSDT"))
                 .expect("serialize"),
@@ -1298,7 +1314,11 @@ mod tests {
         );
 
         let state = State::from_observations(&obs, &mut Diagnostics::default());
-        assert_eq!(state.session.orders.len(), 1, "lệnh đang mở phải được khôi phục");
+        assert_eq!(
+            state.session.orders.len(),
+            1,
+            "lệnh đang mở phải được khôi phục"
+        );
 
         // SL = 109.12. `check_order_exit` xử lý **SL trước TP**, nên `low` phải
         // nằm trên 109.12 — nến nào chạm cả hai thì ra thua, không phải thắng.
@@ -1371,10 +1391,12 @@ mod tests {
     /// Station có sẵn plan hẹp + cursor chặn rebuild, để kernel dùng đúng lưới
     /// ta dựng thay vì để script `rebuild` viết đè. ≥ 10 nến để qua guard.
     fn rr_station() -> (State, Vec<CandleStick>) {
-        let mut obs: Array = vec![rhai::serde::to_dynamic(
-            plan_observation(1_000, &[rr_grid()], "BTCUSDT").expect("plan obs"),
-        )
-        .expect("serialize")];
+        let mut obs: Array = vec![
+            rhai::serde::to_dynamic(
+                plan_observation(1_000, &[rr_grid()], "BTCUSDT").expect("plan obs"),
+            )
+            .expect("serialize"),
+        ];
         // `review_at` xa ⇒ KHÔNG rebuild ⇒ `session.plan` giữ nguyên lưới trên.
         obs.push(
             rhai::serde::to_dynamic(step_cursor(1_000, 0, 9_999_999_999, 0, "BTCUSDT"))
@@ -1488,10 +1510,7 @@ mod tests {
         )
         .await;
 
-        let orders: Vec<&Observation> = out
-            .iter()
-            .filter(|o| o.signal == Signal::Order)
-            .collect();
+        let orders: Vec<&Observation> = out.iter().filter(|o| o.signal == Signal::Order).collect();
         assert!(!orders.is_empty(), "phải có lệnh: {out:?}");
         let first = orders[0];
         assert_eq!(first.metric_id, "BTCUSDT");
@@ -1520,7 +1539,10 @@ mod tests {
             "lookback_time_to_rebuild": 200,
             "interval_time_to_rebuild": 60
         });
-        rhai::serde::to_dynamic(json).expect("dag json").try_cast().expect("map")
+        rhai::serde::to_dynamic(json)
+            .expect("dag json")
+            .try_cast()
+            .expect("map")
     }
 
     #[test]
@@ -1616,7 +1638,10 @@ mod tests {
             .collect();
         let state = State::from_observations(&persisted, &mut Diagnostics::default());
         assert_eq!(state.session.orders.len(), opens.len());
-        assert!(!state.open_ids.is_empty(), "id lệnh phải được giữ để khép vòng đời");
+        assert!(
+            !state.open_ids.is_empty(),
+            "id lệnh phải được giữ để khép vòng đời"
+        );
 
         // Đóng hết rồi đọc lại → không còn lệnh mở, lịch sử có đủ.
         for o in &opens {
@@ -1640,7 +1665,11 @@ mod tests {
             state.session.orders.is_empty(),
             "lệnh đã đóng không được giữ trong orders"
         );
-        assert_eq!(state.session.history.len(), opens.len(), "lịch sử giữ lệnh đóng");
+        assert_eq!(
+            state.session.history.len(),
+            opens.len(),
+            "lịch sử giữ lệnh đóng"
+        );
     }
 
     /// `review_at` / `candle_id` / `plan` phải sống sót qua lời gọi.
@@ -1662,10 +1691,10 @@ mod tests {
             .with_outcome_counts(vec![2, 1, 0], vec![0, 1, 2], vec![1, 0, 1], vec![1, 1, 0]);
         let plan = vec![grid];
 
-        let mut obs: Array = vec![rhai::serde::to_dynamic(
-            plan_observation(1_000, &plan, "BTCUSDT").expect("plan obs"),
-        )
-        .expect("serialize")];
+        let mut obs: Array = vec![
+            rhai::serde::to_dynamic(plan_observation(1_000, &plan, "BTCUSDT").expect("plan obs"))
+                .expect("serialize"),
+        ];
         obs.push(
             rhai::serde::to_dynamic(step_cursor(1_000, 42, 1_900, 7, "BTCUSDT"))
                 .expect("serialize"),
@@ -1673,8 +1702,14 @@ mod tests {
 
         let state = State::from_observations(&obs, &mut Diagnostics::default());
 
-        assert_eq!(state.session.review_at, 1_900, "review_at phải sống qua station");
-        assert_eq!(state.session.candle_id, 7, "candle_id phải sống qua station");
+        assert_eq!(
+            state.session.review_at, 1_900,
+            "review_at phải sống qua station"
+        );
+        assert_eq!(
+            state.session.candle_id, 7,
+            "candle_id phải sống qua station"
+        );
         assert_eq!(state.session.plan.len(), 1, "plan phải được khôi phục");
 
         let g = &state.session.plan[0];
@@ -1693,7 +1728,10 @@ mod tests {
                 );
             }
         }
-        assert!((g.long_win_pct(0) - 0.55).abs() < 1e-12, "tỉ lệ thắng phải khớp");
+        assert!(
+            (g.long_win_pct(0) - 0.55).abs() < 1e-12,
+            "tỉ lệ thắng phải khớp"
+        );
 
         // Bộ đếm thắng/thua: đây là thứ KHÔNG serialize được mà phải suy ra từ
         // history — ở đây plan đã lưu kèm nên khôi phục thẳng.
@@ -1795,7 +1833,10 @@ mod value_semantics {
             closed_obs.labels.get(L_PNL).map(String::as_str),
             Some("0.0023229141695763895")
         );
-        assert_eq!(closed_obs.labels.get(L_EXIT).map(String::as_str), Some("83699.4375"));
+        assert_eq!(
+            closed_obs.labels.get(L_EXIT).map(String::as_str),
+            Some("83699.4375")
+        );
     }
 
     #[test]
@@ -1807,8 +1848,15 @@ mod value_semantics {
         let obs = closed_observation(1_790_662_140, "o1", &closed, "BTCUSDT");
 
         let back = order_of(&obs).expect("bản ghi đóng phải parse được");
-        assert_eq!(back.entry_price, 83_472.15, "entry phải là giá vào, không phải pnl");
-        assert_eq!(back.exit_price, Some(83_699.437_5), "exit phải đọc được từ label");
+        assert_eq!(
+            back.entry_price, 83_472.15,
+            "entry phải là giá vào, không phải pnl"
+        );
+        assert_eq!(
+            back.exit_price,
+            Some(83_699.437_5),
+            "exit phải đọc được từ label"
+        );
         assert_eq!(back.pnl_pct, Some(0.002_322_914_169_576_389_5));
     }
 }

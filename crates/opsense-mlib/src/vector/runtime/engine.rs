@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 use futures::FutureExt;
 use log::info;
 
-use super::models::{Component, ComponentType, Context, Event, Fault, Message, NodeInfo, Outbound, Severity};
+use super::models::{
+    Component, ComponentType, Context, Event, Fault, Message, NodeInfo, Outbound, Severity,
+};
 
 /// Lỗi gần nhất của từng node, kèm revision để cache của [`Runtime::topology`]
 /// biết khi nào phải dựng lại.
@@ -63,7 +65,11 @@ impl NodeErrors {
     /// Số lần xảy ra, để thấy "lỗi tĩnh lặp mỗi nến" khác "một lần rồi hết".
     /// Không đếm trong `rev` vì không đổi nội dung status.
     pub fn count(&self, node: &str) -> u64 {
-        self.counts.read().ok().map(|c| c.get(node).copied().unwrap_or(0)).unwrap_or(0)
+        self.counts
+            .read()
+            .ok()
+            .map(|c| c.get(node).copied().unwrap_or(0))
+            .unwrap_or(0)
     }
 
     fn snapshot(&self) -> HashMap<String, Fault> {
@@ -538,11 +544,7 @@ impl Runtime {
                     f.message
                 );
             }
-            Some(f) => log::warn!(
-                "node lỗi tạm: code={} error={}",
-                f.code,
-                f.message
-            ),
+            Some(f) => log::warn!("node lỗi tạm: code={} error={}", f.code, f.message),
             None => {}
         }
         self.last_errors.set(id, fault);

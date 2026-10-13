@@ -36,8 +36,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, mpsc};
 
 use opsense_core::{Observation, Station, TimeseriesStation};
-use serde_json::Value;
 use opsense_macros::transform;
+use serde_json::Value;
 
 use crate::ohlcv::OHLCV_FIELDS;
 use crate::signal;
@@ -149,10 +149,18 @@ pub struct Tick2Candle {
     pub station: bool,
 }
 
-fn default_resolution() -> String { "1m".to_string() }
-fn default_unit_ms() -> u64 { 1 }
-fn default_stale_secs() -> u64 { 180 }
-fn default_true() -> bool { true }
+fn default_resolution() -> String {
+    "1m".to_string()
+}
+fn default_unit_ms() -> u64 {
+    1
+}
+fn default_stale_secs() -> u64 {
+    180
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Tick2Candle {
     #[must_use]
@@ -412,11 +420,11 @@ mod tests {
     }
 
     /// `bucket_secs` → `i64` (bucket offset). Tách riêng cho test đỡ phải `.unwrap()`.
-fn step_secs_of(step: u64) -> i64 {
-    i64::try_from(step).unwrap_or(60)
-}
+    fn step_secs_of(step: u64) -> i64 {
+        i64::try_from(step).unwrap_or(60)
+    }
 
-/// Nến chỉ đóng khi **đã sang bucket kế tiếp**, nên nhiều tick trong cùng
+    /// Nến chỉ đóng khi **đã sang bucket kế tiếp**, nên nhiều tick trong cùng
     /// một bucket phải gộp lại — không phải mỗi tick một nến.
     ///
     /// Bản đầu tiên lấy `now = max(ts batch)` rồi đóng khi `bucket + step <= now`.
@@ -498,7 +506,11 @@ fn step_secs_of(step: u64) -> i64 {
         assert_eq!(bucket_secs(""), 60, "rỗng ⇒ mặc định 1m");
         assert_eq!(bucket_secs("abc"), 60, "rác ⇒ mặc định 1m");
         assert_eq!(bucket_secs("0"), 60, "0 ⇒ mặc định, không phải 0 giây");
-        assert_eq!(bucket_of(123, bucket_secs("0m")), 120, "bucket 60s của giây 123");
+        assert_eq!(
+            bucket_of(123, bucket_secs("0m")),
+            120,
+            "bucket 60s của giây 123"
+        );
     }
 
     #[test]
@@ -553,7 +565,10 @@ fn step_secs_of(step: u64) -> i64 {
             assert_eq!(row.labels.get("field").map(String::as_str), Some(field));
             assert_eq!(row.labels.get("resolution").map(String::as_str), Some("1m"));
         }
-        let high = rows.iter().find(|r| r.labels["field"] == "h").expect("có h");
+        let high = rows
+            .iter()
+            .find(|r| r.labels["field"] == "h")
+            .expect("có h");
         assert_eq!(high.value, 12.0);
     }
 

@@ -41,7 +41,11 @@ use opsense_model::secret::Secret;
 /// cửa sổ quanh hiện tại, y hệt Binance với `limit=1000`.
 async fn spawn_mock(
     body_for: Arc<dyn Fn(i64, i64) -> String + Send + Sync>,
-) -> (std::net::SocketAddr, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
+) -> (
+    std::net::SocketAddr,
+    Arc<AtomicUsize>,
+    Arc<Mutex<Vec<String>>>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -185,7 +189,12 @@ async fn read_until_candles(
     let st = station_of(ctx).await;
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let obs = st.read().await.query_recent(from, to).await.unwrap_or_default();
+        let obs = st
+            .read()
+            .await
+            .query_recent(from, to)
+            .await
+            .unwrap_or_default();
         if obs.iter().any(|o| o.labels.contains_key("field")) {
             return obs;
         }
@@ -283,7 +292,12 @@ async fn reading_the_station_never_triggers_a_request() {
     // Mọi lần đọc phải **không** sinh thêm request — đây là điều khiến
     // `spawn_blocking` của script không bao giờ phải chờ mạng.
     for _ in 0..20 {
-        let again = st.read().await.query_recent(from, to).await.unwrap_or_default();
+        let again = st
+            .read()
+            .await
+            .query_recent(from, to)
+            .await
+            .unwrap_or_default();
         assert_eq!(
             again.len(),
             obs.len(),

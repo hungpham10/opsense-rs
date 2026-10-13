@@ -105,7 +105,13 @@ pub fn candles_from_observations(
 /// price; missing high/low derive from the known extremes.
 fn reconcile(o: f64, h: f64, l: f64, c: f64, v: f64) -> (f64, f64, f64, f64, f64) {
     let has = |x: f64| x > 0.0;
-    let base = if has(c) { c } else if has(o) { o } else { h.max(l) };
+    let base = if has(c) {
+        c
+    } else if has(o) {
+        o
+    } else {
+        h.max(l)
+    };
     let o = if has(o) { o } else { base };
     let c = if has(c) { c } else { base };
     let h = if has(h) { h } else { o.max(c) };

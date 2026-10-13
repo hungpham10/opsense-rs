@@ -907,7 +907,9 @@ mod tests {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
         let client = redis::Client::open("redis://127.0.0.1:6379/15").ok()?;
-        RedisStorage::new(client, &format!("test:radix:{}:{n}", pid)).await.ok()
+        RedisStorage::new(client, &format!("test:radix:{}:{n}", pid))
+            .await
+            .ok()
     }
 
     #[tokio::test]

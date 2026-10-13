@@ -177,10 +177,7 @@ impl GridPlan {
     /// Dựng cả plan; `prev` = plan cũ (cùng thứ tự cell) để giữ thống kê.
     /// Khớp từng cell theo độ chồng giá (xem `to_grid`).
     pub fn to_grids(plans: &[GridPlan], prev: &[TradingGrid]) -> Vec<TradingGrid> {
-        plans
-            .iter()
-            .filter_map(|p| p.to_grid(Some(prev)))
-            .collect()
+        plans.iter().filter_map(|p| p.to_grid(Some(prev))).collect()
     }
 }
 
@@ -232,7 +229,10 @@ mod tests {
             short_win: None,
         };
         let g = plan.to_grid(None).expect("2 levels là hợp lệ");
-        assert!((g.stoploss_pct() - 0.05).abs() < 1e-12, "mặc định TradingGrid");
+        assert!(
+            (g.stoploss_pct() - 0.05).abs() < 1e-12,
+            "mặc định TradingGrid"
+        );
         assert!((g.long_win_pct(0) - 0.5).abs() < 1e-12);
     }
 

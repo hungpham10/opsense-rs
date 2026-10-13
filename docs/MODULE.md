@@ -354,9 +354,9 @@ pub extern "C" fn opsense_module_hello_init(host: *const opsense_mod::ffi::HostV
 }
 ```
 
-`modules.toml`:
+`opsense.conf.toml` — section `[[modules]]`:
 ```toml
-[[module]]
+[[modules]]
 id = "hello"
 builtin = false
 enabled = true
@@ -370,10 +370,10 @@ path = "hello.so"
 | Việc | Cách |
 |---|---|
 | Build module | `cargo build --release -p opsense-mod-hello` (sinh `target/release/libhello.so`) |
-| Đặt `.so` | Theo `path` trong `modules.toml`, relative to `OPSENSE_CONFIG_DIR` |
-| Cấu hình | `modules.toml` — `id`, `builtin`, `enabled`, `path`, `config` (JSON tuỳ ý) |
+| Đặt `.so` | Theo `[[modules]].path` trong `opsense.conf.toml`, relative to thư mục chứa file config |
+| Cấu hình | `[[modules]]` trong `opsense.conf.toml` — `id`, `builtin`, `enabled`, `path` (field `config` đã xoá) |
 | Bật feature | `opsense/dynamic-modules` ( kéo `libloading` ) |
-| Symbol naming | `opsense_module_<id>_init` — `id` từ `modules.toml`, `-` → `_` |
+| Symbol naming | `opsense_module_<id>_init` — `id` từ `[[modules]]` trong `opsense.conf.toml`, `-` → `_` |
 | `builtin = true` | **Bỏ qua** bởi `load_dynamic` (`modules.rs:74`) — phải tự `register_builtin` |
 
 > **Lưu ý:** Crate `hello-mod` là fixture test (`examples/hello-mod/`, `crate-type = ["cdylib"]`). Nó **không** nằm trong workspace `members` để tránh lỗi build musl (`cannot produce cdylib`). Build tay: `cargo build --manifest-path examples/hello-mod/Cargo.toml`.
@@ -409,10 +409,10 @@ path = "hello.so"
 |---|---|---|---|
 | **(c) Op chưa implement** | 🟠 | `serve_host.rs:13` | `query_station`, `orders`, `clear_station`, `clear_all_stations`, `station_query` trả `"not yet implemented"`. |
 | **(g) `drive()` fallback deadlock** | 🟠 | `ffi.rs:251` | `new_current_thread()` + `block_on(spawn())` → treo vĩnh viễn (nhánh fallback không chạy ở production). **Đã sửa** (`drive()` dùng `new_multi_thread().worker_threads(1)`); test `drive_works_inside_current_thread_runtime` làm bằng chứng. |
-| **(h) nested `drive()` chưa từng test** | 🟠 | `ffi.rs:246` | Chuỗi `route()` → `host.call()` → `drive()` lồng nhau chưa từng chạy. `hello-mod` có route `host-status` **đã dựng sẵn** nhưng **chưa có test tự động** `dlopen` nó — chỉ mới compile được. Cần test tay: build `.so`, đặt vào `OPSENSE_CONFIG_DIR`, viết `modules.toml`, chạy `opsense serve --features dynamic-modules`. |
+| **(h) nested `drive()` chưa từng test** | 🟠 | `ffi.rs:246` | Chuỗi `route()` → `host.call()` → `drive()` lồng nhau chưa từng chạy. `hello-mod` có route `host-status` **đã dựng sẵn** nhưng **chưa có test tự động** `dlopen` nó — chỉ mới compile được. Cần test tay: build `.so`, đặt vào thư mục chứa `opsense.conf.toml`, khai `[[modules]]` trong đó, chạy `opsense serve --features dynamic-modules`. |
 | **(i) `hello-mod` phá build release musl** | 🟠 | `Cargo.toml:18` | cdylib trong workspace + cargo-dist musl ⇒ `cannot produce cdylib`. Đã tách workspace + `[workspace]` riêng. |
 
-> **Chưa có module `.so` mẫu nào** trong repo. `repl` là builtin. `hello-mod` là **fixture thủ công** — có route `host-status` đã dựng sẵn, nhưng **không có test tự động** `dlopen` nó; chỉ mới compile được. Cần test tay: build `.so`, đặt vào `OPSENSE_CONFIG_DIR`, viết `modules.toml`, chạy `opsense serve --features dynamic-modules`. Nên (g) chưa từng lộ ra thực tế.
+> **Chưa có module `.so` mẫu nào** trong repo. `repl` là builtin. `hello-mod` là **fixture thủ công** — có route `host-status` đã dựng sẵn, nhưng **không có test tự động** `dlopen` nó; chỉ mới compile được. Cần test tay: build `.so`, đặt vào thư mục chứa `opsense.conf.toml`, khai `[[modules]]` trong đó, chạy `opsense serve --features dynamic-modules`. Nên (g) chưa từng lộ ra thực tế.
 
 ---
 

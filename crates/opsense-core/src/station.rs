@@ -507,9 +507,10 @@ impl TimeseriesStation {
         tracing::info!(blocks = removed, "clear station: đã xoá block trong RAM");
 
         if let Some(storage) = &self.storage {
-            storage.clear_all_series().await.map_err(|e| {
-                Error::other(format!("clear_all_series thất bại: {e}"))
-            })?;
+            storage
+                .clear_all_series()
+                .await
+                .map_err(|e| Error::other(format!("clear_all_series thất bại: {e}")))?;
         }
         Ok(())
     }
@@ -689,13 +690,7 @@ impl TimeseriesStation {
         end_block - start_block < MAX_BLOCKS_PER_QUERY
     }
 
-    pub fn update_range(
-        &self,
-        records: &[Observation],
-        query_from: i64,
-        query_to: i64,
-        now: i64,
-    ) {
+    pub fn update_range(&self, records: &[Observation], query_from: i64, query_to: i64, now: i64) {
         let start_block = self.get_block_id(query_from);
         let end_block = self.get_block_id(query_to);
 
@@ -1144,9 +1139,17 @@ mod tests {
             .filter(|o| o.ts >= base + (n - HOT_BLOCKS as i64) * 115_200)
             .cloned()
             .collect();
-        st.update_range(&refill, base, base + n * 115_200 - 1, base + n * 115_200 - 1);
+        st.update_range(
+            &refill,
+            base,
+            base + n * 115_200 - 1,
+            base + n * 115_200 - 1,
+        );
         let got = st
-            .query_recent(base + (n - HOT_BLOCKS as i64) * 115_200, base + n * 115_200 - 1)
+            .query_recent(
+                base + (n - HOT_BLOCKS as i64) * 115_200,
+                base + n * 115_200 - 1,
+            )
             .await
             .unwrap_or_default();
         // Eviction-per-shard chỉ đúng ở arena chung (`capacity` là tổng thật).
@@ -1176,7 +1179,9 @@ mod tests {
         let st = TimeseriesStation::new(HOT_BLOCKS, Some(115_200));
         let base: i64 = 1_787_040_000;
         st.update_range(&[obs(base, 1.0)], base, base, base);
-        st.clear().await.expect("clear station memory không cần storage");
+        st.clear()
+            .await
+            .expect("clear station memory không cần storage");
         assert_eq!(
             st.query_recent(base, base).await.unwrap_or_default().len(),
             0
@@ -1272,14 +1277,22 @@ mod tests {
 
         println!(
             "REPRO station: nạp {} block ({} obs) → còn {} block / {} obs\n               block mất ({}): {:?}",
-            N_BLOCKS, batch.len(), per_block.len(), got.len(), missing.len(), missing
+            N_BLOCKS,
+            batch.len(),
+            per_block.len(),
+            got.len(),
+            missing.len(),
+            missing
         );
         // In thêm 4 block mà LRU trần không giải thích được, để so trực tiếp.
         let only_lru = [13789i64, 13792, 13795, 13796];
         println!(
             "  4 block LRU không giải thích: {:?} → có mất ở tầng station không? {:?}",
             only_lru,
-            only_lru.iter().map(|b| (b, missing.contains(b))).collect::<Vec<_>>()
+            only_lru
+                .iter()
+                .map(|b| (b, missing.contains(b)))
+                .collect::<Vec<_>>()
         );
 
         // Số block mất **tùy build**, và đó là cả ý nghĩa của ca thật này:
@@ -1290,7 +1303,11 @@ mod tests {
         // Không assert cứng "mất 0": nhánh CI không bật feature sẽ đỏ **đúng
         // như bản chia cứng còn bug**, tức đỏ vì lý do sai. Ở đây ta khẳng định
         // đúng con số của build đang chạy, nên cả hai nhánh đều có ý nghĩa.
-        let expected_missing = if opsense_mlib::lru::SHARED_ARENA { 0 } else { 11 };
+        let expected_missing = if opsense_mlib::lru::SHARED_ARENA {
+            0
+        } else {
+            11
+        };
         assert_eq!(
             missing.len(),
             expected_missing,
@@ -1361,12 +1378,12 @@ mod tests {
             .collect();
         st.update_range(&batch, NEWEST - 240, NEWEST, NEWEST);
 
-        for (label, to) in [("kết thúc đúng mốc mới nhất", NEWEST), ("kết thúc sau mốc mới nhất 15s", NEWEST + 15)] {
+        for (label, to) in [
+            ("kết thúc đúng mốc mới nhất", NEWEST),
+            ("kết thúc sau mốc mới nhất 15s", NEWEST + 15),
+        ] {
             let from = to - 120;
-            let got = st
-                .query_recent(from, to)
-                .await
-                .unwrap_or_default();
+            let got = st.query_recent(from, to).await.unwrap_or_default();
             assert!(
                 !got.is_empty(),
                 "cửa sổ [{from}, {to}] ({label}) phải trả dữ liệu đang có, thực tế rỗng"
@@ -1432,7 +1449,9 @@ mod tests {
         assert_eq!(
             written.len(),
             N,
-            "batch {} nến phải trải trên {} block (không bị gộp)", N, written.len()
+            "batch {} nến phải trải trên {} block (không bị gộp)",
+            N,
+            written.len()
         );
 
         let got = st
@@ -1476,7 +1495,10 @@ mod tests {
             for id in &written {
                 let mut h = DefaultHasher::new();
                 id.hash(&mut h);
-                per_shard.entry((h.finish() as usize) & mask).or_default().push(*id);
+                per_shard
+                    .entry((h.finish() as usize) & mask)
+                    .or_default()
+                    .push(*id);
             }
             let crowded: Vec<_> = per_shard.iter().filter(|(_, v)| v.len() > 1).collect();
             panic!(
@@ -1524,20 +1546,38 @@ mod tests {
 
         let to = 1_000_000;
         let from = to - 30 * 24 * 3600;
-        assert!(!st.window_fits_block_cap(from, to), "30 ngày ở block 5s phải vượt trần");
+        assert!(
+            !st.window_fits_block_cap(from, to),
+            "30 ngày ở block 5s phải vượt trần"
+        );
 
         // 1 tuần = 120.960 block → vẫn vượt trần (cap = 20.000).
-        assert!(!st.window_fits_block_cap(to - 7 * 24 * 3600, to), "1 tuần ở block 5s vẫn vượt trần");
+        assert!(
+            !st.window_fits_block_cap(to - 7 * 24 * 3600, to),
+            "1 tuần ở block 5s vẫn vượt trần"
+        );
 
         // 1 ngày = 17.280 block → **không** vượt trần (cap = 20.000).
-        assert!(st.window_fits_block_cap(to - 24 * 3600, to), "1 ngày ở block 5s phải trong trần");
+        assert!(
+            st.window_fits_block_cap(to - 24 * 3600, to),
+            "1 ngày ở block 5s phải trong trần"
+        );
 
         // block 3600s: 20k block ≈ 2.3 năm. 30 ngày chỉ 720 block.
         let st_1h = TimeseriesStation::new(32, Some(3_600));
-        assert!(st_1h.window_fits_block_cap(from, to), "30 ngày ở block 1h phải trong trần");
+        assert!(
+            st_1h.window_fits_block_cap(from, to),
+            "30 ngày ở block 1h phải trong trần"
+        );
 
         // Cửa sổ rỗng/vừa đủ 1 block.
-        assert!(st.window_fits_block_cap(to, to), "cửa sổ 0s phải trong trần");
-        assert!(st.window_fits_block_cap(to - 4, to), "cửa sổ 1 block (5s) phải trong trần");
+        assert!(
+            st.window_fits_block_cap(to, to),
+            "cửa sổ 0s phải trong trần"
+        );
+        assert!(
+            st.window_fits_block_cap(to - 4, to),
+            "cửa sổ 1 block (5s) phải trong trần"
+        );
     }
 }

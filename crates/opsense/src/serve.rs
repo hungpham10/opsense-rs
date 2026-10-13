@@ -2,7 +2,6 @@ use axum::{
     Router, body::Body, extract::connect_info, http::Request, routing::get, serve::IncomingStream,
 };
 
-
 use tokio::net::unix::UCred;
 use tokio::net::{TcpListener, UnixListener};
 use tokio::signal;
@@ -24,17 +23,15 @@ use tracing_subscriber::prelude::*;
 
 use opsense_core::Config;
 
-use crate::api::{AppState, admin, health_check, oauth, prometheus_handler};
 use crate::api::modules::ApiModuleRegistry;
-use crate::modules_config::ModulesConfig;
+use crate::api::{AppState, admin, health_check, oauth, prometheus_handler};
 
 fn init_telemetry() -> Option<(SdkTracerProvider, SdkMeterProvider)> {
     // Log ra stdout **luôn**, kể cả khi không bật OTLP. Trước đây cả subscriber
     // nằm trong nhánh "có OTLP", nên `opsense serve` chạy với endpoint mặc định
     // là **không log gì cả** và `RUST_LOG` bị bỏ qua hoàn toàn — chẩn đoán
     // pipeline (component fail, kernel không đặt lệnh, lỗi TLS) bị mù.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
 
     let agent_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -119,15 +116,10 @@ impl connect_info::Connected<IncomingStream<'_, UnixListener>> for UdsConnectInf
     }
 }
 
-pub async fn routes(app_state: AppState) -> Result<Router, Error> {
-    // Load module configuration
-    let config_dir = std::env::var("OPSENSE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let modules_cfg = ModulesConfig::load(&config_dir).unwrap_or_default();
-    // `dynamic-modules` tat -> `modules_cfg` khong ai dung.
+pub async fn routes(app_state: AppState, cfg: &Config, config_dir: &Path) -> Result<Router, Error> {
+    // `dynamic-modules` tắt → `cfg`/`config_dir` chỉ phục vụ nhánh dlopen bên dưới.
     #[cfg(not(feature = "dynamic-modules"))]
-    let _ = &modules_cfg;
+    let _ = (cfg, config_dir);
 
     // Build module registry
     let mut registry = ApiModuleRegistry::new();
@@ -135,7 +127,9 @@ pub async fn routes(app_state: AppState) -> Result<Router, Error> {
     // Register built-in modules
     #[cfg(feature = "repl")]
     {
-        registry.register_builtin(Arc::new(crate::api::repl::adapter::ReplApiModule::new(app_state.clone())));
+        registry.register_builtin(Arc::new(crate::api::repl::adapter::ReplApiModule::new(
+            app_state.clone(),
+        )));
     }
 
     // Register admin and oauth as built-in modules (they're always available)
@@ -146,9 +140,11 @@ pub async fn routes(app_state: AppState) -> Result<Router, Error> {
     #[cfg(feature = "dynamic-modules")]
     {
         // Host services for dynamic modules
-        let host_services: Arc<dyn opsense_ffi::HostServices> = Arc::new(crate::serve_host::ServeHostServices { state: app_state.clone() });
+        let host_services: Arc<dyn opsense_ffi::HostServices> = Arc::new(ServeHostServices {
+            state: app_state.clone(),
+        });
         registry
-            .load_dynamic(&config_dir, &modules_cfg, host_services)
+            .load_dynamic(cfg, config_dir, host_services)
             .map_err(|e| Error::other(e.to_string()))?;
     }
 
@@ -222,7 +218,7 @@ fn config_path() -> PathBuf {
     PathBuf::from("conf/opsense.conf.toml")
 }
 
-fn load_config() -> Result<Config, Error> {
+fn load_config() -> Result<(Config, PathBuf), Error> {
     let config_path = config_path();
     Config::load(&config_path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
@@ -237,7 +233,7 @@ fn load_config() -> Result<Config, Error> {
 /// crash-looping the container.
 pub async fn validate_config(opt_path: Option<PathBuf>) -> Result<(), Error> {
     let path = opt_path.unwrap_or_else(config_path);
-    let cfg = Config::load(&path)
+    let (cfg, _dir) = Config::load(&path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     cfg.validate()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
@@ -272,8 +268,9 @@ async fn clear_socket_path(path: &std::path::Path) -> std::io::Result<()> {
 pub async fn run() -> std::io::Result<()> {
     let telemetry_guard = init_telemetry();
 
-    let app_state = AppState::new(&load_config()?).await?;
-    let router = routes(app_state.clone()).await?;
+    let (cfg, cfg_dir) = load_config()?;
+    let app_state = AppState::new(&cfg).await?;
+    let router = routes(app_state.clone(), &cfg, &cfg_dir).await?;
 
     let listener_mode = std::env::var("GATEWAY_LISTENER").unwrap_or_else(|_| "unix".to_string());
 
@@ -340,6 +337,116 @@ async fn shutdown_signal() {
         },
     }
 }
+/// Host services implementation for the serve binary.
+///
+/// This provides the implementation of `HostServices` trait for dynamic modules
+/// loaded via `dlopen`. It gives modules access to the gateway's internal
+/// services like status, components, attributes, audit, etc.
+use opsense_ffi::{BoxFut, HostServices, ModuleError, Value};
+
+use opsense_core::Observation;
+
+pub struct ServeHostServices {
+    pub state: AppState,
+}
+
+impl HostServices for ServeHostServices {
+    fn call(&self, op: &str, req: Value) -> BoxFut<'static, Result<Value, ModuleError>> {
+        let state = self.state.clone();
+        let op = op.to_string();
+
+        Box::pin(async move {
+            match op.as_str() {
+                "status" => {
+                    let status = state.status().await;
+                    let json = serde_json::json!({
+                        "nodes": status.nodes.iter().map(|n| serde_json::json!({
+                            "id": n.id,
+                            "type": n.kind,
+                            "inputs": n.inputs,
+                            "description": n.description,
+                            "running": n.running,
+                            "faultCount": n.fault_count,
+                            "lastError": n.last_error,
+                        })).collect::<Vec<_>>(),
+                        "stations": status.stations.iter().map(|s| serde_json::json!({
+                            "id": s.id,
+                            "kind": format!("{:?}", s.kind),
+                        })).collect::<Vec<_>>(),
+                    });
+                    Ok(json)
+                }
+                "components" => {
+                    let id = req.get("id").and_then(|v| v.as_str());
+                    let comps = state.components(id).await;
+                    Ok(serde_json::to_value(&comps).unwrap_or_default())
+                }
+                "attributes" => {
+                    let attrs = state.attributes().await;
+                    Ok(serde_json::to_value(&attrs).unwrap_or_default())
+                }
+                "attr_set" => {
+                    let name = req.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let value = req
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    state.set_attribute(name.into(), value).await;
+                    Ok(serde_json::json!({ "ok": true, "env_override_active": false }))
+                }
+                "attr_remove" => {
+                    let name = req.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let removed = state.remove_attribute(name).await;
+                    Ok(serde_json::json!({ "removed": removed }))
+                }
+                "query_station" => Err(ModuleError::Internal(
+                    "query_station not yet implemented for dynamic modules".into(),
+                )),
+                "orders" => Err(ModuleError::Internal(
+                    "orders not yet implemented for dynamic modules".into(),
+                )),
+                "clear_station" => Err(ModuleError::Internal(
+                    "clear_station not yet implemented for dynamic modules".into(),
+                )),
+                "clear_all_stations" => Err(ModuleError::Internal(
+                    "clear_all_stations not yet implemented for dynamic modules".into(),
+                )),
+                "config_read" => {
+                    let comps = state.components(None).await;
+                    Ok(serde_json::to_value(&comps).unwrap_or_default())
+                }
+                "audit_write" => {
+                    // Parse observation from req
+                    let obs: Observation = match serde_json::from_value(req) {
+                        Ok(o) => o,
+                        Err(e) => {
+                            return Err(ModuleError::BadRequest(format!(
+                                "invalid observation: {e}"
+                            )));
+                        }
+                    };
+                    state.audit(obs).await;
+                    Ok(serde_json::json!({ "ok": true }))
+                }
+                "station_query" => Err(ModuleError::Internal(
+                    "station_query not yet implemented for dynamic modules".into(),
+                )),
+                _ => Err(ModuleError::BadRequest(format!("unknown op: {op}"))),
+            }
+        })
+    }
+
+    fn log(&self, level: u32, _target: &str, msg: &str) {
+        match level {
+            0 => tracing::error!("{}", msg),
+            1 => tracing::warn!("{}", msg),
+            2 => tracing::info!("{}", msg),
+            3 => tracing::debug!("{}", msg),
+            _ => tracing::trace!("{}", msg),
+        }
+    }
+}
 
 #[cfg(test)]
 mod socket_path_tests {
@@ -367,7 +474,9 @@ mod socket_path_tests {
             .enable_all()
             .build()
             .unwrap();
-        let err = rt_probe.block_on(tokio::fs::remove_dir_all(&path)).unwrap_err();
+        let err = rt_probe
+            .block_on(tokio::fs::remove_dir_all(&path))
+            .unwrap_err();
         assert_eq!(
             err.kind(),
             std::io::ErrorKind::NotADirectory,
@@ -380,7 +489,8 @@ mod socket_path_tests {
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(clear_socket_path(&path)).expect("dọn socket cũ");
+        rt.block_on(clear_socket_path(&path))
+            .expect("dọn socket cũ");
         assert!(!path.exists(), "socket cũ phải bị xoá");
 
         // Và bind lại được — đây mới là điều thực sự cần.
@@ -396,7 +506,8 @@ mod socket_path_tests {
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(clear_socket_path(&path)).expect("path không có là Ok");
+        rt.block_on(clear_socket_path(&path))
+            .expect("path không có là Ok");
     }
 
     /// Thư mục thật ở đúng vị trí socket (trường hợp baked vào image) vẫn phải xoá
@@ -409,7 +520,8 @@ mod socket_path_tests {
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(clear_socket_path(&dir)).expect("dọn thư mục cũ");
+        rt.block_on(clear_socket_path(&dir))
+            .expect("dọn thư mục cũ");
         assert!(!dir.exists(), "thư mục cũ phải bị xoá");
     }
 }

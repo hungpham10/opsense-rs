@@ -126,15 +126,27 @@ pub struct HostCall<'a> {
 
 impl<'a> HostCall<'a> {
     pub fn new(host: &'a dyn HostServices, op: HostOp) -> Self {
-        Self { host, op, req: serde_json::Map::new() }
+        Self {
+            host,
+            op,
+            req: serde_json::Map::new(),
+        }
     }
 
-    pub fn arg<T: serde::Serialize + ?Sized>(mut self, key: &str, value: &T) -> Result<Self, serde_json::Error> {
+    pub fn arg<T: serde::Serialize + ?Sized>(
+        mut self,
+        key: &str,
+        value: &T,
+    ) -> Result<Self, serde_json::Error> {
         self.req.insert(key.into(), serde_json::to_value(value)?);
         Ok(self)
     }
 
-    pub fn arg_opt<T: serde::Serialize + ?Sized>(mut self, key: &str, value: Option<&T>) -> Result<Self, serde_json::Error> {
+    pub fn arg_opt<T: serde::Serialize + ?Sized>(
+        mut self,
+        key: &str,
+        value: Option<&T>,
+    ) -> Result<Self, serde_json::Error> {
         if let Some(v) = value {
             self.req.insert(key.into(), serde_json::to_value(v)?);
         }
@@ -142,7 +154,9 @@ impl<'a> HostCall<'a> {
     }
 
     pub async fn execute(self) -> Result<Value, super::ModuleError> {
-        self.host.call(self.op.as_str(), Value::Object(self.req)).await
+        self.host
+            .call(self.op.as_str(), Value::Object(self.req))
+            .await
     }
 }
 
@@ -153,19 +167,33 @@ impl dyn HostServices + '_ {
     }
 
     pub async fn components(&self, id: Option<&str>) -> Result<Value, super::ModuleError> {
-        HostCall::new(self, HostOp::Components).arg_opt("id", id)?.execute().await
+        HostCall::new(self, HostOp::Components)
+            .arg_opt("id", id)?
+            .execute()
+            .await
     }
 
     pub async fn attributes(&self) -> Result<Value, super::ModuleError> {
         HostCall::new(self, HostOp::Attributes).execute().await
     }
 
-    pub async fn set_attribute(&self, name: &str, value: &str) -> Result<Value, super::ModuleError> {
-        HostCall::new(self, HostOp::AttrSet).arg("name", name)?.arg("value", value)?.execute().await
+    pub async fn set_attribute(
+        &self,
+        name: &str,
+        value: &str,
+    ) -> Result<Value, super::ModuleError> {
+        HostCall::new(self, HostOp::AttrSet)
+            .arg("name", name)?
+            .arg("value", value)?
+            .execute()
+            .await
     }
 
     pub async fn remove_attribute(&self, name: &str) -> Result<Value, super::ModuleError> {
-        HostCall::new(self, HostOp::AttrRemove).arg("name", name)?.execute().await
+        HostCall::new(self, HostOp::AttrRemove)
+            .arg("name", name)?
+            .execute()
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -182,13 +210,27 @@ impl dyn HostServices + '_ {
     ) -> Result<Value, super::ModuleError> {
         let mut call = HostCall::new(self, HostOp::QueryStation);
         call = call.arg("node", node)?;
-        if let Some(v) = from_ts { call = call.arg("from_ts", &v)?; }
-        if let Some(v) = to_ts { call = call.arg("to_ts", &v)?; }
-        if let Some(v) = limit { call = call.arg("limit", &v)?; }
-        if let Some(v) = signal { call = call.arg("signal", v)?; }
-        if let Some(v) = label_kind { call = call.arg("label_kind", v)?; }
-        if let Some(v) = status { call = call.arg("status", v)?; }
-        if let Some(v) = order { call = call.arg("order", v)?; }
+        if let Some(v) = from_ts {
+            call = call.arg("from_ts", &v)?;
+        }
+        if let Some(v) = to_ts {
+            call = call.arg("to_ts", &v)?;
+        }
+        if let Some(v) = limit {
+            call = call.arg("limit", &v)?;
+        }
+        if let Some(v) = signal {
+            call = call.arg("signal", v)?;
+        }
+        if let Some(v) = label_kind {
+            call = call.arg("label_kind", v)?;
+        }
+        if let Some(v) = status {
+            call = call.arg("status", v)?;
+        }
+        if let Some(v) = order {
+            call = call.arg("order", v)?;
+        }
         call.execute().await
     }
 
@@ -206,13 +248,27 @@ impl dyn HostServices + '_ {
     ) -> Result<Value, super::ModuleError> {
         let mut call = HostCall::new(self, HostOp::Orders);
         call = call.arg("node", node)?;
-        if let Some(v) = status { call = call.arg("status", v)?; }
-        if let Some(v) = from_ts { call = call.arg("from_ts", &v)?; }
-        if let Some(v) = to_ts { call = call.arg("to_ts", &v)?; }
-        if let Some(v) = limit { call = call.arg("limit", &v)?; }
-        if let Some(v) = order { call = call.arg("order", v)?; }
-        if let Some(v) = interval { call = call.arg("interval", v)?; }
-        if let Some(v) = mark_price { call = call.arg("mark_price", &v)?; }
+        if let Some(v) = status {
+            call = call.arg("status", v)?;
+        }
+        if let Some(v) = from_ts {
+            call = call.arg("from_ts", &v)?;
+        }
+        if let Some(v) = to_ts {
+            call = call.arg("to_ts", &v)?;
+        }
+        if let Some(v) = limit {
+            call = call.arg("limit", &v)?;
+        }
+        if let Some(v) = order {
+            call = call.arg("order", v)?;
+        }
+        if let Some(v) = interval {
+            call = call.arg("interval", v)?;
+        }
+        if let Some(v) = mark_price {
+            call = call.arg("mark_price", &v)?;
+        }
         call.execute().await
     }
 }
@@ -224,10 +280,18 @@ mod tests {
     #[test]
     fn host_op_str_roundtrip() {
         for op in [
-            HostOp::Status, HostOp::Components, HostOp::Attributes,
-            HostOp::AttrSet, HostOp::AttrRemove, HostOp::QueryStation,
-            HostOp::Orders, HostOp::ClearStation, HostOp::ClearAllStations,
-            HostOp::ConfigRead, HostOp::AuditWrite, HostOp::StationQuery,
+            HostOp::Status,
+            HostOp::Components,
+            HostOp::Attributes,
+            HostOp::AttrSet,
+            HostOp::AttrRemove,
+            HostOp::QueryStation,
+            HostOp::Orders,
+            HostOp::ClearStation,
+            HostOp::ClearAllStations,
+            HostOp::ConfigRead,
+            HostOp::AuditWrite,
+            HostOp::StationQuery,
         ] {
             assert_eq!(HostOp::from_name(op.as_str()), Some(op));
         }

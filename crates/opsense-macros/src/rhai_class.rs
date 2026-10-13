@@ -26,10 +26,9 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{
-    Data, DeriveInput, Ident, LitStr, Meta, Token,
+    Data, DeriveInput, ExprClosure, Ident, LitStr, Meta, Token,
     parse::{Parse, ParseStream, Parser},
     punctuated::Punctuated,
-    ExprClosure,
 };
 
 /// Tham số đọc từ attr `#[rhai(...)]`.
@@ -84,7 +83,11 @@ fn parse_rhai_attr(attr: TokenStream) -> syn::Result<RhaiAttr> {
     for meta in metas {
         match meta {
             Meta::NameValue(nv) if nv.path.is_ident("constructor") => {
-                if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = nv.value {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = nv.value
+                {
                     out.constructor = s.value();
                 } else {
                     return Err(syn::Error::new_spanned(
@@ -94,7 +97,11 @@ fn parse_rhai_attr(attr: TokenStream) -> syn::Result<RhaiAttr> {
                 }
             }
             Meta::NameValue(nv) if nv.path.is_ident("default_constructor") => {
-                if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Bool(b), .. }) = nv.value {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Bool(b),
+                    ..
+                }) = nv.value
+                {
                     out.default_constructor = b.value();
                 } else {
                     return Err(syn::Error::new_spanned(
@@ -104,9 +111,8 @@ fn parse_rhai_attr(attr: TokenStream) -> syn::Result<RhaiAttr> {
                 }
             }
             Meta::List(list) if list.path.is_ident("accessors") => {
-                let content = list.parse_args_with(
-                    Punctuated::<AccessorSpec, Token![,]>::parse_terminated,
-                )?;
+                let content =
+                    list.parse_args_with(Punctuated::<AccessorSpec, Token![,]>::parse_terminated)?;
                 out.accessors = content.into_iter().collect();
                 if out.accessors.is_empty() {
                     return Err(syn::Error::new_spanned(
@@ -164,9 +170,11 @@ pub fn rhai_class_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // 2b. Validate default_constructor: struct must have #[derive(Default)]
     if parsed.default_constructor {
         let has_default = input.attrs.iter().any(|attr| {
-            attr.path().is_ident("derive") && attr.meta.require_list().is_ok_and(|list| {
-                list.tokens.to_string().contains("Default")
-            })
+            attr.path().is_ident("derive")
+                && attr
+                    .meta
+                    .require_list()
+                    .is_ok_and(|list| list.tokens.to_string().contains("Default"))
         });
         if !has_default {
             return syn::Error::new(
@@ -191,9 +199,12 @@ pub fn rhai_class_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             parsed.constructor.clone()
         };
         let default_constructor_lit = LitStr::new(&default_constructor_name, name.span());
-        accessor_stmts.insert(0, quote! {
-            engine.register_fn(#default_constructor_lit, || -> #name { Self::default() });
-        });
+        accessor_stmts.insert(
+            0,
+            quote! {
+                engine.register_fn(#default_constructor_lit, || -> #name { Self::default() });
+            },
+        );
     }
 
     for spec in parsed.accessors {
@@ -287,11 +298,30 @@ mod tests {
             r#"constructor = "transition_analysis", accessors("num_buckets", "has_transitions_from")"#,
             SAMPLE,
         );
-        assert_eq!(norm(&s).matches("implcrate::script::RhaiBindingsforTransitionAnalysis").count(), 1);
-        assert_eq!(norm(&s).matches("register_type::<TransitionAnalysis>").count(), 1);
-        assert!(has("engine.register_fn(\"transition_analysis\", Self::transition_analysis)", &s));
-        assert!(has("engine.register_fn(\"num_buckets\", Self::num_buckets)", &s));
-        assert!(has("engine.register_fn(\"has_transitions_from\", Self::has_transitions_from)", &s));
+        assert_eq!(
+            norm(&s)
+                .matches("implcrate::script::RhaiBindingsforTransitionAnalysis")
+                .count(),
+            1
+        );
+        assert_eq!(
+            norm(&s)
+                .matches("register_type::<TransitionAnalysis>")
+                .count(),
+            1
+        );
+        assert!(has(
+            "engine.register_fn(\"transition_analysis\", Self::transition_analysis)",
+            &s
+        ));
+        assert!(has(
+            "engine.register_fn(\"num_buckets\", Self::num_buckets)",
+            &s
+        ));
+        assert!(has(
+            "engine.register_fn(\"has_transitions_from\", Self::has_transitions_from)",
+            &s
+        ));
         // Không có accessor nào bị trùng.
         assert_eq!(norm(&s).matches("register_fn(\"num_buckets\"").count(), 1);
     }
@@ -353,7 +383,10 @@ mod tests {
             r#"accessors("num_cells" -> |g: &mut Self| -> i64 { g.num_cells() as i64 })"#,
             SAMPLE,
         );
-        assert!(has("engine.register_fn(\"num_cells\", |g: &mut Self| -> i64 { g.num_cells() as i64 })", &s));
+        assert!(has(
+            "engine.register_fn(\"num_cells\", |g: &mut Self| -> i64 { g.num_cells() as i64 })",
+            &s
+        ));
     }
 
     /// 9. Default constructor từ `#[derive(Default)]`.
@@ -370,7 +403,10 @@ mod tests {
             r#"default_constructor = true, accessors("step")"#,
             SAMPLE_DEFAULT,
         );
-        assert!(has("engine.register_fn(\"new\", || -> GridConfig { Self::default() })", &s));
+        assert!(has(
+            "engine.register_fn(\"new\", || -> GridConfig { Self::default() })",
+            &s
+        ));
         assert!(has("engine.register_fn(\"step\", Self::step)", &s));
         // Không register explicit constructor
         assert!(!has("engine.register_fn(\"new\", Self::new)", &s));

@@ -122,7 +122,10 @@ async fn station_points_fit_capacity_grid_end_to_end() {
 
     let m = out[0].as_object().unwrap();
     let cells = m["cells"].as_i64().unwrap();
-    assert!((2..=1024).contains(&cells), "grid cells out of range: {cells}");
+    assert!(
+        (2..=1024).contains(&cells),
+        "grid cells out of range: {cells}"
+    );
     assert!(m["step"].as_f64().unwrap() > 0.0);
     assert!(m["cross"].as_i64().unwrap() > 0);
 }

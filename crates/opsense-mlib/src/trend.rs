@@ -203,7 +203,10 @@ impl TrendAnalysis {
     pub fn new(points: &[(i64, f64)], config: &TrendConfig) -> Option<Self> {
         // Mốc đầu tiên **hữu hạn** — không phải `points[0]`, vì điểm đầu có thể
         // là NaN và bị bỏ ở bước dưới.
-        let origin_ts = points.iter().find(|(_, v)| v.is_finite()).map(|(t, _)| *t)?;
+        let origin_ts = points
+            .iter()
+            .find(|(_, v)| v.is_finite())
+            .map(|(t, _)| *t)?;
         // Ngay từ đầu đã dời mốc: `x` là **giây kể từ origin**. Giữ timestamp
         // thô (~1.8e9) thì `x − mean_x` là phép trừ hai số gần nhau trong f64 —
         // 7 chữ số trước dấu thập phân ăn mất độ chính xác, và trên cửa sổ vài
@@ -280,8 +283,8 @@ impl TrendAnalysis {
 
         // ── Biên độ: phân vị |phần dư|, không nhỏ hơn sàn cấu hình ───────
         abs_res.sort_by(f64::total_cmp);
-        let amplitude = quantile(&abs_res, config.amplitude_quantile)
-            .max(config.min_amplitude.max(0.0));
+        let amplitude =
+            quantile(&abs_res, config.amplitude_quantile).max(config.min_amplitude.max(0.0));
 
         // ── Hướng: tổng độ dốc cả cửa sổ phải vượt ngưỡng tính theo biên ──
         // So *độ dốc tích luỹ* với biên độ, không so slope thô với hằng số:
@@ -563,7 +566,11 @@ impl TrendAnalysis {
     ) -> rhai::Dynamic {
         let pts = crate::script::parse_points(&points).unwrap_or_default();
         let config = TrendConfig {
-            min_samples: if min_samples < 2 { 2 } else { min_samples as usize },
+            min_samples: if min_samples < 2 {
+                2
+            } else {
+                min_samples as usize
+            },
             amplitude_quantile,
             significance,
             min_amplitude,
@@ -629,7 +636,11 @@ mod tests {
             .map(|i| (i * 60, 2.0 * (i * 60) as f64 + 5.0))
             .collect();
         let t = TrendAnalysis::new(&pts, &cfg()).expect("đủ điểm");
-        assert!((t.slope_per_sec() - 2.0).abs() < 1e-9, "slope {}", t.slope_per_sec());
+        assert!(
+            (t.slope_per_sec() - 2.0).abs() < 1e-9,
+            "slope {}",
+            t.slope_per_sec()
+        );
         assert!((t.r2() - 1.0).abs() < 1e-9, "r2 {}", t.r2());
         // Khớp cả hai đầu: đường đúng, không chỉ slope đúng.
         assert!((t.value_at(0) - 5.0).abs() < 1e-6);
@@ -639,8 +650,16 @@ mod tests {
     #[test]
     fn slope_units_agree() {
         let t = TrendAnalysis::new(&series(0.0, RATE, AMP, PERIOD), &cfg()).expect("đủ điểm");
-        assert!((t.slope_per_hour() - RATE).abs() < 1e-6, "{}/h", t.slope_per_hour());
-        assert!((t.slope_per_day() - RATE * 24.0).abs() < 1e-6, "{}/ngày", t.slope_per_day());
+        assert!(
+            (t.slope_per_hour() - RATE).abs() < 1e-6,
+            "{}/h",
+            t.slope_per_hour()
+        );
+        assert!(
+            (t.slope_per_day() - RATE * 24.0).abs() < 1e-6,
+            "{}/ngày",
+            t.slope_per_day()
+        );
         assert!((t.slope_per_hour() - t.slope_per_sec() * 3_600.0).abs() < 1e-9);
     }
 
@@ -655,7 +674,11 @@ mod tests {
         let t = TrendAnalysis::new(&pts, &cfg()).expect("đủ điểm");
 
         // 0.001 mỗi 300s ⇒ 0.001/300 × 86400 = 0.288 mỗi ngày.
-        assert!((t.slope_per_day() - 0.288).abs() < 1e-3, "slope/ngày = {}", t.slope_per_day());
+        assert!(
+            (t.slope_per_day() - 0.288).abs() < 1e-3,
+            "slope/ngày = {}",
+            t.slope_per_day()
+        );
         assert!((t.value_at(t0) - 40.0).abs() < 1e-6, "intercept lệch");
         assert_eq!(t.origin_ts(), t0);
         assert_eq!(t.anchor_ts(), t0 + 199 * 300);
@@ -684,8 +707,14 @@ mod tests {
         assert_eq!(t.anchor_ts(), (N - 1) * STEP_SECS);
         let first = pts[1].1;
         let last = pts[(N - 1) as usize].1;
-        assert!((t.value_at(STEP_SECS) - first).abs() < 1e-6, "origin lệch ở đầu");
-        assert!((t.value_at((N - 1) * STEP_SECS) - last).abs() < 1e-6, "lệch ở cuối");
+        assert!(
+            (t.value_at(STEP_SECS) - first).abs() < 1e-6,
+            "origin lệch ở đầu"
+        );
+        assert!(
+            (t.value_at((N - 1) * STEP_SECS) - last).abs() < 1e-6,
+            "lệch ở cuối"
+        );
     }
 
     #[test]
@@ -741,7 +770,10 @@ mod tests {
     #[test]
     fn significance_is_configurable() {
         // Nới ngưỡng xuống 0.1 ⇒ cùng chuỗi "chậm" đó thành Rising.
-        let loose = TrendConfig { significance: 0.1, ..cfg() };
+        let loose = TrendConfig {
+            significance: 0.1,
+            ..cfg()
+        };
         let t = TrendAnalysis::new(&series(50.0, 0.1, AMP, PERIOD), &loose).expect("đủ");
         assert_eq!(t.direction(), Direction::Rising, "{t}");
     }
@@ -773,14 +805,24 @@ mod tests {
     #[test]
     fn min_amplitude_raises_the_floor() {
         // Chuỗi phẳng ⇒ phần dư = 0 ⇒ biên độ lấy từ sàn cấu hình.
-        let cfg = TrendConfig { min_amplitude: 1.25, ..cfg() };
+        let cfg = TrendConfig {
+            min_amplitude: 1.25,
+            ..cfg()
+        };
         let t = TrendAnalysis::new(&series(50.0, 0.0, 0.0, PERIOD), &cfg).expect("đủ");
-        assert!((t.amplitude() - 1.25).abs() < 1e-9, "amplitude = {}", t.amplitude());
+        assert!(
+            (t.amplitude() - 1.25).abs() < 1e-9,
+            "amplitude = {}",
+            t.amplitude()
+        );
     }
 
     #[test]
     fn negative_min_amplitude_cannot_widen_envelope() {
-        let cfg = TrendConfig { min_amplitude: -5.0, ..cfg() };
+        let cfg = TrendConfig {
+            min_amplitude: -5.0,
+            ..cfg()
+        };
         let t = TrendAnalysis::new(&series(50.0, 0.0, AMP, PERIOD), &cfg).expect("đủ");
         assert!(t.amplitude() > 0.0, "biên độ âm sẽ là mép đảo chiều");
     }
@@ -805,7 +847,10 @@ mod tests {
     fn envelope_is_two_sided_around_the_trend() {
         let t = TrendAnalysis::new(&series(50.0, RATE, AMP, PERIOD), &cfg()).expect("đủ");
         let p = t.project(12.0);
-        assert!((p.trend - (t.current() + t.slope_per_day() / 2.0)).abs() < 1e-6, "{t}");
+        assert!(
+            (p.trend - (t.current() + t.slope_per_day() / 2.0)).abs() < 1e-6,
+            "{t}"
+        );
         assert!((p.high - p.trend - t.amplitude()).abs() < 1e-9);
         assert!((p.trend - p.low - t.amplitude()).abs() < 1e-9);
         assert!(p.high > p.low);
@@ -815,7 +860,10 @@ mod tests {
     fn projection_anchors_on_last_observation() {
         let t = TrendAnalysis::new(&series(50.0, RATE, AMP, PERIOD), &cfg()).expect("đủ");
         let p = t.project(0.0);
-        assert!((p.trend - t.current()).abs() < 1e-9, "phải neo đúng quan sát cuối");
+        assert!(
+            (p.trend - t.current()).abs() < 1e-9,
+            "phải neo đúng quan sát cuối"
+        );
         assert_eq!(p.ts, t.anchor_ts());
         // `trend_offset` là chênh lệch giữa neo thật và đường fit.
         let expect_offset = t.current() - t.value_at(t.anchor_ts());
@@ -852,10 +900,17 @@ mod tests {
         let t = TrendAnalysis::new(&series(50.0, RATE, AMP, PERIOD), &cfg()).expect("đủ");
         let edge = t.hours_to_upper_envelope(100.0).expect("đang đi lên");
         let trend = t.hours_to(100.0).expect("đang đi lên");
-        assert!(edge < trend, "mép trên ({edge}h) phải chạm trước xu hướng ({trend}h)");
+        assert!(
+            edge < trend,
+            "mép trên ({edge}h) phải chạm trước xu hướng ({trend}h)"
+        );
         // Hiệu số đúng bằng biên độ chia độ dốc — không phải con số tùy ý.
         let expect_gap = t.amplitude() / t.slope_per_hour();
-        assert!((trend - edge - expect_gap).abs() < 1e-6, "hiệu số = {}", trend - edge);
+        assert!(
+            (trend - edge - expect_gap).abs() < 1e-6,
+            "hiệu số = {}",
+            trend - edge
+        );
     }
 
     #[test]
@@ -900,7 +955,10 @@ mod tests {
     #[test]
     fn refuses_insufficient_data() {
         let cfg = cfg();
-        let short = series(50.0, RATE, AMP, PERIOD).into_iter().take(3).collect::<Vec<_>>();
+        let short = series(50.0, RATE, AMP, PERIOD)
+            .into_iter()
+            .take(3)
+            .collect::<Vec<_>>();
         assert!(TrendAnalysis::new(&short, &cfg).is_none());
         assert!(TrendAnalysis::new(&[], &cfg).is_none());
         assert!(TrendAnalysis::new(&[(1, 1.0)], &cfg).is_none());

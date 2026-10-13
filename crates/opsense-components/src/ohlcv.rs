@@ -38,9 +38,15 @@ pub fn row_to_observations(
         .iter()
         .zip(cells[1..].iter())
         .map(|(field, val)| {
-            Observation::new(ts, symbol.to_string(), TelemetryKind::Metric, Signal::Raw, *val)
-                .with_label("field", *field)
-                .with_label("resolution", resolution)
+            Observation::new(
+                ts,
+                symbol.to_string(),
+                TelemetryKind::Metric,
+                Signal::Raw,
+                *val,
+            )
+            .with_label("field", *field)
+            .with_label("resolution", resolution)
         })
         .collect()
 }
@@ -65,6 +71,9 @@ mod tests {
         assert_eq!(out[0].labels.get("field").map(String::as_str), Some("o"));
         assert_eq!(out[4].labels.get("field").map(String::as_str), Some("v"));
         assert_eq!(out[4].value, 10.0);
-        assert_eq!(out[0].labels.get("resolution").map(String::as_str), Some("1m"));
+        assert_eq!(
+            out[0].labels.get("resolution").map(String::as_str),
+            Some("1m")
+        );
     }
 }

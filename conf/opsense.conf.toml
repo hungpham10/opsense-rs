@@ -31,3 +31,12 @@ type = "print"
 id = "print"
 description = "In từng message ra stdout. Không giữ state, không cần station."
 inputs = ["clock"]
+
+# ── Module động nạp lúc boot ────────────────────────────────────────────────
+# Repl/GraphQL là register_builtin hardcode trong serve.rs, KHÔNG điều khiển
+# bằng config — đừng khai chúng ở đây.
+#
+# [[modules]]
+# id = "xt-pnl"          # `[a-zA-Z0-9_-]`, cùng lúc là tên symbol `opsense_module_<id>_init`
+# path = "modules/xt-pnl.so"   # tuyệt đối (bắt đầu bằng `/`) hoặc tương đối thư mục này
+# enabled = true         # mặc định true

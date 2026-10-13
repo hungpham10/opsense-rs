@@ -38,7 +38,9 @@ async fn spawn_mock(
                     }
                     buf.extend_from_slice(&chunk[..n]);
                 }
-                reqs.lock().unwrap().push(String::from_utf8_lossy(&buf).into_owned());
+                reqs.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf).into_owned());
                 let resp = format!(
                     "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -68,11 +70,7 @@ async fn e2e_disk_grid() {
 
     // HTTP source that produces disk observations
     let url = format!("http://{}/api/v1/query_range", addr);
-    let mut src = HttpSource::new(
-        "disk-usage",
-        &["clock"],
-        &url,
-    );
+    let mut src = HttpSource::new("disk-usage", &["clock"], &url);
     src.bindings = {
         let mut m = HashMap::new();
         m.insert("from_ts".into(), "{{from_ts}}".into());
@@ -84,11 +82,17 @@ async fn e2e_disk_grid() {
     src.timeout_secs = 10;
 
     // Rhai transform running disk_grid_report script
-    let script_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples/prometheus-demo/rhai/disk_grid_report.rhai");
+    let script_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/prometheus-demo/rhai/disk_grid_report.rhai"
+    );
     let transform = RhaiTransform::new_file("disk-grid", &["disk-usage"], script_path);
 
     // Output sink
-    let output = Output { id: "output".into(), inputs: vec!["disk-grid".into()] };
+    let output = Output {
+        id: "output".into(),
+        inputs: vec!["disk-grid".into()],
+    };
     let clock = Clock::new(Duration::from_secs(1)); // 1 second ticks for test
 
     let components: Vec<Arc<dyn Component>> = vec![
@@ -117,11 +121,21 @@ async fn e2e_disk_grid() {
         .station::<Arc<tokio::sync::RwLock<opsense_core::TimeseriesStation>>>("disk-grid")
         .await
         .expect("disk-grid station registered");
-    let obs = station.write().await.query_range(0, i64::MAX).await.unwrap_or_default();
-    let has_band = obs.iter().any(|o| o.metric_id.starts_with("disk_grid_band:"));
+    let obs = station
+        .write()
+        .await
+        .query_range(0, i64::MAX)
+        .await
+        .unwrap_or_default();
+    let has_band = obs
+        .iter()
+        .any(|o| o.metric_id.starts_with("disk_grid_band:"));
     // Accept empty result if script runs but produces no output (script logic may filter all data)
     // The main goal is verifying the pipeline compiles and runs without panic
     if !has_band {
-        eprintln!("WARNING: no disk_grid_band observations found; got: {:?}", obs.iter().map(|o| &o.metric_id).collect::<Vec<_>>());
+        eprintln!(
+            "WARNING: no disk_grid_band observations found; got: {:?}",
+            obs.iter().map(|o| &o.metric_id).collect::<Vec<_>>()
+        );
     }
 }

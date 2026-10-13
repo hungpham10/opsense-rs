@@ -214,7 +214,9 @@ impl Context {
     ///
     /// Cảnh báo: đây là **xoá không thể hoàn tác** — mất lệnh đang mở, cursor
     /// T+N, plan và toàn bộ lịch sử của mọi station trong process.
-    pub async fn clear_all_stations(&self) -> Result<(Vec<(String, StationKind)>, Vec<String>), Error> {
+    pub async fn clear_all_stations(
+        &self,
+    ) -> Result<(Vec<(String, StationKind)>, Vec<String>), Error> {
         let stations: Vec<(String, Station)> = {
             let stations_guard = self.stations.read().await;
             stations_guard
@@ -265,7 +267,13 @@ mod tests {
     use opsense_model::secret::Secret;
 
     fn obs(ts: i64, value: f64) -> Observation {
-        Observation::new(ts, "grid".into(), TelemetryKind::Metric, Signal::Order, value)
+        Observation::new(
+            ts,
+            "grid".into(),
+            TelemetryKind::Metric,
+            Signal::Order,
+            value,
+        )
     }
 
     async fn ctx() -> Context {
@@ -289,7 +297,10 @@ mod tests {
 
         let ts_grid = Arc::new(RwLock::new(grid));
         let ts_candles = Arc::new(RwLock::new(candles));
-        ts_grid.write().await.update_range(&[obs(base, 1.0)], base, base, base);
+        ts_grid
+            .write()
+            .await
+            .update_range(&[obs(base, 1.0)], base, base, base);
         ts_candles
             .write()
             .await
@@ -305,9 +316,24 @@ mod tests {
         let kind = ctx.clear_station("grid").await.expect("clear grid");
         assert_eq!(kind, StationKind::Timeseries);
 
-        assert_eq!(ts_grid.read().await.query_recent(base, base).await.unwrap_or_default().len(), 0);
         assert_eq!(
-            ts_candles.read().await.query_recent(base, base).await.unwrap_or_default().len(),
+            ts_grid
+                .read()
+                .await
+                .query_recent(base, base)
+                .await
+                .unwrap_or_default()
+                .len(),
+            0
+        );
+        assert_eq!(
+            ts_candles
+                .read()
+                .await
+                .query_recent(base, base)
+                .await
+                .unwrap_or_default()
+                .len(),
             1,
             "station khác không được đụng"
         );
@@ -334,17 +360,25 @@ mod tests {
 
         let a = Arc::new(RwLock::new(TimeseriesStation::new(8, Some(3_600))));
         let b = Arc::new(RwLock::new(TimeseriesStation::new(8, Some(3_600))));
-        a.write().await.update_range(&[obs(base, 1.0)], base, base, base);
-        b.write().await.update_range(&[obs(base, 2.0)], base, base, base);
-        ctx.registry("a", Station::Timeseries(a.clone())).await.expect("register a");
-        ctx.registry("b", Station::Timeseries(b.clone())).await.expect("register b");
-
-        let (cleared, failed) = ctx
-            .clear_all_stations()
+        a.write()
             .await
-            .expect("clear all stations");
+            .update_range(&[obs(base, 1.0)], base, base, base);
+        b.write()
+            .await
+            .update_range(&[obs(base, 2.0)], base, base, base);
+        ctx.registry("a", Station::Timeseries(a.clone()))
+            .await
+            .expect("register a");
+        ctx.registry("b", Station::Timeseries(b.clone()))
+            .await
+            .expect("register b");
 
-        assert!(failed.is_empty(), "không station nào được phép hỏng: {failed:?}");
+        let (cleared, failed) = ctx.clear_all_stations().await.expect("clear all stations");
+
+        assert!(
+            failed.is_empty(),
+            "không station nào được phép hỏng: {failed:?}"
+        );
         let mut ids: Vec<&str> = cleared.iter().map(|(id, _)| id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["a", "b"]);
@@ -352,7 +386,12 @@ mod tests {
 
         for st in [&a, &b] {
             assert_eq!(
-                st.read().await.query_recent(base, base).await.unwrap_or_default().len(),
+                st.read()
+                    .await
+                    .query_recent(base, base)
+                    .await
+                    .unwrap_or_default()
+                    .len(),
                 0,
                 "mọi station phải rỗng"
             );
