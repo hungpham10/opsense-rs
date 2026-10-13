@@ -3973,7 +3973,7 @@ dependencies = [
 
 [[package]]
 name = "opsense"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "anyhow",
  "arrow-csv",
@@ -4040,7 +4040,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-components"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "async-trait",
  "csv",
@@ -4060,7 +4060,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-core"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -4089,7 +4089,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-echo"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4101,7 +4101,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-julia"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4111,7 +4111,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-kernel-python"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4121,7 +4121,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-macros"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "inventory",
  "proc-macro2",
@@ -4132,7 +4132,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-mlib"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "aes-gcm",
  "arrow-array",
@@ -4164,7 +4164,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-model"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "async-graphql",
  "async-trait",
@@ -4187,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-proto"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4203,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-qlib"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "async-trait",
  "csv",
@@ -4221,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-rhai"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "async-trait",
  "inventory",
@@ -4243,7 +4243,7 @@ dependencies = [
 
 [[package]]
 name = "opsense-runner"
-version = "1.0.36"
+version = "1.0.37"
 dependencies = [
  "anyhow",
  "arrow-array",
