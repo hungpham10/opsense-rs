@@ -19,7 +19,7 @@ members = [
 exclude = ["examples/hello-mod"]
 
 [workspace.package]
-version = "1.0.38"
+version = "1.0.39"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
