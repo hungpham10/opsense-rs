@@ -11,7 +11,7 @@ use axum::{
     extract::State,
     http::{Request, Response},
     response::sse::{Event, KeepAlive, Sse},
-    routing::{any, get},
+    routing::{any, get, MethodRouter, MethodFilter},
 };
 use tokio::sync::broadcast;
 
@@ -37,8 +37,9 @@ use {opsense_core::Config, opsense_ffi::ffi::ModuleInitFn, std::path::Path};
 /// Registry of loaded API modules.
 pub struct ApiModuleRegistry {
     modules: HashMap<String, Arc<dyn OpsenseModule>>,
+
     #[cfg(feature = "dynamic-modules")]
-    libs: Vec<libloading::Library>, // Keep libraries alive
+    libraries: Vec<libloading::Library>, // Keep libraries alive
 }
 
 impl ApiModuleRegistry {
@@ -46,16 +47,48 @@ impl ApiModuleRegistry {
     pub fn new() -> Self {
         Self {
             modules: HashMap::new(),
+
             #[cfg(feature = "dynamic-modules")]
-            libs: Vec::new(),
+            libraries: Vec::new(),
         }
     }
 
+    /// Validate routes in a manifest.
+    ///
+    /// Checks for:
+    /// - Duplicate `(method, path)` pairs (would cause axum panic at boot)
+    /// - SSE transport with non-GET method (SSE only works with GET)
+    fn validate_routes(manifest: &Manifest) -> Result<(), ModuleError> {
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::new();
+        for route in &manifest.routes {
+            let key = (route.method, route.path.as_str());
+            if !seen.insert(key) {
+                return Err(ModuleError::InitFailed(format!(
+                    "duplicate (method, path) in manifest {}: {:?} {}",
+                    manifest.id, route.method, route.path
+                )));
+            }
+
+            if route.transport == Transport::Sse && route.method != HttpMethod::Get {
+                return Err(ModuleError::InitFailed(format!(
+                    "route {} in manifest {}: SSE transport requires GET method, got {:?}",
+                    route.id, manifest.id, route.method
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Register a built-in module.
-    pub fn register_builtin(&mut self, module: Arc<dyn OpsenseModule>) -> &mut Self {
-        let id = module.manifest().id.clone();
+    pub fn register_builtin(&mut self, module: Arc<dyn OpsenseModule>) -> Result<&mut Self, ModuleError> {
+        let manifest = module.manifest();
+        Self::validate_routes(&manifest)?;
+
+        let id = manifest.id.clone();
         self.modules.insert(id, module);
-        self
+        Ok(self)
     }
 
     /// Load dynamic modules khai báo trong `[[modules]]` (xem [`Config::modules`]).
@@ -116,13 +149,18 @@ impl ApiModuleRegistry {
             let module = DynamicModuleWrapper {
                 vtable: unsafe { Box::from_raw(module_v1) },
             };
+
+            // Validate routes in the loaded module's manifest
+            let manifest = module.manifest();
+            Self::validate_routes(&manifest)?;
+
             let key = mcfg.id.clone();
-            if module.manifest().id != key {
-                tracing::warn!(module = %key, manifest_id = %module.manifest().id,
+            if manifest.id != key {
+                tracing::warn!(module = %key, manifest_id = %manifest.id,
                     "manifest().id khác mcfg.id — registry key theo modules.toml");
             }
             self.modules.insert(key, Arc::new(module));
-            self.libs.push(lib);
+            self.libraries.push(lib);
         }
 
         Ok(())
@@ -149,20 +187,27 @@ impl ApiModuleRegistry {
             let state_for_handler = state.clone();
             let state_for_router = state.clone();
 
-            // Mỗi route mount riêng theo `transport` — REST dùng `any()`, SSE
-            // dùng `get()` vì SSE chỉ hợp với GET (client mở kết nối dài).
+            // Mỗi route mount riêng theo `transport` — REST dùng đúng method,
+            // SSE dùng `get()` vì SSE chỉ hợp với GET (client mở kết nối dài).
             let module_router = Router::new();
             let module_router = manifest.routes.iter().fold(module_router, |r, route| {
                 let path = route.path.clone();
                 match route.transport {
-                    Transport::Rest => r.route(
-                        &path,
-                        any({
-                            let module = module.clone();
-                            let state = state_for_handler.clone();
-                            move |req| module_route_handler(State(state), req, module.clone())
-                        }),
-                    ),
+                    Transport::Rest => {
+                        let method = MethodFilter::try_from(route.method.to_axum())
+                            .expect("HttpMethod should convert to MethodFilter");
+                        r.route(
+                            &path,
+                            MethodRouter::new().on(
+                                method,
+                                any({
+                                    let module = module.clone();
+                                    let state = state_for_handler.clone();
+                                    move |req| module_route_handler(State(state), req, module.clone())
+                                }),
+                            ),
+                        )
+                    }
                     Transport::Sse => r.route(
                         &path,
                         get({
@@ -195,15 +240,15 @@ impl Default for ApiModuleRegistry {
 /// bất cứ id nào khác). Gửi tên bất kỳ — hay để trống — biến mọi request thành
 /// 404 trong im lặng.
 ///
-/// Ưu tiên khớp cả method lẫn path; nếu không có thì chấp nhận chỉ khớp path
-/// (một số module dùng `any`). Không khớp gì thì trả chính `path`, để lỗi
-/// `RouteNotFound` mang đúng tên route thay vì chuỗi rỗng.
+/// Router đã lọc method trước khi tới handler, nên `(method, path)` luôn khớp
+/// duy nhất. `HEAD` không khai báo riêng thì coi như `GET` (axum phục vụ HEAD
+/// qua handler GET, body bị bỏ).
 fn resolve_route_id(manifest: &Manifest, method: HttpMethod, path: &str) -> String {
+    let m = if method == HttpMethod::Head { HttpMethod::Get } else { method };
     manifest
         .routes
         .iter()
-        .find(|r| r.path == path && r.method == method)
-        .or_else(|| manifest.routes.iter().find(|r| r.path == path))
+        .find(|r| r.path == path && r.method == m)
         .map(|r| r.id.clone())
         .unwrap_or_else(|| path.to_string())
 }
@@ -773,8 +818,14 @@ mod tests {
 
     /// Method lệch vẫn khớp theo path — module dùng `any` cần điều này.
     #[test]
-    fn route_id_matches_path_even_when_method_differs() {
+    fn route_id_matches_when_method_matches() {
         let m = repl_manifest();
-        assert_eq!(resolve_route_id(&m, HttpMethod::Get, "/graphql"), "graphql");
+        assert_eq!(resolve_route_id(&m, HttpMethod::Post, "/graphql"), "graphql");
+    }
+
+    #[test]
+    fn route_id_returns_path_when_method_mismatch() {
+        let m = repl_manifest();
+        assert_eq!(resolve_route_id(&m, HttpMethod::Get, "/graphql"), "/graphql");
     }
 }

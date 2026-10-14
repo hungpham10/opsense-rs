@@ -9,7 +9,7 @@ license.workspace = true
 warnings = "deny"
 
 [features]
-default = []
+default = ["lru-shared-memory"]
 # Forwards the optional opsense-mlib persistence backends so `cfg(feature)`
 # works inside this crate. `parquet` maps to the Parquet storage (canonical
 # backend name là "parquet"); `sqlite` maps to a local SQLite file; `redis` maps

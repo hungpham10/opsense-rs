@@ -485,9 +485,7 @@ toàn trong plugin.
 nhận event `error` báo `Data feed out of sync. Skipped N messages.` thay vì im
 lặng mất dữ liệu.
 
-**Qua nginx:** `packaging/nginx/opsense.conf:47` đã có `proxy_buffering off` +
-`proxy_http_version 1.1` ⇒ sẵn sàng. Đừng "tối ưu" bỏ dòng đó, SSE sẽ bị buffer
-hết rồi mới ra.
+**Qua nginx:** `conf/nginx/vhost/04-api.conf` (file image dùng) **chưa có** `proxy_buffering off`. Cần thêm dòng đó vào location `/api/` (kèm `proxy_http_version 1.1` đã có). File `packaging/nginx/opsense.conf` **không image nào dùng** — Earthfile:137 chỉ COPY `conf/nginx/vhost`. Kiểm trước khi deploy.
 
 **Chưa làm:** WebSocket. `broadcast` là một chiều; WS hai chiều cần thêm
 `socket_frame` vào vtable + registry `conn_id -> sender`.
