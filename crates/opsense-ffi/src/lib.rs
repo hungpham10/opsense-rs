@@ -141,9 +141,8 @@ pub struct StreamHandle {
 }
 
 /// HTTP methods supported by module routes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
-#[derive(Default)]
 pub enum HttpMethod {
     #[default]
     Get,
