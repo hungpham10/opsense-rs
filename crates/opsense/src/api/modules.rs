@@ -58,16 +58,29 @@ impl ApiModuleRegistry {
     /// Checks for:
     /// - Duplicate `(method, path)` pairs (would cause axum panic at boot)
     /// - SSE transport with non-GET method (SSE only works with GET)
+    /// - Duplicate shape (e.g. `/x/{a}` + `/x/{b}`) would cause axum panic at boot
     fn validate_routes(manifest: &Manifest) -> Result<(), ModuleError> {
         use std::collections::HashSet;
 
-        let mut seen = HashSet::new();
+        let mut seen_exact = HashSet::new();
+        let mut seen_shape = HashSet::new();
         for route in &manifest.routes {
-            let key = (route.method, route.path.as_str());
-            if !seen.insert(key) {
+            let exact_key = (route.method, route.path.as_str());
+            if !seen_exact.insert(exact_key) {
                 return Err(ModuleError::InitFailed(format!(
                     "duplicate (method, path) in manifest {}: {:?} {}",
                     manifest.id, route.method, route.path
+                )));
+            }
+
+            // Check for duplicate shape — same method, same shape but different param names.
+            // `/x/{a}` and `/x/{b}` are different keys but same shape → axum panic at boot.
+            let shape = Self::path_shape(&route.path);
+            let shape_key = (route.method, shape.clone());
+            if !seen_shape.insert(shape_key) {
+                return Err(ModuleError::InitFailed(format!(
+                    "duplicate (method, path shape) in manifest {}: {:?} {} (shape: {})",
+                    manifest.id, route.method, route.path, shape
                 )));
             }
 
@@ -79,6 +92,25 @@ impl ApiModuleRegistry {
             }
         }
         Ok(())
+    }
+
+    /// Normalize path to shape by replacing `{param}` with `{}`.
+    /// Only used for duplicate detection, NOT for mounting.
+    fn path_shape(path: &str) -> String {
+        let mut out = String::with_capacity(path.len());
+        let mut in_brace = false;
+        for ch in path.chars() {
+            if ch == '{' {
+                in_brace = true;
+                out.push('{');
+                out.push('}');
+            } else if ch == '}' {
+                in_brace = false;
+            } else if !in_brace {
+                out.push(ch);
+            }
+        }
+        out
     }
 
     /// Register a built-in module.
@@ -192,6 +224,7 @@ impl ApiModuleRegistry {
             let module_router = Router::new();
             let module_router = manifest.routes.iter().fold(module_router, |r, route| {
                 let path = route.path.clone();
+                let route_id = route.id.clone();
                 match route.transport {
                     Transport::Rest => {
                         let method = MethodFilter::try_from(route.method.to_axum())
@@ -203,7 +236,8 @@ impl ApiModuleRegistry {
                                 any({
                                     let module = module.clone();
                                     let state = state_for_handler.clone();
-                                    move |req| module_route_handler(State(state), req, module.clone())
+                                    let route_id = route_id.clone();
+                                    move |req| module_route_handler(State(state), req, module.clone(), route_id)
                                 }),
                             ),
                         )
@@ -232,33 +266,12 @@ impl Default for ApiModuleRegistry {
         Self::new()
     }
 }
-
-/// Tra `manifest.routes[].id` cho `(method, path)`.
-///
-/// `route_id` **phải** là id khai báo trong manifest: module tự dispatch dựa
-/// trên id này (`ReplApiModule` chỉ nhận `"graphql"`, trả `RouteNotFound` cho
-/// bất cứ id nào khác). Gửi tên bất kỳ — hay để trống — biến mọi request thành
-/// 404 trong im lặng.
-///
-/// Router đã lọc method trước khi tới handler, nên `(method, path)` luôn khớp
-/// duy nhất. `HEAD` không khai báo riêng thì coi như `GET` (axum phục vụ HEAD
-/// qua handler GET, body bị bỏ).
-fn resolve_route_id(manifest: &Manifest, method: HttpMethod, path: &str) -> String {
-    let m = if method == HttpMethod::Head { HttpMethod::Get } else { method };
-    manifest
-        .routes
-        .iter()
-        .find(|r| r.path == path && r.method == m)
-        .map(|r| r.id.clone())
-        .unwrap_or_else(|| path.to_string())
-}
-
-/// Handler for module routes — converts axum request to HttpRequest, dispatches,
 /// converts response back.
 async fn module_route_handler(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
     module: Arc<dyn OpsenseModule>,
+    route_id: String,
 ) -> impl axum::response::IntoResponse {
     let manifest = module.manifest();
 
@@ -321,7 +334,7 @@ async fn module_route_handler(
         .to_vec();
 
     let http_req = HttpRequest {
-        route_id: resolve_route_id(&manifest, method, &path),
+        route_id,
         method,
         path,
         query,
@@ -770,6 +783,7 @@ unsafe extern "C" fn host_free_ffi(s: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opsense_ffi::RouteSpec;
 
     #[test]
     fn registry_basic() {
@@ -777,55 +791,91 @@ mod tests {
         assert!(reg.modules.is_empty());
     }
 
-    /// Manifest của `ReplApiModule` — route `graphql` dưới prefix `/api/repl`.
-    fn repl_manifest() -> Manifest {
+    /// Helper tạo manifest test.
+    fn manifest_with(routes: Vec<RouteSpec>) -> Manifest {
         Manifest {
-            id: "repl".into(),
+            id: "test-module".into(),
             version: "0".into(),
             builtin: true,
-            prefix: "/api/repl".into(),
-            routes: vec![opsense_ffi::RouteSpec {
-                id: "graphql".into(),
-                method: HttpMethod::Post,
-                path: "/graphql".into(),
-                transport: opsense_ffi::Transport::Rest,
-                source_node: None,
-            }],
+            prefix: "/api/test".into(),
+            routes,
             tools: vec![],
         }
     }
 
-    /// Hồi quy cho bug đã làm CI đỏ: `route_id` từng được hardcode `"handler"`,
-    /// `ReplApiModule` trả `RouteNotFound` ⇒ **mọi** endpoint `/api/repl/*` 404.
-    #[test]
-    fn route_id_matches_manifest_id() {
-        let m = repl_manifest();
-        assert_eq!(
-            resolve_route_id(&m, HttpMethod::Post, "/graphql"),
-            "graphql"
-        );
+    fn rest_route(id: &str, method: HttpMethod, path: &str) -> RouteSpec {
+        RouteSpec {
+            id: id.into(),
+            method,
+            path: path.into(),
+            transport: Transport::Rest,
+            source_node: None,
+        }
     }
 
-    /// Path lạ thì trả chính path để lỗi `RouteNotFound` nói đúng tên route.
+    /// Trùng `(method, path)` bị từ chối ngay lúc đăng ký — ngăn panic axum lúc boot.
     #[test]
-    fn route_id_falls_back_to_path() {
-        let m = repl_manifest();
-        assert_eq!(
-            resolve_route_id(&m, HttpMethod::Post, "/khong-co"),
-            "/khong-co"
-        );
+    fn rejects_duplicate_method_path() {
+        let m = manifest_with(vec![
+            rest_route("a", HttpMethod::Get, "/x"),
+            rest_route("b", HttpMethod::Get, "/x"),
+        ]);
+        let err = ApiModuleRegistry::validate_routes(&m).unwrap_err();
+        assert!(err.to_string().contains("duplicate (method, path)"));
     }
 
-    /// Method lệch vẫn khớp theo path — module dùng `any` cần điều này.
+    /// Cùng path khác method là OK.
     #[test]
-    fn route_id_matches_when_method_matches() {
-        let m = repl_manifest();
-        assert_eq!(resolve_route_id(&m, HttpMethod::Post, "/graphql"), "graphql");
+    fn allows_same_path_different_method() {
+        let m = manifest_with(vec![
+            rest_route("get", HttpMethod::Get, "/x"),
+            rest_route("post", HttpMethod::Post, "/x"),
+        ]);
+        ApiModuleRegistry::validate_routes(&m).expect("cùng path khác method là OK");
+    }
+
+    /// Trùng shape (khác tên param) bị từ chối — `/x/{a}` + `/x/{b}` gây panic axum.
+    #[test]
+    fn rejects_same_shape_different_param_name() {
+        let m = manifest_with(vec![
+            rest_route("a", HttpMethod::Get, "/x/{a}"),
+            rest_route("b", HttpMethod::Get, "/x/{b}"),
+        ]);
+        let err = ApiModuleRegistry::validate_routes(&m).unwrap_err();
+        assert!(err.to_string().contains("duplicate (method, path shape)"));
+    }
+
+    /// Shape khác nhau (khác số segment) là OK.
+    #[test]
+    fn allows_different_shape_same_prefix() {
+        let m = manifest_with(vec![
+            rest_route("a", HttpMethod::Get, "/x/{a}"),
+            rest_route("b", HttpMethod::Get, "/x/{a}/y"),
+        ]);
+        ApiModuleRegistry::validate_routes(&m).expect("shape khác nhau là OK");
+    }
+
+    /// SSE + method != GET bị từ chối.
+    #[test]
+    fn rejects_sse_with_non_get() {
+        let m = manifest_with(vec![
+            RouteSpec {
+                id: "bad".into(),
+                method: HttpMethod::Post,
+                path: "/stream".into(),
+                transport: Transport::Sse,
+                source_node: Some("output".into()),
+            },
+        ]);
+        let err = ApiModuleRegistry::validate_routes(&m).unwrap_err();
+        assert!(err.to_string().contains("SSE transport requires GET"));
     }
 
     #[test]
-    fn route_id_returns_path_when_method_mismatch() {
-        let m = repl_manifest();
-        assert_eq!(resolve_route_id(&m, HttpMethod::Get, "/graphql"), "/graphql");
+    fn path_shape_normalizes_params() {
+        assert_eq!(ApiModuleRegistry::path_shape("/x/{a}/y/{b}"), "/x/{}/y/{}");
+        assert_eq!(ApiModuleRegistry::path_shape("/plain/path"), "/plain/path");
+        assert_eq!(ApiModuleRegistry::path_shape("/{single}"), "/{}");
+        assert_eq!(ApiModuleRegistry::path_shape(""), "");
     }
 }
