@@ -275,13 +275,26 @@ pub enum Transport { Rest, Sse }   // serialize lowercase: "rest" / "sse"
 2 field này) vẫn parse được và ra `Rest`. Nếu mất default thì **mọi** module
 build trước SSE đều không load được.
 
-**Luật khớp `route_id`** (`crates/opsense/src/api/modules.rs`):
+**Luật `route_id`** (`crates/opsense/src/api/modules.rs`):
 
-1. Khớp cả `method` + `path` → trả `route_id`
-2. Chỉ khớp `path` → trả `route_id`
-3. Không khớp gì → trả `path` (để lỗi `RouteNotFound` mang tên route)
+`route_id` là **`RouteSpec.id` khai báo trong manifest**, host gán lúc dựng router
+(`into_router` capture `route.id` vào closure) — **không** phải suy ra từ URI.
 
-⚠️ Bẫy đã gây 404 toàn bộ `/api/repl/*`: `route_id` từng bị hardcode `"handler"`, `ReplApiModule` chỉ nhận `"graphql"`.
+Nhờ vậy:
+- Route có path param (`/ohlc/candles/{broker}/{symbol}`) vẫn nhận đúng id;
+- Request lệch method bị router chặn **405** trước khi tới handler (axum lọc method ở tầng `MethodRouter`).
+- Module dispatch bằng `req.route_id` — ví dụ `ReplApiModule` chỉ nhận `"graphql"`.
+
+⚠️ Bẫy cũ: `route_id` từng bị hardcode `"handler"`, `ReplApiModule` chỉ nhận `"graphql"` ⇒ 404 toàn bộ `/api/repl/*`.
+
+**Validation lúc đăng ký** (`ApiModuleRegistry::validate_routes`):
+
+- Trùng `(method, path)` exact → `InitFailed` (ngăn panic axum lúc boot).
+- Trùng **shape** (`/x/{a}` + `/x/{b}`) → `InitFailed` (ngăn panic `matchit` insert trùng shape lúc boot).
+- SSE + method ≠ `GET` → `InitFailed`.
+
+> Shape = path thay mọi `{param}` thành `{}`. Chỉ dùng để so trùng, **không** dùng làm path mount
+> (phải giữ nguyên tên param để `matchit` parse).
 
 ---
 
@@ -393,27 +406,20 @@ enabled = true
 path = "hello.so"
 ```
 
----
+### Path params
 
-## 12. Build & cấu hình
+Axum 0.8 dùng cú pháp `{param}` trong path (ví dụ `/ohlc/candles/{broker}/{symbol}`).
+Router match thành công và truyền `route_id` là id khai báo trong manifest — **không phải** path đã điền.
 
-| Việc | Cách |
-|---|---|
-| Build module | `cargo build --release -p opsense-mod-hello` (sinh `target/release/libhello.so`) |
-| Đặt `.so` | Theo `[[modules]].path` trong `opsense.conf.toml`, relative to thư mục chứa file config |
-| Cấu hình | `[[modules]]` trong `opsense.conf.toml` — `id`, `builtin`, `enabled`, `path` (field `config` đã xoá) |
-| Bật feature | `opsense/dynamic-modules` ( kéo `libloading` ) |
-| Symbol naming | `opsense_module_<id>_init` — `id` từ `[[modules]]` trong `opsense.conf.toml`, `-` → `_` |
-| `builtin = true` | **Bỏ qua** bởi `load_dynamic` (`modules.rs:74`) — phải tự `register_builtin` |
-
-| Node nguồn SSE | `type = "output"` trong `[[pipeline.components]]` — `#[sink]` (vd station sink) **không** broadcast được |
-| `source_node` | Trỏ tới `id` của node `output`; thiếu ⇒ host trả lỗi, stream rỗng |
+Module nhận `HttpRequest.path` là full path (`/ohlc/candles/binance/BTCUSDT`) và tự tách
+param. **Không có** `params: HashMap` trong `HttpRequest` — thêm field = đổi layout struct FFI
+⇒ ABI bump. Khi nào cần param typed thì làm.
 
 > **Lưu ý:** Crate `hello-mod` là fixture test (`examples/hello-mod/`, `crate-type = ["cdylib"]`). Nó **không** nằm trong workspace `members` để tránh lỗi build musl (`cannot produce cdylib`). Build tay: `cargo build --manifest-path examples/hello-mod/Cargo.toml`.
 
 ---
 
-## 12b. Viết module SSE
+## 12. Build & cấu hình
 
 Route SSE cần **hai phần**: một node `output` trong pipeline làm nguồn, và
 module khai route trỏ tới node đó.

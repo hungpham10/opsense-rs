@@ -211,6 +211,49 @@ impl OpsenseModule for NoStreamImpl {
     }
 }
 
+/// Module test: route có path param (`/ohlc/candles/{broker}/{symbol}`).
+/// `route()` trả về `route_id` để assert từ client HTTP.
+struct ParamRouteModule;
+
+impl OpsenseModule for ParamRouteModule {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            id: "param-test".into(),
+            version: "0".into(),
+            builtin: true,
+            prefix: "/api/param-test".into(),
+            routes: vec![
+                rest_route("candles", "/ohlc/candles/{broker}/{symbol}"),
+                rest_route("ticks", "/ohlc/ticks/{symbol}"),
+            ],
+            tools: vec![],
+        }
+    }
+
+    fn route(
+        &self,
+        req: HttpRequest,
+        _svc: &TenantServices,
+    ) -> BoxFut<'static, Result<HttpResponse, ModuleError>> {
+        Box::pin(async move {
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: req.route_id.into_bytes(),
+            })
+        })
+    }
+
+    fn tool(
+        &self,
+        name: String,
+        _args: serde_json::Value,
+        _svc: &TenantServices,
+    ) -> BoxFut<'static, Result<String, ModuleError>> {
+        Box::pin(async move { Err(ModuleError::RouteNotFound(name)) })
+    }
+}
+
 /// `Config::load` chỉ đọc từ path — ghi file tạm rồi load.
 fn load_config(dir: &std::path::Path) -> Config {
     let path = dir.join("config.toml");
@@ -287,6 +330,7 @@ impl Suite {
         registry.register_builtin(std::sync::Arc::new(SseTestModule)).unwrap();
         registry.register_builtin(std::sync::Arc::new(NoSourceModule)).unwrap();
         registry.register_builtin(std::sync::Arc::new(NoStreamImpl)).unwrap();
+        registry.register_builtin(std::sync::Arc::new(ParamRouteModule)).unwrap();
 
         let router = registry
             .into_router(state.clone())
@@ -344,6 +388,22 @@ async fn sse_module_suite() {
         !got.contains("data:"),
         "module không hỗ trợ SSE không được phát event, thấy:\n{got}"
     );
+
+    // ── 5. Route có path param → route_id là ID KHAI BÁO, không phải path đã điền
+    let res = reqwest::get(format!(
+        "{}/api/param-test/ohlc/candles/binance/BTCUSDT",
+        s.addr
+    ))
+    .await
+    .expect("GET param route");
+    assert_eq!(res.status(), StatusCode::OK, "trước fix: 404 RouteNotFound");
+    assert_eq!(res.text().await.unwrap(), "candles", "trước fix: path thô");
+
+    let res = reqwest::get(format!("{}/api/param-test/ohlc/ticks/BTCUSDT", s.addr))
+        .await
+        .expect("GET param route 2");
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.text().await.unwrap(), "ticks");
 }
 
 /// Đọc SSE trong `window`, trả toàn bộ text đã nhận.
