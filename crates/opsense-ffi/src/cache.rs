@@ -85,7 +85,9 @@ pub trait CacheBackend: Send + Sync + 'static {
 pub struct TenantServices {
     pub tenant_id: i64,
     pub cache: Option<Arc<dyn CacheBackend>>,
-    // mở rộng sau: secret, bucket, db — thêm field vào cuối
+    /// Pool DB của tenant (`None` khi host chưa cấu hình `DB_DSN`).
+    pub db: Option<Arc<dyn crate::db::DbBackend>>,
+    // mở rộng sau: secret, bucket — thêm field vào cuối
 }
 
 /// Wrapper trực tiếp trên `CacheBackend` — giữ NGUYÊN format key

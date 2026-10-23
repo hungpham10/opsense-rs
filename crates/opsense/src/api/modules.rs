@@ -266,6 +266,44 @@ impl Default for ApiModuleRegistry {
         Self::new()
     }
 }
+
+/// Tenant id từ header `X-Tenant-Id`; thiếu/hỏng → `0` (chỉ warn lần đầu).
+fn header_tenant_id(headers: &axum::http::HeaderMap) -> i64 {
+    static MISSING_TENANT_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+    headers
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or_else(|| {
+            if MISSING_TENANT_WARNED.set(()).is_ok() {
+                tracing::warn!("thiếu/parse lỗi X-Tenant-Id → tenant_id=0 (chỉ log lần đầu)");
+            }
+            0
+        })
+}
+
+/// Dựng `TenantServices` per-request: cache + DB của tenant lấy từ resolver.
+fn tenant_services(state: &AppState, tenant_id: i64) -> TenantServices {
+    let cache = state
+        .connector
+        .cache(tenant_id)
+        .map(opsense_mlib::cache::RedisBackend::new);
+
+    let db = state.connector.database(tenant_id).map(|pool| {
+        crate::api::module_db::AnyDbBackend::arc(
+            pool.clone(),
+            state.connector.database_kind(tenant_id),
+        )
+    });
+
+    TenantServices {
+        tenant_id,
+        cache,
+        db,
+    }
+}
+
 /// converts response back.
 async fn module_route_handler(
     State(state): State<AppState>,
@@ -275,30 +313,9 @@ async fn module_route_handler(
 ) -> impl axum::response::IntoResponse {
     let manifest = module.manifest();
 
-    // Extract tenant_id from X-Tenant-Id header
-    static MISSING_TENANT_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let tenant_id = header_tenant_id(req.headers());
 
-    let tenant_id = req
-        .headers()
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or_else(|| {
-            if MISSING_TENANT_WARNED.set(()).is_ok() {
-                tracing::warn!("thiếu/parse lỗi X-Tenant-Id → tenant_id=0 (chỉ log lần đầu)");
-            }
-            0
-        });
-
-    // Build TenantServices with cache backend bound to this tenant
-    let cache_backend = state
-        .connector
-        .cache(tenant_id)
-        .map(opsense_mlib::cache::RedisBackend::new);
-    let services = TenantServices {
-        tenant_id,
-        cache: cache_backend,
-    };
+    let services = tenant_services(&state, tenant_id);
     let method = HttpMethod::from_axum(req.method());
     let path = req
         .uri()
@@ -395,6 +412,7 @@ async fn sse_handler(
     };
 
     // Mở luồng qua FFI — module trả `stream_id` để định danh.
+    let services = tenant_services(&state, header_tenant_id(req.headers()));
     let stream_id = match module
         .stream(
             HttpRequest {
@@ -418,10 +436,7 @@ async fn sse_handler(
                     .collect(),
                 body: vec![],
             },
-            &TenantServices {
-                tenant_id: 0,
-                cache: None,
-            },
+            &services,
         )
         .await
     {

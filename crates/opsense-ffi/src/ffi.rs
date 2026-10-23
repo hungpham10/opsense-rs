@@ -366,6 +366,7 @@ pub trait ModuleExports: super::OpsenseModule {
         let services = services.cloned().unwrap_or(TenantServices {
             tenant_id: 0,
             cache: None,
+            db: None,
         });
 
         // Dispatch based on route_id — check if it's a route or tool
@@ -454,6 +455,7 @@ pub trait ModuleExports: super::OpsenseModule {
         let services = services.cloned().unwrap_or(TenantServices {
             tenant_id: 0,
             cache: None,
+            db: None,
         });
 
         let fut = wrapper.module.stream(req, &services);
@@ -534,11 +536,15 @@ mod tests {
     }
 
     #[test]
-    fn abi_bumped_to_4_for_sse() {
+    fn abi_bumped_to_5_for_tenant_db() {
         // 4 = thêm 3 entry `stream_*` (Option) vào cuối `ModuleV1`. Module
         // build với ABI 3 vẫn dlopen được vì entry mới là `Option` — host
         // check `is_some()` và trả lỗi rõ ràng nếu thiếu.
-        assert_eq!(ABI_VERSION, 4);
+        //
+        // 5 = thêm field `db` vào cuối `TenantServices`. Module build với ABI
+        // 4 vẫn dlopen được nhưng **phải** bump để tránh module cũ đọc sai
+        // offset của struct (module nhận `*const TenantServices` từ host).
+        assert_eq!(ABI_VERSION, 5);
     }
 
     /// Verify the fallback branch works with current_thread runtime.

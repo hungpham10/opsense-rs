@@ -15,6 +15,7 @@
 //! 4. **ABI versioning** — `ABI_VERSION` constant; host refuses mismatched plugins.
 
 pub mod cache;
+pub mod db;
 pub mod error;
 pub mod ffi;
 pub mod host;
@@ -24,13 +25,14 @@ use std::future::Future;
 use std::pin::Pin;
 
 pub use cache::{Cache, CacheBackend, CacheError, Page, TenantServices};
+pub use db::{Db, DbBackend, DbError};
 pub use error::ModuleError;
 pub use ffi::*;
 pub use host::HostServices;
 pub use manifest::*;
 
 /// Current ABI version. Increment when `HostV1` or `ModuleV1` layout changes.
-pub const ABI_VERSION: u32 = 4;
+pub const ABI_VERSION: u32 = 5;
 
 /// Object-safe async return type used throughout the module contract.
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -141,7 +143,9 @@ pub struct StreamHandle {
 }
 
 /// HTTP methods supported by module routes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum HttpMethod {
     #[default]

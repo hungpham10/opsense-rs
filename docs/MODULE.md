@@ -32,6 +32,8 @@ Bật dynamic module: compile với `--features opsense/dynamic-modules` (CI: `.
 
 **Luồng depend**: `opsense` → `opsense-mod` & `opsense-mlib`; crate `opsense-mlib` **có** depend `opsense-mod` (optional, feature `redis`). Không crate nào khác depend `opsense-mod` (SDK độc lập).
 
+**Cast cho DB row**: engine `CastType` / `cast_value` nằm ở `opsense-mlib/src/cast.rs`. Module muốn đọc row đúng kiểu (xem §7) thì **tự depend `opsense-mlib`** — SDK `opsense-ffi` cố ý không kéo mlib vào.
+
 ---
 
 ## 3. Vòng đời module
@@ -138,31 +140,24 @@ pub trait OpsenseModule: Send + Sync + 'static {
 pub struct TenantServices {
     pub tenant_id: i64,
     pub cache: Option<Arc<dyn CacheBackend>>,
+    pub db: Option<Arc<dyn DbBackend>>,
 }
 ```
 
 Host dựng **mỗi request** trong `module_route_handler` (`crates/opsense/src/api/modules.rs`):
 
 ```rust
-static MISSING_TENANT_WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+let tenant_id = header_tenant_id(req.headers());
 
-let tenant_id = req
-    .headers()
-    .get("x-tenant-id")
-    .and_then(|v| v.to_str().ok())
-    .and_then(|s| s.parse::<i64>().ok())
-    .unwrap_or_else(|| {
-        if MISSING_TENANT_WARNED.set(()).is_ok() {
-            tracing::warn!("thiếu/parse lỗi X-Tenant-Id → tenant_id=0 (chỉ log lần đầu)");
-        }
-        0
-    });
-
-let cache_backend = state
-    .connector
-    .cache(tenant_id)
+let cache = state.connector.cache(tenant_id)
     .map(opsense_mlib::cache::RedisBackend::new);
-let services = TenantServices { tenant_id, cache: cache_backend };
+let db = state.connector.database(tenant_id).map(|pool| {
+    crate::api::module_db::AnyDbBackend::arc(
+        pool.clone(),
+        state.connector.database_kind(tenant_id),
+    )
+});
+let services = TenantServices { tenant_id, cache, db };
 module.route(http_req, &services).await
 ```
 
@@ -218,6 +213,108 @@ Key format:
 - `paging[{key}]:data:{id}` → payload
 
 Logic binary search (`lower_bound`/`upper_bound`) **giữ nguyên** từ `opsense-model/src/cache.rs` cũ, nhưng **đã copy vào `opsense-mod/src/cache.rs:9-48`** vì SDK không depend `mlib`.
+
+### `DbBackend` / `Db` — truy vấn DB
+
+`opsense-ffi/src/db.rs`:
+
+```rust
+pub trait DbBackend: Send + Sync + 'static {
+    fn query(&self, sql: &str, params: Vec<Value>) -> BoxFuture<Result<Vec<Value>, DbError>>;
+    fn execute(&self, sql: &str, params: Vec<Value>) -> BoxFuture<Result<u64, DbError>>;
+}
+
+pub enum DbError { Backend(String), Query(String) }
+```
+
+`Db` là wrapper tiện dụng, thêm giải mã row → struct:
+
+```rust
+pub struct Db { backend: Arc<dyn DbBackend> }
+impl Db {
+    pub fn new(backend: Arc<dyn DbBackend>) -> Self
+    pub async fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Value>, DbError>
+    pub async fn query_as<T: DeserializeOwned>(&self, sql, params) -> Result<Vec<T>, DbError>
+    pub async fn query_one<T: DeserializeOwned>(&self, sql, params) -> Result<Option<T>, DbError>
+    pub async fn execute(&self, sql: &str, params: &[Value]) -> Result<u64, DbError>
+}
+```
+
+Contract **không** kéo `sqlx` vào SDK — module gửi SQL text + params JSON, host
+chạy prepared statement trên pool của tenant.
+
+- **Placeholder**: `$1..$n` (Postgres-native). Host tự đổi sang `?` cho MySQL
+  (`rewrite_placeholders_mysql`, có nhân bản param nếu dùng lại `$1`).
+- **Param JSON → SQL**: `null` → NULL, bool → BOOLEAN, số nguyên → BIGINT, số
+  thực → DOUBLE, string → TEXT, mảng byte `0..=255` → BLOB, object → TEXT (JSON
+  đã serialize).
+- **Row → JSON**: object với key là tên cột; `BLOB` encode **base64** (JSON
+  không có kiểu nhị phân).
+- **`NULL` param mang kiểu TEXT** (`Option::<String>::None`); NULL cho cột số
+  nên viết `CAST($n AS BIGINT)`.
+
+> **Giới hạn `sqlx::Any`** (host dùng `AnyPool`): chỉ 9 kiểu được map —
+> `BOOLEAN, SMALLINT, INTEGER, BIGINT, REAL, DOUBLE, TEXT, BLOB, NULL`. Cột
+> `TIMESTAMPTZ`/`NUMERIC`/`JSON`/`UUID` (Postgres) hay `BOOL` (SQLite) làm
+> **hỏng cả row** ngay tại `AnyRow::map_from`. Module tự viết SQL nên hãy chủ
+> động `CAST(col AS TEXT)` khi đọc, và tạo bảng bằng các kiểu nằm trong danh
+> sách trên.
+
+Host impl: `crates/opsense/src/api/module_db.rs` (`AnyDbBackend`).
+
+### Cast kiểu khi đọc row — tái sử dụng `cast.rs` của mlib
+
+Row trả về là JSON thô (`Vec<Value>`); host **không đoán "ý đồ" kiểu** của
+module. Muốn đọc đúng kiểu (int, bool, array of int…) thì module **tự depend
+`opsense-mlib`** và dùng engine cast sẵn có ở
+`crates/opsense-mlib/src/cast.rs`:
+
+```rust
+use opsense_mlib::cast::{cast_value, CastType};
+
+let rows = db
+    .query("SELECT id, active, tags FROM trades WHERE id = $1", &[json!(1)])
+    .await?;
+let row = &rows[0];
+
+let id = cast_value(row["id"].clone(), &CastType::I64); // Some(json!(1))
+let active = cast_value(row["active"].clone(), &CastType::Bool); // 0/1 · "t"/"f" · "true" · "1" → bool
+let qty = cast_value(row["qty"].clone(), &CastType::F64); // "1.5" → 1.5
+```
+
+`CastType`: `U64, U32, I64, I32, F64, F32, String, Bool`. `cast_value` trả
+`Option<Value>` — `None` = không cast được; module tự quyết bỏ item hay lỗi cả
+batch. **Đừng tự viết coercion trong module** — engine đã lo hết
+string ⇄ number ⇄ bool.
+
+Vì sao cần cast thay vì `row["x"].as_i64()`:
+
+| Cần | SQL do module tự viết | Đọc bằng |
+|---|---|---|
+| bool | SQLite lưu `0/1`; PG trả JSON bool | `CastType::Bool` (nhận `0/1`, `"true"/"on"/"1"`, `true/false`) |
+| array of int | `CAST(tags AS TEXT)` → PG `"{1,2,3}"`, SQLite `"1,2,3"` | tách chuỗi rồi `CastType::I64` từng phần tử |
+| số từ TEXT | chính nó | `CastType::F64` / `I64` / `U32`… |
+| BLOB | giữ nguyên | host đã encode **base64** — decode bên module |
+
+Tách array text (PG `{1,2,3}` hoặc CSV `1,2,3`) rồi cast từng phần tử:
+
+```rust
+let tags: Vec<i64> = row["tags"]
+    .as_str()
+    .unwrap_or("")
+    .trim_matches(|c| matches!(c, '{' | '}' | '[' | ']'))
+    .split(',')
+    .filter_map(|s| cast_value(Value::String(s.trim().to_string()), &CastType::I64))
+    .filter_map(|v| v.as_i64())
+    .collect();
+```
+
+**Lỗi điển hình nếu bỏ cast tay bằng `as_i64()`:** SQLite bool là số `0/1`,
+PG `int[]` thành string `"1,2,3"`, `REAL` (f32) khác `DOUBLE` (f64).
+
+> **Chốt lưu trữ:** đừng tạo cột `JSON`/`NUMERIC`/`TIMESTAMPTZ`/`UUID` (PG) hay
+> `BOOL` (SQLite) — không map được qua `sqlx::Any`. Tạo bảng bằng
+> `INTEGER/BIGINT/DOUBLE/TEXT/BLOB` rồi cast lúc đọc như trên.
 
 ---
 
@@ -517,11 +614,15 @@ lặng mất dữ liệu.
 
 ## 13. Ràng buộc ABI cho FFI vtable
 
-`HostV1`/`ModuleV1` thay đổi layout ⇒ bump `ABI_VERSION` (hiện = **4**). Quy tắc giống §13.
+`HostV1`/`ModuleV1` thay đổi layout ⇒ bump `ABI_VERSION` (hiện = **5**). Quy tắc giống §13.
 
 Thêm 3 entry `stream_*` dạng `Option` ở **cuối** `ModuleV1` (ABI 4) là an toàn: module build
 với ABI 3 không có entry này, host check `is_some()` và trả lỗi rõ ràng thay vì gọi
 slot rỗng — không segfault. Đây là mẫu để thêm transport mới sau này.
+
+ABI 5 = thêm field `db` vào **cuối** `TenantServices`. Module build với ABI 4 vẫn
+`dlopen` được nhưng **phải** bump vì module nhận `*const TenantServices` từ host —
+đọc struct cũ nghĩa là đọc sai offset (`cache` ↔ `db`).
 
 ---
 

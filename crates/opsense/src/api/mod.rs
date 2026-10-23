@@ -7,6 +7,7 @@
 //! hoặc `Mutation.reload`.
 
 pub mod admin;
+pub mod module_db;
 pub mod modules;
 pub mod oauth;
 pub mod prometheus;
