@@ -32,6 +32,8 @@ Bật dynamic module: compile với `--features opsense/dynamic-modules` (CI: `.
 
 **Luồng depend**: `opsense` → `opsense-mod` & `opsense-mlib`; crate `opsense-mlib` **có** depend `opsense-mod` (optional, feature `redis`). Không crate nào khác depend `opsense-mod` (SDK độc lập).
 
+**Cast cho DB row**: engine `CastType` / `cast_value` nằm ở `opsense-mlib/src/cast.rs`. Module muốn đọc row đúng kiểu (xem §7) thì **tự depend `opsense-mlib`** — SDK `opsense-ffi` cố ý không kéo mlib vào.
+
 ---
 
 ## 3. Vòng đời module
@@ -259,6 +261,60 @@ chạy prepared statement trên pool của tenant.
 > sách trên.
 
 Host impl: `crates/opsense/src/api/module_db.rs` (`AnyDbBackend`).
+
+### Cast kiểu khi đọc row — tái sử dụng `cast.rs` của mlib
+
+Row trả về là JSON thô (`Vec<Value>`); host **không đoán "ý đồ" kiểu** của
+module. Muốn đọc đúng kiểu (int, bool, array of int…) thì module **tự depend
+`opsense-mlib`** và dùng engine cast sẵn có ở
+`crates/opsense-mlib/src/cast.rs`:
+
+```rust
+use opsense_mlib::cast::{cast_value, CastType};
+
+let rows = db
+    .query("SELECT id, active, tags FROM trades WHERE id = $1", &[json!(1)])
+    .await?;
+let row = &rows[0];
+
+let id = cast_value(row["id"].clone(), &CastType::I64); // Some(json!(1))
+let active = cast_value(row["active"].clone(), &CastType::Bool); // 0/1 · "t"/"f" · "true" · "1" → bool
+let qty = cast_value(row["qty"].clone(), &CastType::F64); // "1.5" → 1.5
+```
+
+`CastType`: `U64, U32, I64, I32, F64, F32, String, Bool`. `cast_value` trả
+`Option<Value>` — `None` = không cast được; module tự quyết bỏ item hay lỗi cả
+batch. **Đừng tự viết coercion trong module** — engine đã lo hết
+string ⇄ number ⇄ bool.
+
+Vì sao cần cast thay vì `row["x"].as_i64()`:
+
+| Cần | SQL do module tự viết | Đọc bằng |
+|---|---|---|
+| bool | SQLite lưu `0/1`; PG trả JSON bool | `CastType::Bool` (nhận `0/1`, `"true"/"on"/"1"`, `true/false`) |
+| array of int | `CAST(tags AS TEXT)` → PG `"{1,2,3}"`, SQLite `"1,2,3"` | tách chuỗi rồi `CastType::I64` từng phần tử |
+| số từ TEXT | chính nó | `CastType::F64` / `I64` / `U32`… |
+| BLOB | giữ nguyên | host đã encode **base64** — decode bên module |
+
+Tách array text (PG `{1,2,3}` hoặc CSV `1,2,3`) rồi cast từng phần tử:
+
+```rust
+let tags: Vec<i64> = row["tags"]
+    .as_str()
+    .unwrap_or("")
+    .trim_matches(|c| matches!(c, '{' | '}' | '[' | ']'))
+    .split(',')
+    .filter_map(|s| cast_value(Value::String(s.trim().to_string()), &CastType::I64))
+    .filter_map(|v| v.as_i64())
+    .collect();
+```
+
+**Lỗi điển hình nếu bỏ cast tay bằng `as_i64()`:** SQLite bool là số `0/1`,
+PG `int[]` thành string `"1,2,3"`, `REAL` (f32) khác `DOUBLE` (f64).
+
+> **Chốt lưu trữ:** đừng tạo cột `JSON`/`NUMERIC`/`TIMESTAMPTZ`/`UUID` (PG) hay
+> `BOOL` (SQLite) — không map được qua `sqlx::Any`. Tạo bảng bằng
+> `INTEGER/BIGINT/DOUBLE/TEXT/BLOB` rồi cast lúc đọc như trên.
 
 ---
 
