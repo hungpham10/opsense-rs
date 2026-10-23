@@ -4,7 +4,7 @@
 //! connection `:memory:` riêng biệt nên CREATE TABLE sẽ "biến mất" ở kết nối
 //! khác. Chỉ cần SQLite — không cần Postgres/MySQL như suite integration khác.
 
-use opsense::api::module_db::AnyDbBackend;
+use opsense::api::modules::AnyDbBackend;
 use opsense_ffi::db::{Db, DbBackend, DbError};
 use opsense_model::resolver::DbKind;
 use serde::Deserialize;

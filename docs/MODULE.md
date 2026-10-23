@@ -152,7 +152,7 @@ let tenant_id = header_tenant_id(req.headers());
 let cache = state.connector.cache(tenant_id)
     .map(opsense_mlib::cache::RedisBackend::new);
 let db = state.connector.database(tenant_id).map(|pool| {
-    crate::api::module_db::AnyDbBackend::arc(
+    crate::api::modules::AnyDbBackend::arc(
         pool.clone(),
         state.connector.database_kind(tenant_id),
     )
@@ -260,7 +260,7 @@ chạy prepared statement trên pool của tenant.
 > động `CAST(col AS TEXT)` khi đọc, và tạo bảng bằng các kiểu nằm trong danh
 > sách trên.
 
-Host impl: `crates/opsense/src/api/module_db.rs` (`AnyDbBackend`).
+Host impl: `crates/opsense/src/api/modules.rs` (`AnyDbBackend`).
 
 ### Cast kiểu khi đọc row — tái sử dụng `cast.rs` của mlib
 
@@ -589,6 +589,24 @@ nhận event `error` báo `Data feed out of sync. Skipped N messages.` thay vì 
 lặng mất dữ liệu.
 
 **Qua nginx:** `conf/nginx/vhost/04-api.conf` (file image dùng) **chưa có** `proxy_buffering off`. Cần thêm dòng đó vào location `/api/` (kèm `proxy_http_version 1.1` đã có). File `packaging/nginx/opsense.conf` **không image nào dùng** — Earthfile:137 chỉ COPY `conf/nginx/vhost`. Kiểm trước khi deploy.
+
+**Build `.so` — phải cùng toolchain với host.** Module `.so` dùng chung
+`tokio`, allocator và layout kiểu dữ liệu với host, nên **rustc của module phải
+khớp host** (`rust-version` workspace hiện `1.94`). Build lệch phiên bản đã gây
+hỏng ABI lúc runtime (gặp panic/OOM trong `DbError::fmt` khi host `1.94.1` nạp
+module build bằng rustc mới hơn). Cách chuẩn: build trong container
+`rust:1.94-slim-bookworm` (khớp host), **không** dùng rustc mới hơn của máy local.
+
+**Vòng đời `.so` — host giữ `Library` sống tới hết process.** `into_router`
+nhận registry và `std::mem::forget(libraries)` — vì drop `Library` = `dlclose` =
+unmap code section ⇒ request kế tiếp nhảy vào vtable cũ ⇒ SIGSEGV. Module **không
+tự unload**; muốn "reload" module phải restart process.
+
+**Module `.so` link bản `tokio` riêng.** `drive()` block_on future của module
+trên thread có runtime-context của bản tokio *trong .so*, nên `sqlx::rt::spawn`
+(link trong host) không thấy context. Host bọc các service async (DB…) để tự
+spawn sang **runtime host** đã capture lúc dựng; module chỉ `await` future host
+trả về, **không** tự gọi `tokio::spawn`/`Handle::current()` cho việc của host.
 
 **Chưa làm:** WebSocket. `broadcast` là một chiều; WS hai chiều cần thêm
 `socket_frame` vào vtable + registry `conn_id -> sender`.

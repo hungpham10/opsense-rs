@@ -383,10 +383,9 @@ pub trait ModuleExports: super::OpsenseModule {
                     let err = ModuleError::Internal(format!("response serialize: {e}"));
                     serde_json::to_string(&super::HttpResponse::from(err)).unwrap()
                 }),
-                Err(e) => serde_json::to_string(&super::HttpResponse::from(ModuleError::Internal(
-                    format!("panic: {e:?}"),
-                )))
-                .unwrap(),
+                // `drive` trả `Result<_, ModuleError>` của chính module — giữ
+                // nguyên status (400/404/…) thay vì bọc thành 500 như panic.
+                Err(e) => serde_json::to_string(&super::HttpResponse::from(e)).unwrap(),
             }
         } else {
             // Tool call: args are in req.body as JSON
