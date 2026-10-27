@@ -273,6 +273,193 @@ impl Admin {
 
 #[cfg(test)]
 mod tests {
-    // Smoke tests cần DB thật — gated theo `#[ignore]`, chạy qua
-    // `cargo test -- --ignored` khi có envs (DB_DSN, REDIS_DSN, MASTER_KEY).
+    use crate::entities::admin::sitemap::Site;
+    use std::sync::Arc;
+    use chrono::Utc;
+
+    use crate::entities::admin::Admin;
+    use crate::resolver::Resolver;
+    use crate::secret::Secret;
+
+    static TEST_ENV: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+    fn setup_env() {
+        TEST_ENV.get_or_init(|| {
+            let _db = std::env::var("DB_DSN").expect(
+                "DB_DSN must be set (e.g. postgres://postgres:rootroot@127.0.0.1:5432/test)",
+            );
+            let _redis = std::env::var("REDIS_DSN")
+                .expect("REDIS_DSN must be set (e.g. redis://127.0.0.1:6379)");
+            let _master_key = std::env::var("MASTER_KEY").expect(
+                "MASTER_KEY must be set (32 bytes for AES-256-GCM)",
+            );
+        });
+    }
+
+    async fn create_admin() -> Admin {
+        let secret = Arc::new(Secret::new().await.unwrap());
+        let resolver = Arc::new(Resolver::new(secret).await.unwrap());
+        Admin::new(&resolver)
+    }
+
+    async fn setup_tenant(db: &sqlx::AnyPool, tenant_id: i64) {
+        // Insert tenant if table exists (quá trình test cần bảng sys_tenant đã tạo)
+        let _ = sqlx::query(
+            "INSERT INTO sys_tenant (host, id) VALUES ($1, $2) ON CONFLICT (host) DO NOTHING",
+        )
+        .bind(format!("test.unit.local.{}", tenant_id))
+        .bind(tenant_id)
+        .execute(db)
+        .await;
+    }
+
+    async fn cleanup_sitemap_data(db: &sqlx::AnyPool, tenant_id: i64) {
+        let _ = sqlx::query("DELETE FROM sys_sitemap WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(db)
+            .await;
+        let _ = sqlx::query("DELETE FROM sys_filemap WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .execute(db)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_insert_and_list_sites() {
+        setup_env();
+        let admin = create_admin().await;
+        let db = admin.resolver.database(1).expect("DB pool for tenant 1");
+        let tenant_id: i64 = 200001;
+
+        cleanup_sitemap_data(db, tenant_id).await;
+        setup_tenant(db, tenant_id).await;
+
+        let sites = vec![
+            Site {
+                loc: "/home".to_string(),
+                freq: "daily".to_string(),
+                priority: 1.0,
+                last_mod: Utc::now(),
+            },
+            Site {
+                loc: "/about".to_string(),
+                freq: "weekly".to_string(),
+                priority: 0.5,
+                last_mod: Utc::now(),
+            },
+        ];
+
+        // Insert sites
+        admin
+            .insert_or_update_sites(tenant_id, sites.clone())
+            .await
+            .expect("insert_or_update_sites should succeed");
+
+        // List sites back
+        let listed = admin.list_sites(tenant_id).await.expect("list_sites should succeed");
+        assert_eq!(listed.len(), 2, "Should list 2 sites");
+
+        let locs: Vec<&str> = listed.iter().map(|s| s.loc.as_str()).collect();
+        assert!(locs.contains(&"/home"), "Should contain /home");
+        assert!(locs.contains(&"/about"), "Should contain /about");
+
+        cleanup_sitemap_data(db, tenant_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_update_sites() {
+        setup_env();
+        let admin = create_admin().await;
+        let db = admin.resolver.database(1).expect("DB pool for tenant 1");
+        let tenant_id: i64 = 200002;
+
+        cleanup_sitemap_data(db, tenant_id).await;
+        setup_tenant(db, tenant_id).await;
+
+        let initial = vec![Site {
+            loc: "/page".to_string(),
+            freq: "monthly".to_string(),
+            priority: 0.3,
+            last_mod: Utc::now(),
+        }];
+        admin
+            .insert_or_update_sites(tenant_id, initial.clone())
+            .await
+            .expect("initial insert should succeed");
+
+        // Update with same loc but different values
+        let updated = vec![Site {
+            loc: "/page".to_string(),
+            freq: "daily".to_string(),
+            priority: 0.9,
+            last_mod: Utc::now(),
+        }];
+        admin
+            .insert_or_update_sites(tenant_id, updated.clone())
+            .await
+            .expect("update should succeed");
+
+        let listed = admin.list_sites(tenant_id).await.expect("list_sites should succeed");
+        assert_eq!(listed.len(), 1, "Should still have 1 site after update");
+        assert_eq!(listed[0].freq, "daily", "freq should be updated to daily");
+        assert_eq!(listed[0].priority, 0.9, "priority should be updated to 0.9");
+
+        cleanup_sitemap_data(db, tenant_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_get_full_path() {
+        setup_env();
+        let admin = create_admin().await;
+        let db = admin.resolver.database(1).expect("DB pool for tenant 1");
+        let tenant_id: i64 = 200003;
+
+        cleanup_sitemap_data(db, tenant_id).await;
+        setup_tenant(db, tenant_id).await;
+
+        // Insert file mapping
+        let _ = sqlx::query(
+            "INSERT INTO sys_filemap (tenant_id, src, dest) VALUES ($1, $2, $3)",
+        )
+        .bind(tenant_id)
+        .bind("/doc/report.pdf")
+        .bind("/s3/bucket/report.pdf")
+        .execute(db)
+        .await
+        .expect("insert filemap should succeed");
+
+        // Resolve path
+        let resolved = admin
+            .get_full_path(tenant_id, "/doc/report.pdf")
+            .await
+            .expect("get_full_path should succeed");
+        assert_eq!(resolved, "/s3/bucket/report.pdf", "Should resolve to dest path");
+
+        // Non-existent path should return error
+        let result = admin.get_full_path(tenant_id, "/nonexistent.pdf").await;
+        assert!(result.is_err(), "get_full_path for non-existent path should fail");
+
+        cleanup_sitemap_data(db, tenant_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_sites_empty() {
+        setup_env();
+        let admin = create_admin().await;
+        let db = admin.resolver.database(1).expect("DB pool for tenant 1");
+        let tenant_id: i64 = 200004;
+
+        cleanup_sitemap_data(db, tenant_id).await;
+        setup_tenant(db, tenant_id).await;
+
+        // No sites inserted
+        let sites = admin.list_sites(tenant_id).await.expect("list_sites should succeed");
+        assert!(sites.is_empty(), "Should return empty list when no sites");
+
+        cleanup_sitemap_data(db, tenant_id).await;
+    }
 }
