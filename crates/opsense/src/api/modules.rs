@@ -11,7 +11,7 @@ use axum::{
     extract::State,
     http::{Request, Response},
     response::sse::{Event, KeepAlive, Sse},
-    routing::{any, get, MethodRouter, MethodFilter},
+    routing::{MethodFilter, MethodRouter, any, get},
 };
 use base64::Engine as _;
 use serde_json::{Map, Value};
@@ -120,7 +120,10 @@ impl ApiModuleRegistry {
     }
 
     /// Register a built-in module.
-    pub fn register_builtin(&mut self, module: Arc<dyn OpsenseModule>) -> Result<&mut Self, ModuleError> {
+    pub fn register_builtin(
+        &mut self,
+        module: Arc<dyn OpsenseModule>,
+    ) -> Result<&mut Self, ModuleError> {
         let manifest = module.manifest();
         Self::validate_routes(&manifest)?;
 
@@ -250,7 +253,14 @@ impl ApiModuleRegistry {
                                     let module = module.clone();
                                     let state = state_for_handler.clone();
                                     let route_id = route_id.clone();
-                                    move |req| module_route_handler(State(state), req, module.clone(), route_id)
+                                    move |req| {
+                                        module_route_handler(
+                                            State(state),
+                                            req,
+                                            module.clone(),
+                                            route_id,
+                                        )
+                                    }
                                 }),
                             ),
                         )
@@ -1085,15 +1095,13 @@ mod tests {
     /// SSE + method != GET bị từ chối.
     #[test]
     fn rejects_sse_with_non_get() {
-        let m = manifest_with(vec![
-            RouteSpec {
-                id: "bad".into(),
-                method: HttpMethod::Post,
-                path: "/stream".into(),
-                transport: Transport::Sse,
-                source_node: Some("output".into()),
-            },
-        ]);
+        let m = manifest_with(vec![RouteSpec {
+            id: "bad".into(),
+            method: HttpMethod::Post,
+            path: "/stream".into(),
+            transport: Transport::Sse,
+            source_node: Some("output".into()),
+        }]);
         let err = ApiModuleRegistry::validate_routes(&m).unwrap_err();
         assert!(err.to_string().contains("SSE transport requires GET"));
     }

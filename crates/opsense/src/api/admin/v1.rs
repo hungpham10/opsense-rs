@@ -11,7 +11,7 @@ use tracing::error;
 
 use opsense_ffi::cache::Cache;
 use opsense_mlib::cache::RedisBackend;
-use opsense_model::entities::admin::{AuthConfig, Jwt, Tenant, Token, UserTokenInfo};
+use opsense_model::entities::admin::{AuthConfig, Jwt, Site, Tenant, Token, UserTokenInfo};
 
 use crate::api::AppState;
 use crate::api::admin::{AdminHeaders, require_self_or_admin};
@@ -84,6 +84,7 @@ pub fn routes() -> Router<AppState> {
         .route("/tenant/{host}/id", get(get_tenant_id))
         .route("/tenant/{host}/auth-config", get(get_tenant_auth_config))
         .route("/files/{*path}", get(fetch_file))
+        .route("/sitemap", get(list_sites_api).post(insert_or_update_sites_api))
         .route("/tokens/generics/{name}", get(get_token).post(put_token))
         .route(
             "/tokens/users",
@@ -398,11 +399,20 @@ async fn fetch_file(
     let host = host.hostname();
     let key = format!("seo_file:{}:{}", host, path);
 
-    // Fallback chỉ dùng path người dùng truyền — Admin chưa có `get_full_path`.
-    // Lưu path đã resolve vào cache để lần sau khỏi gọi lại DB.
-    let path_in_str = match cache.get(&key).await {
-        Ok(value) => value,
-        Err(_) => format!("{}/{}", host, path),
+    // Resolve full path via Admin entity (sys_filemap), fallback to {host}/{path} if not found.
+    let path_in_str = match app_state
+        .admin_entity
+        .get_full_path(tenant_id, &path)
+        .await
+    {
+        Ok(dest) => dest,
+        Err(_) => {
+            // Không có mapping trong DB → dùng path thô như cũ
+            match cache.get(&key).await {
+                Ok(value) => value,
+                Err(_) => format!("{}/{}", host, path),
+            }
+        }
     };
 
     let bucket = app_state.secret.get("S3_BUCKET", "/").await.map_err(|_| {
@@ -468,3 +478,61 @@ async fn fetch_file(
             )
         })
 }
+
+// --------------------------------------------------------------
+// SITEMAP handlers
+// --------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct SitemapUpsertRequest {
+    pub sites: Vec<Site>,
+}
+
+#[derive(Serialize)]
+pub struct SitemapListResponse {
+    pub sites: Vec<Site>,
+}
+
+async fn list_sites_api(
+    State(app_state): State<AppState>,
+    AdminHeaders { tenant_id, .. }: AdminHeaders,
+) -> impl IntoResponse {
+    match app_state
+        .admin_entity
+        .list_sites(tenant_id.into())
+        .await
+    {
+        Ok(sites) => (
+            StatusCode::OK,
+            JsonResponse(SitemapListResponse { sites }),
+        ),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            JsonResponse(SitemapListResponse {
+                sites: vec![],
+            }),
+        ),
+    }
+}
+
+async fn insert_or_update_sites_api(
+    State(app_state): State<AppState>,
+    AdminHeaders { tenant_id, .. }: AdminHeaders,
+    JsonRequest(payload): JsonRequest<SitemapUpsertRequest>,
+) -> impl IntoResponse {
+    match app_state
+        .admin_entity
+        .insert_or_update_sites(tenant_id.into(), payload.sites)
+        .await
+    {
+        Ok(_) => Ok(StatusCode::OK),
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            JsonResponse(SitemapListResponse {
+                sites: vec![],
+            }),
+        )),
+    }
+}
+
+

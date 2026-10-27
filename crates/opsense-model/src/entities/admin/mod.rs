@@ -17,6 +17,7 @@ mod errors;
 mod helpers;
 mod jwt;
 mod session;
+mod sitemap;
 mod tenant;
 mod token;
 
@@ -27,10 +28,11 @@ use opsense_mlib::lru::LruCache;
 pub use errors::AdminError;
 pub use helpers::sha256_hex;
 pub use jwt::Jwt;
+pub use sitemap::{FileMap, Site};
 pub use tenant::{AuthConfig, Tenant};
 pub use token::{Token, UserTokenInfo};
 
-use crate::resolver::Resolver;
+use crate::resolver::{DbKind, Resolver};
 
 pub struct Admin {
     resolver: Arc<Resolver>,
@@ -157,6 +159,115 @@ impl Admin {
         let key = helpers::get_master_key().await?;
         decrypt(&key, &encrypted_bytes)
             .map_err(|e| AdminError::Other(format!("Decrypt failed: {e}")))
+    }
+
+    // --------------------------------------------------------------
+    // Sitemap & file-mapping methods (admin entity)
+    // --------------------------------------------------------------
+
+    /// Upsert nhiều dòng sitemap (sys_sitemap) cho tenant.
+    pub async fn insert_or_update_sites(
+        &self,
+        tenant_id: i64,
+        sites: Vec<Site>,
+    ) -> Result<(), AdminError> {
+        let pool = self.dbt(tenant_id)?;
+        let mut conn = pool.acquire().await?;
+
+        for site in sites {
+            let created_at = helpers::format_dt_for_db(site.last_mod);
+            let updated_at = created_at.clone();
+
+            let sql = match self.kind(tenant_id) {
+                DbKind::Postgres => {
+                    concat!(
+                        "INSERT INTO sys_sitemap (tenant_id, created_at, updated_at, loc, freq, priority) VALUES (",
+                        "$1::timestamptz, $2::timestamptz, $3::timestamptz, $4, $5, $6)",
+                        " ON CONFLICT (tenant_id, loc)",
+                        " DO UPDATE SET updated_at = EXCLUDED.updated_at, freq = EXCLUDED.freq, priority = EXCLUDED.priority",
+                    )
+                }
+                DbKind::MySql => {
+                    concat!(
+                        "INSERT INTO sys_sitemap (tenant_id, created_at, updated_at, loc, freq, priority) VALUES (",
+                        "?, ?, ?, ?, ?, ?)",
+                        " ON DUPLICATE KEY UPDATE updated_at = VALUES(updated_at), freq = VALUES(freq), priority = VALUES(priority)",
+                    )
+                }
+                DbKind::Sqlite | DbKind::Unknown => {
+                    concat!(
+                        "INSERT INTO sys_sitemap (tenant_id, created_at, updated_at, loc, freq, priority) VALUES (",
+                        "?, ?, ?, ?, ?, ?)",
+                        " ON CONFLICT (tenant_id, loc) DO UPDATE SET",
+                        "   updated_at = excluded.updated_at,",
+                        "   freq = excluded.freq,",
+                        "   priority = excluded.priority",
+                    )
+                }
+            };
+
+            sqlx::query(sql)
+                .bind(tenant_id)
+                .bind(created_at)
+                .bind(updated_at)
+                .bind(&site.loc)
+                .bind(&site.freq)
+                .bind(site.priority)
+                .execute(&mut *conn)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Lấy danh sách sitemap hiện tại của tenant.
+    pub async fn list_sites(&self, tenant_id: i64) -> Result<Vec<Site>, AdminError> {
+        use sqlx::Row;
+        let pool = self.dbt(tenant_id)?;
+        let mut conn = pool.acquire().await?;
+
+        let rows = sqlx::query(
+            "SELECT loc, freq, priority, created_at FROM sys_sitemap WHERE tenant_id = ? ORDER BY loc",
+        )
+        .bind(tenant_id)
+        .fetch_all(&mut *conn)
+        .await?;
+
+        let mut sites = Vec::with_capacity(rows.len());
+        for row in rows {
+            let loc: String = row.try_get::<String, _>(0)?;
+            let freq: String = row.try_get::<String, _>(1)?;
+            let priority: f64 = row.try_get::<f64, _>(2)?;
+            let created_at: Option<String> = row.try_get::<Option<String>, _>(3)?;
+            let last_mod = helpers::parse_dt(created_at)?.unwrap_or_else(|| chrono::Utc::now());
+
+            sites.push(Site { loc, freq, priority, last_mod });
+        }
+        Ok(sites)
+    }
+
+    /// Resolve file path via sys_filemap (src -> dest). Trả về original path nếu không có ánh xạ.
+    pub async fn get_full_path(
+        &self,
+        tenant_id: i64,
+        path: &str,
+    ) -> Result<String, AdminError> {
+        use sqlx::Row;
+        let pool = self.dbt(tenant_id)?;
+        let mut conn = pool.acquire().await?;
+
+        let dest: Option<String> = sqlx::query(
+            "SELECT dest FROM sys_filemap WHERE tenant_id = ? AND src = ?",
+        )
+        .bind(tenant_id)
+        .bind(path)
+        .fetch_optional(&mut *conn)
+        .await?
+        .map(|row| row.try_get::<String, _>("dest"))
+        .transpose()?;
+
+        dest.ok_or_else(|| {
+            AdminError::Other(format!("Not found path {path} for tenant {tenant_id}"))
+        })
     }
 }
 

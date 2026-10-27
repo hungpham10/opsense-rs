@@ -127,9 +127,11 @@ pub async fn routes(app_state: AppState, cfg: &Config, config_dir: &Path) -> Res
     // Register built-in modules
     #[cfg(feature = "repl")]
     {
-        registry.register_builtin(Arc::new(crate::api::repl::adapter::ReplApiModule::new(
-            app_state.clone(),
-        ))).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        registry
+            .register_builtin(Arc::new(crate::api::repl::adapter::ReplApiModule::new(
+                app_state.clone(),
+            )))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     }
 
     // Register admin and oauth as built-in modules (they're always available)

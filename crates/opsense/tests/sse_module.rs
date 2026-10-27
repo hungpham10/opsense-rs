@@ -327,10 +327,18 @@ impl Suite {
         let state = AppState::new(&cfg).await.expect("AppState::new");
 
         let mut registry = ApiModuleRegistry::new();
-        registry.register_builtin(std::sync::Arc::new(SseTestModule)).unwrap();
-        registry.register_builtin(std::sync::Arc::new(NoSourceModule)).unwrap();
-        registry.register_builtin(std::sync::Arc::new(NoStreamImpl)).unwrap();
-        registry.register_builtin(std::sync::Arc::new(ParamRouteModule)).unwrap();
+        registry
+            .register_builtin(std::sync::Arc::new(SseTestModule))
+            .unwrap();
+        registry
+            .register_builtin(std::sync::Arc::new(NoSourceModule))
+            .unwrap();
+        registry
+            .register_builtin(std::sync::Arc::new(NoStreamImpl))
+            .unwrap();
+        registry
+            .register_builtin(std::sync::Arc::new(ParamRouteModule))
+            .unwrap();
 
         let router = registry
             .into_router(state.clone())
